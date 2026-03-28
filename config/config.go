@@ -155,14 +155,14 @@ func DefaultConfig() *Config {
 		PoolMinPerProtocol: 10,   // 每协议最少10个
 
 		// 延迟标准配置
-		MaxLatencyMs:          2000, // 标准2秒
-		MaxLatencyEmergency:   3000, // 紧急3秒
-		MaxLatencyHealthy:     1500, // 健康1.5秒
+		MaxLatencyMs:          2500, // 标准2.5秒
+		MaxLatencyEmergency:   4000, // 紧急4秒
+		MaxLatencyHealthy:     2000, // 健康2秒
 		MaxLatencyDegradation: 5000, // 降级5秒
 
 		// 验证配置
 		ValidateConcurrency: 300,
-		ValidateTimeout:     8,
+		ValidateTimeout:     10, // 从8秒增加到10秒
 		ValidateURL:         "http://www.gstatic.com/generate_204",
 
 		// 健康检查配置
@@ -350,7 +350,8 @@ func (c *Config) GetLatencyThreshold(poolStatus string) int {
 	case "critical":
 		return c.MaxLatencyEmergency
 	case "warning":
-		return c.MaxLatencyMs
+		// warning状态使用紧急标准，加快填充速度
+		return c.MaxLatencyEmergency
 	case "healthy":
 		return c.MaxLatencyHealthy
 	default:

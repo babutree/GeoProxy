@@ -159,6 +159,10 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 	// 严格验证并尝试入池
 	addedCount := 0
 	validCount := 0
+	rejectedNoExit := 0
+	rejectedLatency := 0
+	rejectedGeo := 0
+	rejectedFull := 0
 
 	for result := range validate.ValidateStream(candidates) {
 		if !result.Valid {
@@ -172,8 +176,15 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 		cfg := config.Get()
 		maxLatency := cfg.GetLatencyThreshold(status.State)
 
-		// 必须满足：有出口IP、有位置、延迟达标
-		if result.ExitIP == "" || result.ExitLocation == "" || latencyMs > maxLatency {
+		// 检查：有出口IP、有位置
+		if result.ExitIP == "" || result.ExitLocation == "" {
+			rejectedNoExit++
+			continue
+		}
+
+		// 检查：延迟达标
+		if latencyMs > maxLatency {
+			rejectedLatency++
 			continue
 		}
 
@@ -186,8 +197,19 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 			Latency:      latencyMs,
 		}
 
-		if added, _ := poolMgr.TryAddProxy(proxyToAdd); added {
+		if added, reason := poolMgr.TryAddProxy(proxyToAdd); added {
 			addedCount++
+		} else if reason == "slots_full" {
+			rejectedFull++
+		} else if len(result.ExitLocation) >= 2 {
+			// 检查是否被地理过滤
+			countryCode := result.ExitLocation[:2]
+			for _, blocked := range cfg.BlockedCountries {
+				if countryCode == blocked {
+					rejectedGeo++
+					break
+				}
+			}
 		}
 
 		// 如果是紧急模式且已达到最小要求，停止验证
@@ -208,8 +230,9 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 
 	// 最终状态
 	finalStatus, _ := poolMgr.GetStatus()
-	log.Printf("[main] 填充完成: 验证%d 通过%d 入池%d | 最终状态: %s HTTP=%d SOCKS5=%d",
+	log.Printf("[main] 填充完成: 验证%d 通过%d 入池%d | 拒绝[无出口:%d 延迟:%d 地理:%d 满:%d] | 最终: %s HTTP=%d SOCKS5=%d",
 		len(candidates), validCount, addedCount,
+		rejectedNoExit, rejectedLatency, rejectedGeo, rejectedFull,
 		finalStatus.State, finalStatus.HTTP, finalStatus.SOCKS5)
 }
 
