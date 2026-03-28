@@ -1,12 +1,16 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -35,16 +39,63 @@ func (s *Server) Start() error {
 	if s.mode == "lowest-latency" {
 		modeDesc = "最低延迟"
 	}
-	log.Printf("proxy server listening on %s [%s]", s.port, modeDesc)
+	authStatus := "无认证"
+	if s.cfg.ProxyAuthEnabled {
+		authStatus = fmt.Sprintf("需认证 (用户: %s)", s.cfg.ProxyAuthUsername)
+	}
+	log.Printf("proxy server listening on %s [%s] [%s]", s.port, modeDesc, authStatus)
 	return http.ListenAndServe(s.port, s)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 认证检查（如果启用）
+	if s.cfg.ProxyAuthEnabled {
+		if !s.checkAuth(r) {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="GoProxy"`)
+			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+			return
+		}
+	}
+	
 	if r.Method == http.MethodConnect {
 		s.handleTunnel(w, r)
 	} else {
 		s.handleHTTP(w, r)
 	}
+}
+
+// checkAuth 验证代理 Basic Auth
+func (s *Server) checkAuth(r *http.Request) bool {
+	auth := r.Header.Get("Proxy-Authorization")
+	if auth == "" {
+		return false
+	}
+	
+	// 解析 Basic Auth
+	const prefix = "Basic "
+	if !strings.HasPrefix(auth, prefix) {
+		return false
+	}
+	
+	decoded, err := base64.StdEncoding.DecodeString(auth[len(prefix):])
+	if err != nil {
+		return false
+	}
+	
+	credentials := strings.SplitN(string(decoded), ":", 2)
+	if len(credentials) != 2 {
+		return false
+	}
+	
+	username := credentials[0]
+	password := credentials[1]
+	
+	// 验证用户名和密码
+	usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(s.cfg.ProxyAuthUsername)) == 1
+	passwordHash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
+	passwordMatch := subtle.ConstantTimeCompare([]byte(passwordHash), []byte(s.cfg.ProxyAuthPasswordHash)) == 1
+	
+	return usernameMatch && passwordMatch
 }
 
 // handleHTTP 处理普通 HTTP 请求（带自动重试）

@@ -556,15 +556,24 @@ func (s *Storage) DeleteInvalid(maxFailCount int) (int64, error) {
 	return res.RowsAffected()
 }
 
-// DeleteChinaMainland 删除中国大陆出口的代理（保留香港）
-func (s *Storage) DeleteChinaMainland() (int64, error) {
-	// 删除 exit_location 以 "CN " 开头的代理（CN后面有空格表示是城市）
-	// 香港是 "HK Hong Kong" 或 "HK" 开头，不会被删除
-	res, err := s.db.Exec(`DELETE FROM proxies WHERE exit_location LIKE 'CN %'`)
-	if err != nil {
-		return 0, err
+// DeleteBlockedCountries 删除指定国家代码出口的代理
+func (s *Storage) DeleteBlockedCountries(countryCodes []string) (int64, error) {
+	if len(countryCodes) == 0 {
+		return 0, nil
 	}
-	return res.RowsAffected()
+	
+	var totalDeleted int64
+	for _, code := range countryCodes {
+		// exit_location 格式：如 "CN Beijing" 或 "HK Hong Kong"
+		// 使用 LIKE 'CODE %' 来匹配国家代码（后面有空格表示有城市信息）
+		res, err := s.db.Exec(`DELETE FROM proxies WHERE exit_location LIKE ?`, code+" %")
+		if err != nil {
+			return totalDeleted, err
+		}
+		affected, _ := res.RowsAffected()
+		totalDeleted += affected
+	}
+	return totalDeleted, nil
 }
 
 // DeleteWithoutExitInfo 删除没有出口信息的代理

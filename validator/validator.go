@@ -20,6 +20,7 @@ type Validator struct {
 	timeout       time.Duration
 	validateURL   string
 	maxResponseMs int
+	cfg           *config.Config
 }
 
 func concurrencyBuffer(total, concurrency int) int {
@@ -40,6 +41,7 @@ func New(concurrency, timeoutSec int, validateURL string) *Validator {
 		timeout:       time.Duration(timeoutSec) * time.Second,
 		validateURL:   validateURL,
 		maxResponseMs: maxMs,
+		cfg:           cfg,
 	}
 }
 
@@ -160,12 +162,13 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		return false, latency, exitIP, exitLocation
 	}
 	
-	// 过滤中国大陆出口（香港的countryCode是HK，不是CN）
-	if len(exitLocation) >= 2 {
+	// 过滤屏蔽国家出口（根据配置）
+	if v.cfg != nil && len(v.cfg.BlockedCountries) > 0 && len(exitLocation) >= 2 {
 		countryCode := exitLocation[:2]
-		if countryCode == "CN" {
-			// 中国大陆出口，直接拒绝
-			return false, latency, exitIP, exitLocation
+		for _, blocked := range v.cfg.BlockedCountries {
+			if countryCode == blocked {
+				return false, latency, exitIP, exitLocation
+			}
 		}
 	}
 

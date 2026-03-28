@@ -25,6 +25,9 @@ config.json
 data/
 !data/.gitkeep
 
+# Environment variables
+.env
+
 # Temporary files
 *.tmp
 *.bak

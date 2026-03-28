@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -32,6 +33,14 @@ type Config struct {
 
 	// 稳定代理端口（最低延迟模式）
 	StableProxyPort string
+
+	// 代理服务认证配置
+	ProxyAuthEnabled      bool   // 是否启用代理认证（默认 false）
+	ProxyAuthUsername     string // 代理认证用户名（默认 "proxy"）
+	ProxyAuthPasswordHash string // 代理认证密码 SHA256 哈希
+
+	// 地理过滤配置
+	BlockedCountries []string // 屏蔽的国家代码列表（如 ["CN", "RU"]，默认 ["CN"]）
 
 	// SQLite 数据库路径
 	DBPath string
@@ -97,6 +106,33 @@ func DefaultConfig() *Config {
 	if password == "" {
 		password = DefaultPassword
 	}
+	
+	// 读取代理认证配置
+	proxyAuthEnabled := os.Getenv("PROXY_AUTH_ENABLED") == "true"
+	proxyAuthUsername := os.Getenv("PROXY_AUTH_USERNAME")
+	if proxyAuthUsername == "" {
+		proxyAuthUsername = "proxy"
+	}
+	proxyAuthPassword := os.Getenv("PROXY_AUTH_PASSWORD")
+	proxyAuthHash := ""
+	if proxyAuthPassword != "" {
+		proxyAuthHash = passwordHash(proxyAuthPassword)
+	}
+	
+	// 读取地理过滤配置
+	blockedCountries := []string{"CN"} // 默认屏蔽中国大陆
+	if blockedEnv := os.Getenv("BLOCKED_COUNTRIES"); blockedEnv != "" {
+		// 支持逗号分隔的国家代码，如 "CN,RU,KP"
+		countries := strings.Split(blockedEnv, ",")
+		blockedCountries = make([]string, 0, len(countries))
+		for _, c := range countries {
+			c = strings.TrimSpace(strings.ToUpper(c))
+			if c != "" {
+				blockedCountries = append(blockedCountries, c)
+			}
+		}
+	}
+	
 	return &Config{
 		// 基础服务配置
 		WebUIPort:         ":7778",
@@ -104,6 +140,14 @@ func DefaultConfig() *Config {
 		ProxyPort:         ":7777",
 		StableProxyPort:   ":7776",
 		DBPath:            dataDir() + "proxy.db",
+		
+		// 代理认证配置
+		ProxyAuthEnabled:      proxyAuthEnabled,
+		ProxyAuthUsername:     proxyAuthUsername,
+		ProxyAuthPasswordHash: proxyAuthHash,
+		
+		// 地理过滤配置
+		BlockedCountries: blockedCountries,
 
 		// 池子容量配置
 		PoolMaxSize:        100,  // 总容量

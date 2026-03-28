@@ -59,9 +59,11 @@ func main() {
 	
 	// 清理无效代理
 	totalDeleted := 0
-	if deleted, err := store.DeleteChinaMainland(); err == nil && deleted > 0 {
-		log.Printf("[main] 🧹 已清理 %d 个中国大陆出口代理", deleted)
-		totalDeleted += int(deleted)
+	if len(cfg.BlockedCountries) > 0 {
+		if deleted, err := store.DeleteBlockedCountries(cfg.BlockedCountries); err == nil && deleted > 0 {
+			log.Printf("[main] 🧹 已清理 %d 个屏蔽国家出口代理 (屏蔽: %v)", deleted, cfg.BlockedCountries)
+			totalDeleted += int(deleted)
+		}
 	}
 	if deleted, err := store.DeleteWithoutExitInfo(); err == nil && deleted > 0 {
 		log.Printf("[main] 🧹 已清理 %d 个无出口信息的代理", deleted)

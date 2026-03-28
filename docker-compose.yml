@@ -1,26 +1,32 @@
 services:
   proxygo:
-    build: .
-    container_name: proxygo
+    # 使用预构建镜像（每次部署自动拉取最新版本）
+    image: ghcr.io/isboyjc/goproxy:latest
+    pull_policy: always
+    
+    # 或使用本地构建（取消下面注释，注释上面的 image 和 pull_policy 行）
+    # build: .
+    
+    container_name: ${CONTAINER_NAME:-proxygo}
     restart: unless-stopped
     ports:
-      - "127.0.0.1:7776:7776"   # 稳定代理端口（最低延迟）
-      - "127.0.0.1:7777:7777"   # 随机代理端口（轮换模式）
-      - "7778:7778"               # WebUI 端口（外网可访问）
+      # 代理端口：默认仅本地访问（最安全）
+      # 如需对外开放，在 .env 中设置 PROXY_HOST=0.0.0.0（⚠️ 无认证，需配合防火墙）
+      - "${PROXY_HOST:-127.0.0.1}:${STABLE_PORT:-7776}:7776"   # 稳定代理（最低延迟）
+      - "${PROXY_HOST:-127.0.0.1}:${RANDOM_PORT:-7777}:7777"   # 随机轮换
+      - "${WEBUI_HOST:-0.0.0.0}:${WEBUI_PORT:-7778}:7778"      # WebUI（有登录认证）
     volumes:
-      - ./data:/app/data
+      - ${DATA_DIR:-./data}:/app/data
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=${TZ:-Asia/Shanghai}
       - DATA_DIR=/app/data
-      # - WEBUI_PASSWORD=your-password  # 自定义 WebUI 登录密码，默认: proxygo
+      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-goproxy}
+      - PROXY_AUTH_ENABLED=${PROXY_AUTH_ENABLED:-false}
+      - PROXY_AUTH_USERNAME=${PROXY_AUTH_USERNAME:-proxy}
+      - PROXY_AUTH_PASSWORD=${PROXY_AUTH_PASSWORD}
+      - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES:-CN}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7778/"]
       interval: 30s
       timeout: 5s
       retries: 3
-    networks:
-      - cursor2api_default
-
-networks:
-  cursor2api_default:
-    external: true
