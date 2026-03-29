@@ -28,6 +28,8 @@ data/
 # Environment variables
 .env
 
+docker-compose.dokploy.yml
+
 # Temporary files
 *.tmp
 *.bak

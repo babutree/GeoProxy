@@ -63,6 +63,14 @@ func New(s *storage.Storage, cfg *config.Config, pm *pool.Manager, ft FetchTrigg
 
 func (s *Server) Start() {
 	mux := http.NewServeMux()
+	
+	// 添加日志中间件
+	loggedMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[webui] %s %s | Host: %s | RemoteAddr: %s", 
+			r.Method, r.URL.Path, r.Host, r.RemoteAddr)
+		mux.ServeHTTP(w, r)
+	})
+	
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.handleLogout)
@@ -85,7 +93,7 @@ func (s *Server) Start() {
 
 	log.Printf("WebUI listening on %s", s.cfg.WebUIPort)
 	go func() {
-		if err := http.ListenAndServe(s.cfg.WebUIPort, mux); err != nil {
+		if err := http.ListenAndServe(s.cfg.WebUIPort, loggedMux); err != nil {
 			log.Fatalf("webui: %v", err)
 		}
 	}()
