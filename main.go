@@ -70,9 +70,13 @@ func main() {
 		totalDeleted += int(deleted)
 	}
 	
-	// 创建两个代理服务器：随机轮换 + 最低延迟
+	// 创建 HTTP 代理服务器：随机轮换 + 最低延迟
 	randomServer := proxy.New(store, cfg, "random", cfg.ProxyPort)
 	stableServer := proxy.New(store, cfg, "lowest-latency", cfg.StableProxyPort)
+	
+	// 创建 SOCKS5 代理服务器：随机轮换 + 最低延迟
+	socks5RandomServer := proxy.NewSOCKS5(store, cfg, "random", cfg.SOCKS5Port)
+	socks5StableServer := proxy.NewSOCKS5(store, cfg, "lowest-latency", cfg.StableSOCKS5Port)
 
 	// 配置变更通知 channel
 	configChanged := make(chan struct{}, 1)
@@ -105,16 +109,30 @@ func main() {
 	// 监听配置变更
 	go watchConfigChanges(configChanged, poolMgr)
 
-	// 启动稳定代理服务（最低延迟模式）
+	// 启动 HTTP 稳定代理服务（最低延迟模式）
 	go func() {
 		if err := stableServer.Start(); err != nil {
-			log.Fatalf("stable proxy server: %v", err)
+			log.Fatalf("stable http proxy server: %v", err)
 		}
 	}()
 
-	// 启动随机代理服务（阻塞）
+	// 启动 SOCKS5 稳定代理服务（最低延迟模式）
+	go func() {
+		if err := socks5StableServer.Start(); err != nil {
+			log.Fatalf("stable socks5 proxy server: %v", err)
+		}
+	}()
+
+	// 启动 SOCKS5 随机代理服务
+	go func() {
+		if err := socks5RandomServer.Start(); err != nil {
+			log.Fatalf("random socks5 proxy server: %v", err)
+		}
+	}()
+
+	// 启动 HTTP 随机代理服务（阻塞）
 	if err := randomServer.Start(); err != nil {
-		log.Fatalf("random proxy server: %v", err)
+		log.Fatalf("random http proxy server: %v", err)
 	}
 }
 

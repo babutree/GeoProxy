@@ -7,6 +7,7 @@
 | 脚本 | 语言 | 依赖 | 运行模式 | 推荐度 |
 |------|------|------|----------|--------|
 | `test_proxy.sh` | Bash | curl + Python3 | 持续运行 | ⭐⭐⭐ |
+| `test_socks5.sh` | Bash | curl + Python3 | 持续运行 | ⭐⭐⭐ |
 | `test_proxy.go` | Go | `golang.org/x/net/proxy` | 持续运行 | ⭐⭐ |
 | `test_proxy.py` | Python | `requests`, `pysocks` | 持续运行 | ⭐⭐ |
 
@@ -14,15 +15,24 @@
 
 ### Bash 脚本（推荐）
 
+**HTTP 代理测试**：
 ```bash
-# 从项目根目录运行（持续测试 HTTP）
-./test/test_proxy.sh
+# 测试 7777 端口（随机轮换）
+./test/test_proxy.sh 7777
 
-# 测试 HTTP 协议
-./test/test_proxy.sh http
+# 测试 7776 端口（最低延迟）
+./test/test_proxy.sh 7776
 
-# 测试 SOCKS5 协议
-./test/test_proxy.sh socks5
+# 按 Ctrl+C 停止并查看统计
+```
+
+**SOCKS5 代理测试**：
+```bash
+# 测试 7779 端口（随机轮换）
+./test/test_socks5.sh 7779
+
+# 测试 7780 端口（最低延迟）
+./test/test_socks5.sh 7780
 
 # 按 Ctrl+C 停止并查看统计
 ```
@@ -69,9 +79,9 @@ python test/test_proxy.py
 
 ## 🔀 测试不同端口策略
 
-```bash
-# 对比两个端口的行为差异：
+### HTTP 代理端口对比
 
+```bash
 # 随机轮换模式 - IP 高度分散
 ./test/test_proxy.sh 7777
 
@@ -82,6 +92,22 @@ python test/test_proxy.py
 **观察要点**：
 - **7777 端口**：每次请求的出口 IP 应该不同（证明在轮换）
 - **7776 端口**：连续多次请求的出口 IP 基本相同（证明固定使用最优代理）
+
+### SOCKS5 代理端口对比
+
+```bash
+# 随机轮换模式 - IP 高度分散
+./test/test_socks5.sh 7779
+
+# 最低延迟模式 - 固定使用最快代理
+./test/test_socks5.sh 7780
+```
+
+**观察要点**：
+- **7779 端口**：每次连接的出口 IP 应该不同
+- **7780 端口**：连续多次连接的出口 IP 基本相同
+
+> 💡 **提示**：SOCKS5 测试脚本使用 `-k` 参数跳过 SSL 证书验证，因为免费上游代理常有证书问题。生产环境建议使用质量更好的付费代理。
 
 ## 🔍 预期输出
 

@@ -177,11 +177,21 @@ func (s *Storage) initSchema() error {
 
 // AddProxy 新增代理，已存在则忽略
 func (s *Storage) AddProxy(address, protocol string) error {
-	_, err := s.db.Exec(
+	result, err := s.db.Exec(
 		`INSERT OR IGNORE INTO proxies (address, protocol) VALUES (?, ?)`,
 		address, protocol,
 	)
-	return err
+	if err != nil {
+		log.Printf("[storage] AddProxy %s error: %v", address, err)
+		return err
+	}
+	
+	// 检查是否真的插入了
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		log.Printf("[storage] AddProxy %s ignored (already exists or constraint)", address)
+	}
+	return nil
 }
 
 // AddProxies 批量新增
@@ -326,6 +336,56 @@ func (s *Storage) GetLowestLatencyExclude(excludes []string) (*Proxy, error) {
 	}
 
 	return nil, fmt.Errorf("no available proxy")
+}
+
+// GetRandomByProtocolExclude 按协议获取随机代理（排除已尝试的）
+func (s *Storage) GetRandomByProtocolExclude(protocol string, excludes []string) (*Proxy, error) {
+	proxies, err := s.GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	excludeMap := make(map[string]bool)
+	for _, e := range excludes {
+		excludeMap[e] = true
+	}
+
+	var available []Proxy
+	for _, p := range proxies {
+		if p.Protocol == protocol && !excludeMap[p.Address] {
+			available = append(available, p)
+		}
+	}
+
+	if len(available) == 0 {
+		return nil, fmt.Errorf("no %s proxy available", protocol)
+	}
+
+	proxy := available[time.Now().UnixNano()%int64(len(available))]
+	return &proxy, nil
+}
+
+// GetLowestLatencyByProtocolExclude 按协议获取最低延迟代理（排除已尝试的）
+func (s *Storage) GetLowestLatencyByProtocolExclude(protocol string, excludes []string) (*Proxy, error) {
+	proxies, err := s.GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	excludeMap := make(map[string]bool)
+	for _, e := range excludes {
+		excludeMap[e] = true
+	}
+
+	// GetAll() 已经按 latency ASC 排序，找到第一个匹配协议且不在排除列表中的
+	for _, p := range proxies {
+		if p.Protocol == protocol && !excludeMap[p.Address] {
+			proxy := p
+			return &proxy, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no %s proxy available", protocol)
 }
 
 // Delete 立即删除指定代理

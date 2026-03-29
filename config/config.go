@@ -34,10 +34,17 @@ type Config struct {
 	// 稳定代理端口（最低延迟模式）
 	StableProxyPort string
 
+	// SOCKS5 服务端口（随机轮换模式）
+	SOCKS5Port string
+
+	// 稳定 SOCKS5 端口（最低延迟模式）
+	StableSOCKS5Port string
+
 	// 代理服务认证配置
 	ProxyAuthEnabled      bool   // 是否启用代理认证（默认 false）
 	ProxyAuthUsername     string // 代理认证用户名（默认 "proxy"）
-	ProxyAuthPasswordHash string // 代理认证密码 SHA256 哈希
+	ProxyAuthPassword     string // 代理认证密码明文（用于 SOCKS5）
+	ProxyAuthPasswordHash string // 代理认证密码 SHA256 哈希（用于 HTTP）
 
 	// 地理过滤配置
 	BlockedCountries []string // 屏蔽的国家代码列表（如 ["CN", "RU"]，默认 ["CN"]）
@@ -139,11 +146,14 @@ func DefaultConfig() *Config {
 		WebUIPasswordHash: passwordHash(password),
 		ProxyPort:         ":7777",
 		StableProxyPort:   ":7776",
+		SOCKS5Port:        ":7779",
+		StableSOCKS5Port:  ":7780",
 		DBPath:            dataDir() + "proxy.db",
 		
 		// 代理认证配置
 		ProxyAuthEnabled:      proxyAuthEnabled,
 		ProxyAuthUsername:     proxyAuthUsername,
+		ProxyAuthPassword:     proxyAuthPassword,
 		ProxyAuthPasswordHash: proxyAuthHash,
 		
 		// 地理过滤配置

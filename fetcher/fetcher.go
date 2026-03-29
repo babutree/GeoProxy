@@ -71,13 +71,13 @@ func (f *Fetcher) FetchSmart(mode string, preferredProtocol string) ([]storage.P
 
 	switch mode {
 	case "emergency":
-		// 紧急模式：使用所有可用源
-		sources = f.filterAvailableSources(allSources, preferredProtocol)
-		log.Printf("[fetch] 🚨 紧急模式: 使用 %d 个源", len(sources))
+		// 紧急模式：忽略断路器，强制使用所有源（包括被禁用的）
+		sources = f.filterAvailableSources(allSources, preferredProtocol, true)
+		log.Printf("[fetch] 🚨 紧急模式: 使用 %d 个源（忽略断路器）", len(sources))
 
 	case "refill":
 		// 补充模式：使用快更新源
-		sources = f.filterAvailableSources(fastUpdateSources, preferredProtocol)
+		sources = f.filterAvailableSources(fastUpdateSources, preferredProtocol, false)
 		log.Printf("[fetch] 🔄 补充模式: 使用 %d 个快更新源", len(sources))
 
 	case "optimize":
@@ -86,7 +86,7 @@ func (f *Fetcher) FetchSmart(mode string, preferredProtocol string) ([]storage.P
 		log.Printf("[fetch] ⚡ 优化模式: 使用 %d 个源", len(sources))
 
 	default:
-		sources = f.filterAvailableSources(fastUpdateSources, preferredProtocol)
+		sources = f.filterAvailableSources(fastUpdateSources, preferredProtocol, false)
 	}
 
 	if len(sources) == 0 {
@@ -97,11 +97,12 @@ func (f *Fetcher) FetchSmart(mode string, preferredProtocol string) ([]storage.P
 }
 
 // filterAvailableSources 过滤可用的源（通过断路器）
-func (f *Fetcher) filterAvailableSources(sources []Source, preferredProtocol string) []Source {
+// ignoreCircuitBreaker: 是否忽略断路器（Emergency 模式下使用）
+func (f *Fetcher) filterAvailableSources(sources []Source, preferredProtocol string, ignoreCircuitBreaker bool) []Source {
 	var available []Source
 	for _, src := range sources {
-		// 检查断路器
-		if f.sourceManager != nil && !f.sourceManager.CanUseSource(src.URL) {
+		// 检查断路器（紧急模式下忽略）
+		if !ignoreCircuitBreaker && f.sourceManager != nil && !f.sourceManager.CanUseSource(src.URL) {
 			continue
 		}
 		// 如果指定了协议偏好，优先该协议的源
@@ -115,7 +116,7 @@ func (f *Fetcher) filterAvailableSources(sources []Source, preferredProtocol str
 
 // selectRandomSources 随机选择N个源
 func (f *Fetcher) selectRandomSources(sources []Source, count int, preferredProtocol string) []Source {
-	available := f.filterAvailableSources(sources, preferredProtocol)
+	available := f.filterAvailableSources(sources, preferredProtocol, false)
 	if len(available) <= count {
 		return available
 	}
