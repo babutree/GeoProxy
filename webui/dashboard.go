@@ -379,6 +379,22 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
       </div>
     </div>
 
+    <div class="form-section">
+      <div class="form-section-title" data-i18n="config.section_geo_filter">地理过滤</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label data-i18n="config.allowed_countries">允许国家（白名单）</label>
+          <input type="text" id="cfg-allowed-countries" placeholder="US,JP,KR,SG">
+          <div class="form-help" data-i18n="config.allowed_countries_help">非空时仅允许这些国家入池，忽略黑名单</div>
+        </div>
+        <div class="form-group">
+          <label data-i18n="config.blocked_countries">屏蔽国家（黑名单）</label>
+          <input type="text" id="cfg-blocked-countries" placeholder="CN,RU,KP">
+          <div class="form-help" data-i18n="config.blocked_countries_help">白名单为空时生效</div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeSettings()" data-i18n="config.cancel">取消</button>
       <button class="btn" onclick="saveConfig()" data-i18n="config.save">保存配置</button>
@@ -453,6 +469,11 @@ const i18n = {
     'config.optimize_interval': '优化间隔(分钟)',
     'config.replace_threshold': '替换阈值',
     'config.replace_threshold_help': '新代理需快30%',
+    'config.section_geo_filter': '地理过滤',
+    'config.allowed_countries': '允许国家（白名单）',
+    'config.allowed_countries_help': '非空时仅允许这些国家入池，忽略黑名单',
+    'config.blocked_countries': '屏蔽国家（黑名单）',
+    'config.blocked_countries_help': '白名单为空时生效',
     'config.cancel': '取消',
     'config.save': '保存配置',
     'msg.fetch_confirm': '确定开始抓取代理吗？',
@@ -527,6 +548,11 @@ const i18n = {
     'config.optimize_interval': 'Optimize Interval (min)',
     'config.replace_threshold': 'Replace Threshold',
     'config.replace_threshold_help': 'New proxy must be 30% faster',
+    'config.section_geo_filter': 'Geo Filter',
+    'config.allowed_countries': 'Allowed Countries (Whitelist)',
+    'config.allowed_countries_help': 'When set, only these countries are allowed; blacklist is ignored',
+    'config.blocked_countries': 'Blocked Countries (Blacklist)',
+    'config.blocked_countries_help': 'Effective only when whitelist is empty',
     'config.cancel': 'Cancel',
     'config.save': 'Save Configuration',
     'msg.fetch_confirm': 'Start proxy fetch?',
@@ -877,6 +903,8 @@ async function openSettings() {
   document.getElementById('cfg-health-batch').value = cfg.health_check_batch_size;
   document.getElementById('cfg-optimize-interval').value = cfg.optimize_interval;
   document.getElementById('cfg-replace-threshold').value = cfg.replace_threshold;
+  document.getElementById('cfg-blocked-countries').value = (cfg.blocked_countries || []).join(',');
+  document.getElementById('cfg-allowed-countries').value = (cfg.allowed_countries || []).join(',');
 
   document.getElementById('settings-modal').classList.add('show');
 }
@@ -899,6 +927,8 @@ async function saveConfig() {
     health_check_batch_size: parseInt(document.getElementById('cfg-health-batch').value),
     optimize_interval: parseInt(document.getElementById('cfg-optimize-interval').value),
     replace_threshold: parseFloat(document.getElementById('cfg-replace-threshold').value),
+    blocked_countries: document.getElementById('cfg-blocked-countries').value.split(',').map(s => s.trim().toUpperCase()).filter(s => s),
+    allowed_countries: document.getElementById('cfg-allowed-countries').value.split(',').map(s => s.trim().toUpperCase()).filter(s => s),
   };
 
   const result = await api('/api/config/save', {

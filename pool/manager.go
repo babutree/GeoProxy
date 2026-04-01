@@ -110,6 +110,11 @@ func (m *Manager) NeedsFetch(status *PoolStatus) (bool, string, string) {
 		httpPct := float64(status.HTTP) / float64(status.HTTPSlots)
 		socks5Pct := float64(status.SOCKS5) / float64(status.SOCKS5Slots)
 
+		// 如果两个协议都缺（都<50%），同时补充两个协议
+		if httpPct < 0.5 && socks5Pct < 0.5 {
+			return true, "refill", ""
+		}
+		// 只有一个协议缺时，优先补充更缺的
 		if httpPct < 0.5 {
 			return true, "refill", "http"
 		}

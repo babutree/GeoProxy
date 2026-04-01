@@ -20,21 +20,25 @@ type Source struct {
 
 // 快速更新源（5-30分钟更新）- 用于紧急和补充模式
 var fastUpdateSources = []Source{
-	// proxifly - 每5分钟更新
-	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/http/data.txt", "http"},
-	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/socks4/data.txt", "socks5"},
-	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/socks5/data.txt", "socks5"},
 	// ProxyScraper - 每30分钟更新
 	{"https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt", "http"},
 	{"https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks4.txt", "socks5"},
 	{"https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt", "socks5"},
 	// monosans - 每小时更新
 	{"https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", "http"},
+	// prxchk - 频繁更新
+	{"https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt", "http"},
+	{"https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt", "socks5"},
+	{"https://raw.githubusercontent.com/prxchk/proxy-list/main/socks4.txt", "socks5"},
+	// sunny9577 - 自动抓取更新
+	{"https://cdn.jsdelivr.net/gh/sunny9577/proxy-scraper/generated/http_proxies.txt", "http"},
+	{"https://cdn.jsdelivr.net/gh/sunny9577/proxy-scraper/generated/socks5_proxies.txt", "socks5"},
+	{"https://cdn.jsdelivr.net/gh/sunny9577/proxy-scraper/generated/socks4_proxies.txt", "socks5"},
 }
 
 // 慢速更新源（每天更新）- 用于优化轮换模式
 var slowUpdateSources = []Source{
-	// TheSpeedX - 每天更新
+	// TheSpeedX - 每天更新，量大
 	{"https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt", "http"},
 	{"https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt", "socks5"},
 	{"https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt", "socks5"},
@@ -44,6 +48,25 @@ var slowUpdateSources = []Source{
 	// databay-labs - 备用源
 	{"https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/http.txt", "http"},
 	{"https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/socks5.txt", "socks5"},
+	// Anonym0usWork1221 - 量大质量尚可
+	{"https://cdn.jsdelivr.net/gh/Anonym0usWork1221/Free-Proxies/proxy_files/http_proxies.txt", "http"},
+	{"https://cdn.jsdelivr.net/gh/Anonym0usWork1221/Free-Proxies/proxy_files/socks5_proxies.txt", "socks5"},
+	{"https://cdn.jsdelivr.net/gh/Anonym0usWork1221/Free-Proxies/proxy_files/socks4_proxies.txt", "socks5"},
+	// ALIILAPRO
+	{"https://cdn.jsdelivr.net/gh/ALIILAPRO/Proxy/http.txt", "http"},
+	{"https://cdn.jsdelivr.net/gh/ALIILAPRO/Proxy/socks4.txt", "socks5"},
+	// vakhov/fresh-proxy-list
+	{"https://cdn.jsdelivr.net/gh/vakhov/fresh-proxy-list/http.txt", "http"},
+	{"https://cdn.jsdelivr.net/gh/vakhov/fresh-proxy-list/socks5.txt", "socks5"},
+	{"https://cdn.jsdelivr.net/gh/vakhov/fresh-proxy-list/socks4.txt", "socks5"},
+	// Zaeem20
+	{"https://cdn.jsdelivr.net/gh/Zaeem20/FREE_PROXIES_LIST/http.txt", "http"},
+	{"https://cdn.jsdelivr.net/gh/Zaeem20/FREE_PROXIES_LIST/socks4.txt", "socks5"},
+	// hookzof - socks5 专项
+	{"https://cdn.jsdelivr.net/gh/hookzof/socks5_list/proxy.txt", "socks5"},
+	// proxy4parsing
+	{"https://cdn.jsdelivr.net/gh/proxy4parsing/proxy-list/http.txt", "http"},
+	{"https://cdn.jsdelivr.net/gh/proxy4parsing/proxy-list/socks5.txt", "socks5"},
 }
 
 // 所有源

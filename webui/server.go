@@ -336,23 +336,27 @@ func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
 		"pool_min_per_protocol": cfg.PoolMinPerProtocol,
 		"pool_http_slots":      httpSlots,
 		"pool_socks5_slots":    socks5Slots,
-		
+
 		// 延迟配置
 		"max_latency_ms":         cfg.MaxLatencyMs,
 		"max_latency_emergency":  cfg.MaxLatencyEmergency,
 		"max_latency_healthy":    cfg.MaxLatencyHealthy,
-		
+
 		// 验证配置
 		"validate_concurrency":   cfg.ValidateConcurrency,
 		"validate_timeout":       cfg.ValidateTimeout,
-		
+
 		// 健康检查配置
 		"health_check_interval":  cfg.HealthCheckInterval,
 		"health_check_batch_size": cfg.HealthCheckBatchSize,
-		
+
 		// 优化配置
 		"optimize_interval":      cfg.OptimizeInterval,
 		"replace_threshold":      cfg.ReplaceThreshold,
+
+		// 地理过滤配置
+		"blocked_countries":      cfg.BlockedCountries,
+		"allowed_countries":      cfg.AllowedCountries,
 	})
 }
 
@@ -364,18 +368,20 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		PoolMaxSize           int     `json:"pool_max_size"`
-		PoolHTTPRatio         float64 `json:"pool_http_ratio"`
-		PoolMinPerProtocol    int     `json:"pool_min_per_protocol"`
-		MaxLatencyMs          int     `json:"max_latency_ms"`
-		MaxLatencyEmergency   int     `json:"max_latency_emergency"`
-		MaxLatencyHealthy     int     `json:"max_latency_healthy"`
-		ValidateConcurrency   int     `json:"validate_concurrency"`
-		ValidateTimeout       int     `json:"validate_timeout"`
-		HealthCheckInterval   int     `json:"health_check_interval"`
-		HealthCheckBatchSize  int     `json:"health_check_batch_size"`
-		OptimizeInterval      int     `json:"optimize_interval"`
-		ReplaceThreshold      float64 `json:"replace_threshold"`
+		PoolMaxSize           int      `json:"pool_max_size"`
+		PoolHTTPRatio         float64  `json:"pool_http_ratio"`
+		PoolMinPerProtocol    int      `json:"pool_min_per_protocol"`
+		MaxLatencyMs          int      `json:"max_latency_ms"`
+		MaxLatencyEmergency   int      `json:"max_latency_emergency"`
+		MaxLatencyHealthy     int      `json:"max_latency_healthy"`
+		ValidateConcurrency   int      `json:"validate_concurrency"`
+		ValidateTimeout       int      `json:"validate_timeout"`
+		HealthCheckInterval   int      `json:"health_check_interval"`
+		HealthCheckBatchSize  int      `json:"health_check_batch_size"`
+		OptimizeInterval      int      `json:"optimize_interval"`
+		ReplaceThreshold      float64  `json:"replace_threshold"`
+		BlockedCountries      []string `json:"blocked_countries"`
+		AllowedCountries      []string `json:"allowed_countries"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -408,6 +414,8 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	newCfg.HealthCheckBatchSize = req.HealthCheckBatchSize
 	newCfg.OptimizeInterval = req.OptimizeInterval
 	newCfg.ReplaceThreshold = req.ReplaceThreshold
+	newCfg.BlockedCountries = req.BlockedCountries
+	newCfg.AllowedCountries = req.AllowedCountries
 
 	if err := config.Save(&newCfg); err != nil {
 		jsonError(w, "save config error: "+err.Error(), http.StatusInternalServerError)

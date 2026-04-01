@@ -25,6 +25,7 @@ services:
       - PROXY_AUTH_USERNAME=${PROXY_AUTH_USERNAME:-proxy}
       - PROXY_AUTH_PASSWORD=${PROXY_AUTH_PASSWORD}
       - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES:-CN}
+      - ALLOWED_COUNTRIES=${ALLOWED_COUNTRIES}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7778/"]
       interval: 30s

@@ -208,12 +208,27 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		return false, latency, exitIP, exitLocation
 	}
 	
-	// 过滤屏蔽国家出口（根据配置）
-	if v.cfg != nil && len(v.cfg.BlockedCountries) > 0 && len(exitLocation) >= 2 {
+	// 地理过滤：白名单优先，否则走黑名单
+	if v.cfg != nil && len(exitLocation) >= 2 {
 		countryCode := exitLocation[:2]
-		for _, blocked := range v.cfg.BlockedCountries {
-			if countryCode == blocked {
+		if len(v.cfg.AllowedCountries) > 0 {
+			// 白名单模式：不在白名单中则拒绝
+			allowed := false
+			for _, a := range v.cfg.AllowedCountries {
+				if countryCode == a {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
 				return false, latency, exitIP, exitLocation
+			}
+		} else if len(v.cfg.BlockedCountries) > 0 {
+			// 黑名单模式
+			for _, blocked := range v.cfg.BlockedCountries {
+				if countryCode == blocked {
+					return false, latency, exitIP, exitLocation
+				}
 			}
 		}
 	}

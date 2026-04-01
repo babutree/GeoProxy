@@ -12,6 +12,8 @@ proxy-pool
 *.test
 vendor/
 
+CUSTOM_PROXY_DESIGN.md
+
 # Test binaries
 test/test_proxy
 test/test_proxy.exe

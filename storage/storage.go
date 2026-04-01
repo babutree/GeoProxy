@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -621,12 +622,12 @@ func (s *Storage) DeleteBlockedCountries(countryCodes []string) (int64, error) {
 	if len(countryCodes) == 0 {
 		return 0, nil
 	}
-	
+
 	var totalDeleted int64
 	for _, code := range countryCodes {
-		// exit_location 格式：如 "CN Beijing" 或 "HK Hong Kong"
-		// 使用 LIKE 'CODE %' 来匹配国家代码（后面有空格表示有城市信息）
-		res, err := s.db.Exec(`DELETE FROM proxies WHERE exit_location LIKE ?`, code+" %")
+		// exit_location 格式：如 "CN Beijing" 或 "CN"（仅国家代码）
+		// 同时匹配 "CODE" 和 "CODE ..." 两种情况
+		res, err := s.db.Exec(`DELETE FROM proxies WHERE exit_location = ? OR exit_location LIKE ?`, code, code+" %")
 		if err != nil {
 			return totalDeleted, err
 		}
@@ -634,6 +635,29 @@ func (s *Storage) DeleteBlockedCountries(countryCodes []string) (int64, error) {
 		totalDeleted += affected
 	}
 	return totalDeleted, nil
+}
+
+// DeleteNotAllowedCountries 删除不在白名单中的代理
+func (s *Storage) DeleteNotAllowedCountries(allowedCodes []string) (int64, error) {
+	if len(allowedCodes) == 0 {
+		return 0, nil
+	}
+
+	// 构建 WHERE 条件：exit_location 不以任何白名单国家代码开头
+	// 即：NOT (exit_location = 'US' OR exit_location LIKE 'US %' OR ...)
+	conditions := make([]string, 0, len(allowedCodes)*2)
+	args := make([]interface{}, 0, len(allowedCodes)*2)
+	for _, code := range allowedCodes {
+		conditions = append(conditions, "exit_location = ?", "exit_location LIKE ?")
+		args = append(args, code, code+" %")
+	}
+
+	query := `DELETE FROM proxies WHERE exit_location != '' AND NOT (` + strings.Join(conditions, " OR ") + `)`
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // DeleteWithoutExitInfo 删除没有出口信息的代理

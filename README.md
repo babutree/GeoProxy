@@ -174,7 +174,7 @@ go build -o proxygo .
 程序启动后会：
 1. 加载配置（环境变量 + `config.json`）
 2. 初始化数据库和限流器
-3. 清理不符合条件的代理（屏蔽国家出口、无地理信息）
+3. 清理不符合条件的代理（不符合地理过滤规则、无地理信息）
 4. 启动 WebUI（`:7778`）
 5. 立即执行智能填充（按需抓取 + 严格验证）
 6. 启动后台协程：
@@ -476,6 +476,7 @@ docker compose up -d
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `BLOCKED_COUNTRIES` | `CN` | 屏蔽的国家代码（逗号分隔，如 `CN,RU`，留空=不屏蔽） |
+| `ALLOWED_COUNTRIES` | 空 | 允许的国家代码白名单（非空时优先于黑名单，如 `US,JP,KR`） |
 | `PROXY_AUTH_ENABLED` | `false` | 是否启用代理认证（对外开放时强烈建议启用） |
 | `PROXY_AUTH_USERNAME` | `proxy` | 代理认证用户名 |
 | `PROXY_AUTH_PASSWORD` | 空 | 代理认证密码 |
@@ -516,7 +517,14 @@ WEBUI_PASSWORD=admin_pass
 EOF
 docker compose up -d
 
-# 场景 4：不屏蔽任何国家
+# 场景 4：白名单模式（仅允许指定国家）
+cat > .env << EOF
+ALLOWED_COUNTRIES=US,JP,KR,SG
+WEBUI_PASSWORD=admin_pass
+EOF
+docker compose up -d
+
+# 场景 5：不做地理限制
 cat > .env << EOF
 BLOCKED_COUNTRIES=
 WEBUI_PASSWORD=admin_pass
@@ -725,6 +733,7 @@ proxies = {'http': 'socks5://myuser:secure_pass_123@server-ip:7779', 'https': 's
 | `PROXY_AUTH_USERNAME` | `proxy` | 代理认证用户名 |
 | `PROXY_AUTH_PASSWORD` | 空 | 代理认证密码（原始密码，自动哈希） |
 | `BLOCKED_COUNTRIES` | `CN` | 屏蔽的国家代码（逗号分隔，如 `CN,RU,KP`，留空=不屏蔽） |
+| `ALLOWED_COUNTRIES` | 空 | 允许的国家代码白名单（非空时优先于黑名单，如 `US,JP,KR`） |
 
 ## 🎨 WebUI 使用指南
 
@@ -1043,22 +1052,24 @@ A:
 
 ### Q: 如何配置地理过滤？
 A: 
-通过 `BLOCKED_COUNTRIES` 环境变量配置需要屏蔽的国家：
+支持黑名单和白名单两种模式，白名单优先：
 
 ```bash
-# 默认屏蔽中国大陆（CN）
-BLOCKED_COUNTRIES=CN
+# === 黑名单模式（默认） ===
+BLOCKED_COUNTRIES=CN          # 屏蔽中国大陆
+BLOCKED_COUNTRIES=CN,RU,KP    # 屏蔽多个国家
+BLOCKED_COUNTRIES=             # 不屏蔽任何国家
 
-# 屏蔽多个国家（逗号分隔）
-BLOCKED_COUNTRIES=CN,RU,KP
-
-# 不屏蔽任何国家（留空）
-BLOCKED_COUNTRIES=
+# === 白名单模式（优先于黑名单） ===
+ALLOWED_COUNTRIES=US,JP,KR,SG  # 仅允许这些国家入池
 ```
 
+也可以通过 WebUI 配置面板的「地理过滤」区域动态修改，保存后立即生效。
+
 **工作机制**：
-- **验证阶段**：检测到屏蔽国家出口直接拒绝入池
-- **启动清理**：自动删除数据库中屏蔽国家的代理
+- **白名单优先**：`ALLOWED_COUNTRIES` 非空时，仅允许白名单国家入池，黑名单被忽略
+- **验证阶段**：新代理验证时检查出口国家，不符合条件的直接拒绝
+- **启动清理**：自动删除数据库中不符合过滤规则的代理
 - **精确匹配**：使用 ISO 3166-1 alpha-2 国家代码（CN、HK、US 等）
 
 **常用国家代码**：`CN`=中国大陆 | `HK`=香港 | `RU`=俄罗斯 | `US`=美国 | `JP`=日本 | `SG`=新加坡

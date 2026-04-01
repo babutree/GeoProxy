@@ -48,6 +48,7 @@ type Config struct {
 
 	// 地理过滤配置
 	BlockedCountries []string // 屏蔽的国家代码列表（如 ["CN", "RU"]，默认 ["CN"]）
+	AllowedCountries []string // 允许的国家代码列表（白名单，非空时优先于黑名单）
 
 	// SQLite 数据库路径
 	DBPath string
@@ -139,6 +140,19 @@ func DefaultConfig() *Config {
 			}
 		}
 	}
+
+	// 读取白名单配置（白名单非空时优先于黑名单）
+	var allowedCountries []string
+	if allowedEnv := os.Getenv("ALLOWED_COUNTRIES"); allowedEnv != "" {
+		countries := strings.Split(allowedEnv, ",")
+		allowedCountries = make([]string, 0, len(countries))
+		for _, c := range countries {
+			c = strings.TrimSpace(strings.ToUpper(c))
+			if c != "" {
+				allowedCountries = append(allowedCountries, c)
+			}
+		}
+	}
 	
 	return &Config{
 		// 基础服务配置
@@ -158,6 +172,7 @@ func DefaultConfig() *Config {
 		
 		// 地理过滤配置
 		BlockedCountries: blockedCountries,
+		AllowedCountries: allowedCountries,
 
 		// 池子容量配置
 		PoolMaxSize:        100,  // 总容量
@@ -264,6 +279,14 @@ func Load() *Config {
 			if saved.CheckInterval > 0 {
 				cfg.CheckInterval = saved.CheckInterval
 			}
+
+			// 地理过滤配置（config.json 优先于环境变量）
+			if saved.BlockedCountries != nil {
+				cfg.BlockedCountries = saved.BlockedCountries
+			}
+			if saved.AllowedCountries != nil {
+				cfg.AllowedCountries = saved.AllowedCountries
+			}
 		}
 	}
 	cfgMu.Lock()
@@ -303,6 +326,10 @@ type savedConfig struct {
 	OptimizeInterval int     `json:"optimize_interval"`
 	ReplaceThreshold float64 `json:"replace_threshold"`
 
+	// 地理过滤配置
+	BlockedCountries []string `json:"blocked_countries,omitempty"`
+	AllowedCountries []string `json:"allowed_countries,omitempty"`
+
 	// 兼容旧配置
 	FetchInterval int `json:"fetch_interval,omitempty"`
 	CheckInterval int `json:"check_interval,omitempty"`
@@ -327,6 +354,8 @@ func Save(cfg *Config) error {
 		HealthCheckBatchSize: cfg.HealthCheckBatchSize,
 		OptimizeInterval:     cfg.OptimizeInterval,
 		ReplaceThreshold:     cfg.ReplaceThreshold,
+		BlockedCountries:     cfg.BlockedCountries,
+		AllowedCountries:     cfg.AllowedCountries,
 		FetchInterval:        cfg.FetchInterval,
 		CheckInterval:        cfg.CheckInterval,
 	}, "", "  ")

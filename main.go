@@ -59,7 +59,14 @@ func main() {
 	
 	// 清理无效代理
 	totalDeleted := 0
-	if len(cfg.BlockedCountries) > 0 {
+	if len(cfg.AllowedCountries) > 0 {
+		// 白名单模式：清理不在白名单中的代理
+		if deleted, err := store.DeleteNotAllowedCountries(cfg.AllowedCountries); err == nil && deleted > 0 {
+			log.Printf("[main] 🧹 已清理 %d 个非白名单国家出口代理 (允许: %v)", deleted, cfg.AllowedCountries)
+			totalDeleted += int(deleted)
+		}
+	} else if len(cfg.BlockedCountries) > 0 {
+		// 黑名单模式：清理屏蔽国家的代理
 		if deleted, err := store.DeleteBlockedCountries(cfg.BlockedCountries); err == nil && deleted > 0 {
 			log.Printf("[main] 🧹 已清理 %d 个屏蔽国家出口代理 (屏蔽: %v)", deleted, cfg.BlockedCountries)
 			totalDeleted += int(deleted)

@@ -70,7 +70,8 @@ main.go (orchestrator)
 
 - **Pool state machine**: healthy → warning → critical → emergency. State determines fetch mode (optimize/refill/emergency) and latency thresholds.
 - **Slot-based capacity**: Pool has fixed size split between HTTP/SOCKS5 by configurable ratio (default 3:7). Each protocol has guaranteed minimum slots.
-- **Smart admission**: New proxies enter if slots available, or replace worst existing proxy if significantly faster (30%+ by default via `ReplaceThreshold`). HTTP proxies must also pass an HTTPS CONNECT tunnel test (random real HTTPS site visit with retry) before admission.
+- **Smart admission**: New proxies enter if slots available, or replace worst existing proxy if significantly faster (30%+ by default via `ReplaceThreshold`). HTTP proxies must also pass an HTTPS CONNECT tunnel test (random real HTTPS site visit with retry) before admission. Geo-filter (whitelist/blacklist) is applied during validation before admission.
+- **Geo-filter**: Whitelist (`AllowedCountries`) takes priority — if non-empty, only those countries pass. Otherwise blacklist (`BlockedCountries`) rejects listed countries. Configurable via env vars, `config.json`, or WebUI at runtime. On startup, existing proxies violating the filter are cleaned from the database.
 - **Protocol-parallel validation**: `smartFetchAndFill` splits candidates by protocol and validates SOCKS5/HTTP concurrently. SOCKS5 fills faster (no HTTPS check overhead); HTTP validation runs in parallel without blocking SOCKS5 admission.
 - **Circuit breaker on sources**: `SourceManager` tracks consecutive failures per source URL. 3 fails → degraded, 5 → disabled for 30min.
 - **Auto-retry on proxy failure**: Both HTTP and SOCKS5 servers retry with different upstream proxies on failure (up to `MaxRetry` times), deleting failed proxies immediately.
@@ -95,9 +96,10 @@ main.go (orchestrator)
 
 ### Configuration
 
-- Environment variables: `WEBUI_PASSWORD`, `PROXY_AUTH_ENABLED`, `PROXY_AUTH_USERNAME`, `PROXY_AUTH_PASSWORD`, `BLOCKED_COUNTRIES`, `DATA_DIR`
-- Persistent config: `config.json` (or `$DATA_DIR/config.json`) — pool capacity, latency thresholds, intervals. Editable via WebUI.
+- Environment variables: `WEBUI_PASSWORD`, `PROXY_AUTH_ENABLED`, `PROXY_AUTH_USERNAME`, `PROXY_AUTH_PASSWORD`, `BLOCKED_COUNTRIES`, `ALLOWED_COUNTRIES`, `DATA_DIR`
+- Persistent config: `config.json` (or `$DATA_DIR/config.json`) — pool capacity, latency thresholds, intervals, geo-filter (blocked/allowed countries). Editable via WebUI.
 - Config is loaded once at startup via `config.Load()`, updated in-memory via `config.Save()`. Thread-safe via `sync.RWMutex`.
+- Geo-filter: `ALLOWED_COUNTRIES` (whitelist) takes priority over `BLOCKED_COUNTRIES` (blacklist). When whitelist is non-empty, only listed countries are admitted; blacklist is ignored. Both are comma-separated country codes (e.g. `US,JP,KR`). Configurable at runtime via WebUI; `config.json` values override env vars after first save.
 
 ### Storage
 
