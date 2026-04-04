@@ -11,7 +11,7 @@ GoProxy 从公开代理源自动抓取 HTTP/SOCKS5 代理，同时支持导入 C
 
 **GitHub**：[github.com/isboyjc/GoProxy](https://github.com/isboyjc/GoProxy)
 
-![](https://cdn.isboyjc.com/img/Xnip2026-03-29_03-35-06.png)
+![](https://cdn.amux.ai/data/1322149f78ab57adb821ce731c11a9e944504649.png)
 
 ## 核心特性
 
