@@ -59,6 +59,10 @@ main.go (orchestrator)
   ├── pool/       — Pool manager (admission control, slot allocation, replacement logic)
   ├── checker/    — Background health checker (batch-based, skips S-grade when healthy)
   ├── optimizer/  — Background quality optimizer (replaces slow proxies with faster ones)
+  ├── custom/     — Custom proxy subscription manager (fetch, parse, validate, periodic refresh)
+  │   ├── parser.go   — Clash YAML / plain / base64 subscription parser
+  │   ├── singbox.go  — sing-box process manager (config generation, start/stop/reload)
+  │   └── manager.go  — Subscription refresh loop + probe-wake loop for disabled proxies
   ├── proxy/      — Outward-facing proxy servers
   │   ├── server.go       — HTTP proxy (implements http.Handler)
   │   └── socks5_server.go — SOCKS5 proxy (raw TCP, manual protocol implementation)

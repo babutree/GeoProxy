@@ -5,6 +5,61 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [v0.4.0] - 2026-04-04
+
+### 新增
+
+- **订阅代理导入**
+  - 支持通过 WebUI 添加 Clash/V2ray 订阅 URL 或上传配置文件
+  - 格式全自动识别：Clash YAML、V2ray 链接（vmess/vless/trojan/ss/hysteria2/anytls）、Base64 编码、纯文本
+  - 内置 sing-box 协议转换：加密协议节点自动转为本地 SOCKS5 代理，Docker 镜像自带 sing-box 二进制
+  - 订阅定时刷新：可配置刷新间隔，自动拉取最新节点并替换旧节点
+  - 添加订阅时先验证（拉取+解析通过后才入库），失败不产生垃圾数据
+
+- **订阅代理保护机制**
+  - 软删除：订阅代理健康检查失败不删除只禁用（`status='disabled'`）
+  - 探测唤醒：定时探测禁用的订阅代理，恢复可用后自动启用
+  - 地理过滤全局化：免费代理删除、订阅代理禁用，探测唤醒时也检查地理规则
+  - 自动清理：连续 7 天无可用节点的订阅自动移除
+
+- **5 种代理使用模式**
+  - 混合·订阅优先：优先使用订阅代理，无可用时降级到免费
+  - 混合·免费优先：优先使用免费代理，无可用时降级到订阅
+  - 混合·平等：不区分来源，按延迟/随机选择
+  - 仅订阅代理：只使用订阅导入的代理
+  - 仅免费代理：只使用公开抓取的代理
+
+- **访客贡献订阅**
+  - 未登录用户可通过「贡献订阅」入口提交订阅 URL 或上传配置文件
+  - 提交前自动验证，通过后才入库
+  - 管理员可刷新、暂停、删除贡献的订阅
+  - 贡献订阅在列表中有橙色「贡献」标记
+
+- **WebUI 增强**
+  - 免费池 / 订阅池分离展示，各自独立统计
+  - 订阅管理面板：订阅列表（名称 + 可用数 + 禁用数）、添加/刷新/暂停/删除
+  - 代理列表中订阅代理带黄色标签显示所属订阅名称 + 左侧黄色竖线
+  - 系统设置从侧边栏移至顶部齿轮图标，重组为：代理模式 → 免费池 → 订阅池 → 验证检查 → 地理过滤
+  - 新增 ~70 个 i18n 翻译 key，覆盖所有新增 UI 元素
+
+- **代理使用统计**
+  - HTTP/SOCKS5 代理服务在请求成功/失败时记录使用次数（`RecordProxyUse`）
+
+### 变更
+
+- `Proxy` 结构体新增 `Source`（free/custom）和 `SubscriptionID` 字段
+- `Count()`/`CountByProtocol()` 仅统计免费代理（slot 计算不受订阅代理影响）
+- 批量删除方法（`DeleteInvalid`/`DeleteBlockedCountries`/`DeleteNotAllowedCountries`/`DeleteWithoutExitInfo`）仅作用于免费代理
+- `GetWorstProxies` 排除订阅代理，优化器不替换订阅代理
+- Dockerfile 集成 sing-box 二进制（自动检测 amd64/arm64 架构）
+
+### 修复
+
+- 修复 `AddProxy` 未显式设置 `source='free'` 的问题
+- 修复 WebUI「刷新代理」「刷新延迟」对订阅代理执行硬删除的问题（改为禁用）
+- 修复 `validateCustomProxies` 将所有代理硬编码为 socks5 协议导致 HTTP 直连代理验证失败
+- 修复 `CustomPriority` 和 `CustomFreePriority` 可同时为 true 的互斥问题
+
 ## [v0.3.0] - 2026-04-01
 
 ### 新增

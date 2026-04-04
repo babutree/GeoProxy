@@ -80,16 +80,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	maxRetries := s.cfg.MaxRetry + 2 // 增加重试次数以应对质量差的代理
 	
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		var p *storage.Proxy
-		var err error
-
-		// SOCKS5 服务只使用 SOCKS5 上游代理
-		if s.mode == "lowest-latency" {
-			p, err = s.storage.GetLowestLatencyByProtocolExclude("socks5", tried)
-		} else {
-			p, err = s.storage.GetRandomByProtocolExclude("socks5", tried)
-		}
-
+		p, err := s.selectSOCKS5Proxy(tried)
 		if err != nil {
 			log.Printf("[socks5] no available socks5 upstream proxy: %v", err)
 			s.sendSOCKS5Reply(clientConn, 0x01) // General failure
@@ -102,7 +93,8 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		upstreamConn, err := s.dialViaProxy(p, target)
 		if err != nil {
 			log.Printf("[socks5] dial %s via %s (%s) failed: %v, removing", target, p.Address, p.Protocol, err)
-			s.storage.Delete(p.Address)
+			s.storage.RecordProxyUse(p.Address, false)
+			removeOrDisableProxy(s.storage, p)
 			continue
 		}
 
@@ -112,6 +104,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
+		s.storage.RecordProxyUse(p.Address, true)
 		log.Printf("[socks5] %s via %s established", target, p.Address)
 
 		// 双向转发数据
@@ -126,6 +119,40 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	// 所有重试都失败
 	s.sendSOCKS5Reply(clientConn, 0x01) // General failure
 	log.Printf("[socks5] all proxies failed for %s", target)
+}
+
+// selectSOCKS5Proxy 根据使用模式选择 SOCKS5 上游代理
+func (s *SOCKS5Server) selectSOCKS5Proxy(tried []string) (*storage.Proxy, error) {
+	cfg := config.Get()
+	sourceFilter := sourceFilterFromMode(cfg.CustomProxyMode)
+
+	// 混用 + 优先模式
+	if cfg.CustomProxyMode == "mixed" && (cfg.CustomPriority || cfg.CustomFreePriority) {
+		preferSource := "custom"
+		if cfg.CustomFreePriority {
+			preferSource = "free"
+		}
+		var p *storage.Proxy
+		var err error
+		if s.mode == "lowest-latency" {
+			p, err = s.storage.GetLowestLatencyByProtocolExcludeFiltered("socks5", tried, preferSource)
+		} else {
+			p, err = s.storage.GetRandomByProtocolExcludeFiltered("socks5", tried, preferSource)
+		}
+		if err == nil {
+			return p, nil
+		}
+		// fallback
+		if s.mode == "lowest-latency" {
+			return s.storage.GetLowestLatencyByProtocolExcludeFiltered("socks5", tried, "")
+		}
+		return s.storage.GetRandomByProtocolExcludeFiltered("socks5", tried, "")
+	}
+
+	if s.mode == "lowest-latency" {
+		return s.storage.GetLowestLatencyByProtocolExcludeFiltered("socks5", tried, sourceFilter)
+	}
+	return s.storage.GetRandomByProtocolExcludeFiltered("socks5", tried, sourceFilter)
 }
 
 // socks5Handshake 处理 SOCKS5 握手

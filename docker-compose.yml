@@ -26,8 +26,10 @@ services:
       - PROXY_AUTH_PASSWORD=${PROXY_AUTH_PASSWORD}
       - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES:-CN}
       - ALLOWED_COUNTRIES=${ALLOWED_COUNTRIES}
+      - CUSTOM_PROXY_MODE=${CUSTOM_PROXY_MODE:-mixed}
+      - SINGBOX_PATH=sing-box
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7778/"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:7778/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

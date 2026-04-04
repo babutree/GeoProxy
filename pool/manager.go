@@ -22,14 +22,15 @@ func NewManager(s *storage.Storage, cfg *config.Config) *Manager {
 
 // PoolStatus 池子状态
 type PoolStatus struct {
-	Total        int
-	HTTP         int
-	SOCKS5       int
-	HTTPSlots    int
-	SOCKS5Slots  int
-	State        string // healthy/warning/critical/emergency
+	Total            int
+	HTTP             int
+	SOCKS5           int
+	HTTPSlots        int
+	SOCKS5Slots      int
+	State            string // healthy/warning/critical/emergency
 	AvgLatencyHTTP   int
 	AvgLatencySocks5 int
+	CustomCount      int // 订阅代理数量
 }
 
 // GetStatus 获取当前池子状态
@@ -47,6 +48,8 @@ func (m *Manager) GetStatus() (*PoolStatus, error) {
 	// 判断状态
 	state := m.determineState(total, httpCount, socks5Count)
 
+	customCount, _ := m.storage.CountBySource("custom")
+
 	return &PoolStatus{
 		Total:            total,
 		HTTP:             httpCount,
@@ -56,6 +59,7 @@ func (m *Manager) GetStatus() (*PoolStatus, error) {
 		State:            state,
 		AvgLatencyHTTP:   avgHTTP,
 		AvgLatencySocks5: avgSOCKS5,
+		CustomCount:      customCount,
 	}, nil
 }
 
@@ -136,6 +140,16 @@ func (m *Manager) NeedsFetchQuick(status *PoolStatus) bool {
 
 // TryAddProxy 尝试将代理加入池子
 func (m *Manager) TryAddProxy(p storage.Proxy) (bool, string) {
+	// 订阅代理直接入池，不受 slot 限制
+	if p.Source == "custom" {
+		if err := m.storage.AddProxyWithSource(p.Address, p.Protocol, "custom"); err != nil {
+			return false, "db_error"
+		}
+		m.storage.UpdateExitInfo(p.Address, p.ExitIP, p.ExitLocation, p.Latency)
+		log.Printf("[pool] ✅ 订阅代理入池: %s (%s) %dms %s", p.Address, p.Protocol, p.Latency, p.ExitLocation)
+		return true, "added_custom"
+	}
+
 	httpSlots, socks5Slots := m.cfg.CalculateSlots()
 	httpCount, _ := m.storage.CountByProtocol("http")
 	socks5Count, _ := m.storage.CountByProtocol("socks5")

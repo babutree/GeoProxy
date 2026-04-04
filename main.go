@@ -9,6 +9,7 @@ import (
 
 	"goproxy/checker"
 	"goproxy/config"
+	"goproxy/custom"
 	"goproxy/fetcher"
 	"goproxy/logger"
 	"goproxy/optimizer"
@@ -57,19 +58,23 @@ func main() {
 	healthChecker := checker.NewHealthChecker(store, validate, cfg, poolMgr)
 	opt := optimizer.NewOptimizer(store, fetch, validate, poolMgr, cfg)
 	
-	// 清理无效代理
+	// 清理无效代理（免费代理删除，订阅代理禁用）
 	totalDeleted := 0
 	if len(cfg.AllowedCountries) > 0 {
-		// 白名单模式：清理不在白名单中的代理
 		if deleted, err := store.DeleteNotAllowedCountries(cfg.AllowedCountries); err == nil && deleted > 0 {
-			log.Printf("[main] 🧹 已清理 %d 个非白名单国家出口代理 (允许: %v)", deleted, cfg.AllowedCountries)
+			log.Printf("[main] 🧹 已清理 %d 个非白名单免费代理 (允许: %v)", deleted, cfg.AllowedCountries)
 			totalDeleted += int(deleted)
 		}
+		if disabled, err := store.DisableNotAllowedCountries(cfg.AllowedCountries); err == nil && disabled > 0 {
+			log.Printf("[main] 🔒 已禁用 %d 个非白名单订阅代理", disabled)
+		}
 	} else if len(cfg.BlockedCountries) > 0 {
-		// 黑名单模式：清理屏蔽国家的代理
 		if deleted, err := store.DeleteBlockedCountries(cfg.BlockedCountries); err == nil && deleted > 0 {
-			log.Printf("[main] 🧹 已清理 %d 个屏蔽国家出口代理 (屏蔽: %v)", deleted, cfg.BlockedCountries)
+			log.Printf("[main] 🧹 已清理 %d 个屏蔽国家免费代理 (屏蔽: %v)", deleted, cfg.BlockedCountries)
 			totalDeleted += int(deleted)
+		}
+		if disabled, err := store.DisableBlockedCountries(cfg.BlockedCountries); err == nil && disabled > 0 {
+			log.Printf("[main] 🔒 已禁用 %d 个屏蔽国家订阅代理", disabled)
 		}
 	}
 	if deleted, err := store.DeleteWithoutExitInfo(); err == nil && deleted > 0 {
@@ -85,11 +90,14 @@ func main() {
 	socks5RandomServer := proxy.NewSOCKS5(store, cfg, "random", cfg.SOCKS5Port)
 	socks5StableServer := proxy.NewSOCKS5(store, cfg, "lowest-latency", cfg.StableSOCKS5Port)
 
+	// 初始化订阅管理器
+	customMgr := custom.NewManager(store, validate, cfg)
+
 	// 配置变更通知 channel
 	configChanged := make(chan struct{}, 1)
 
-	// 启动 WebUI（传递池子管理器）
-	ui := webui.New(store, cfg, poolMgr, func() {
+	// 启动 WebUI（传递池子管理器和订阅管理器）
+	ui := webui.New(store, cfg, poolMgr, customMgr, func() {
 		go smartFetchAndFill(fetch, validate, store, poolMgr)
 	}, configChanged)
 	ui.Start()
@@ -112,6 +120,9 @@ func main() {
 
 	// 启动优化轮换器
 	opt.StartBackground()
+
+	// 启动订阅管理器
+	go customMgr.Start()
 
 	// 监听配置变更
 	go watchConfigChanges(configChanged, poolMgr)

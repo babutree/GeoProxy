@@ -87,6 +87,15 @@ type Config struct {
 	SourceDisableThreshold int // 源禁用阈值（默认5）
 	SourceCooldownMinutes  int // 源禁用冷却时间（默认30）
 
+	// ========== 自定义订阅代理配置 ==========
+	CustomProxyMode       string // 代理使用模式：mixed / custom_only / free_only（默认 mixed）
+	CustomPriority        bool   // 混用模式下订阅代理优先（默认 true）
+	CustomFreePriority    bool   // 混用模式下免费代理优先（默认 false）
+	CustomProbeInterval   int    // 禁用代理探测唤醒间隔（分钟，默认 10）
+	CustomRefreshInterval int    // 默认订阅刷新间隔（分钟，默认 60）
+	SingBoxPath           string // sing-box 二进制路径（默认 "sing-box"）
+	SingBoxBasePort       int    // sing-box 本地端口起始（默认 20000）
+
 	// ========== 兼容旧配置 ==========
 	MaxResponseMs int // 已废弃，使用 MaxLatencyMs 替代
 	MaxFailCount  int // 代理失败次数阈值
@@ -154,6 +163,16 @@ func DefaultConfig() *Config {
 		}
 	}
 	
+	// 读取订阅代理配置
+	customProxyMode := os.Getenv("CUSTOM_PROXY_MODE")
+	if customProxyMode == "" {
+		customProxyMode = "mixed"
+	}
+	singBoxPath := os.Getenv("SINGBOX_PATH")
+	if singBoxPath == "" {
+		singBoxPath = "sing-box"
+	}
+
 	return &Config{
 		// 基础服务配置
 		WebUIPort:         ":7778",
@@ -207,6 +226,14 @@ func DefaultConfig() *Config {
 		SourceFailThreshold:    3,  // 失败3次降级
 		SourceDisableThreshold: 5,  // 失败5次禁用
 		SourceCooldownMinutes:  30, // 禁用30分钟
+
+		// 自定义订阅代理配置
+		CustomProxyMode:       customProxyMode,
+		CustomPriority:        true,
+		CustomProbeInterval:   10,
+		CustomRefreshInterval: 60,
+		SingBoxPath:           singBoxPath,
+		SingBoxBasePort:       20000,
 
 		// 兼容旧配置
 		MaxResponseMs: 5000,
@@ -287,6 +314,29 @@ func Load() *Config {
 			if saved.AllowedCountries != nil {
 				cfg.AllowedCountries = saved.AllowedCountries
 			}
+
+			// 自定义订阅代理配置
+			if saved.CustomProxyMode != "" {
+				cfg.CustomProxyMode = saved.CustomProxyMode
+			}
+			if saved.CustomPriority != nil {
+				cfg.CustomPriority = *saved.CustomPriority
+			}
+			if saved.CustomFreePriority != nil {
+				cfg.CustomFreePriority = *saved.CustomFreePriority
+			}
+			if saved.CustomProbeInterval > 0 {
+				cfg.CustomProbeInterval = saved.CustomProbeInterval
+			}
+			if saved.CustomRefreshInterval > 0 {
+				cfg.CustomRefreshInterval = saved.CustomRefreshInterval
+			}
+			if saved.SingBoxPath != "" {
+				cfg.SingBoxPath = saved.SingBoxPath
+			}
+			if saved.SingBoxBasePort > 0 {
+				cfg.SingBoxBasePort = saved.SingBoxBasePort
+			}
 		}
 	}
 	cfgMu.Lock()
@@ -330,6 +380,15 @@ type savedConfig struct {
 	BlockedCountries []string `json:"blocked_countries,omitempty"`
 	AllowedCountries []string `json:"allowed_countries,omitempty"`
 
+	// 自定义订阅代理配置
+	CustomProxyMode       string `json:"custom_proxy_mode,omitempty"`
+	CustomPriority        *bool  `json:"custom_priority,omitempty"`
+	CustomFreePriority    *bool  `json:"custom_free_priority,omitempty"`
+	CustomProbeInterval   int    `json:"custom_probe_interval,omitempty"`
+	CustomRefreshInterval int    `json:"custom_refresh_interval,omitempty"`
+	SingBoxPath           string `json:"singbox_path,omitempty"`
+	SingBoxBasePort       int    `json:"singbox_base_port,omitempty"`
+
 	// 兼容旧配置
 	FetchInterval int `json:"fetch_interval,omitempty"`
 	CheckInterval int `json:"check_interval,omitempty"`
@@ -341,23 +400,32 @@ func Save(cfg *Config) error {
 	*globalCfg = *cfg
 	cfgMu.Unlock()
 
+	customPriority := cfg.CustomPriority
+	customFreePriority := cfg.CustomFreePriority
 	data, err := json.MarshalIndent(savedConfig{
-		PoolMaxSize:          cfg.PoolMaxSize,
-		PoolHTTPRatio:        cfg.PoolHTTPRatio,
-		PoolMinPerProtocol:   cfg.PoolMinPerProtocol,
-		MaxLatencyMs:         cfg.MaxLatencyMs,
-		MaxLatencyEmergency:  cfg.MaxLatencyEmergency,
-		MaxLatencyHealthy:    cfg.MaxLatencyHealthy,
-		ValidateConcurrency:  cfg.ValidateConcurrency,
-		ValidateTimeout:      cfg.ValidateTimeout,
-		HealthCheckInterval:  cfg.HealthCheckInterval,
-		HealthCheckBatchSize: cfg.HealthCheckBatchSize,
-		OptimizeInterval:     cfg.OptimizeInterval,
-		ReplaceThreshold:     cfg.ReplaceThreshold,
-		BlockedCountries:     cfg.BlockedCountries,
-		AllowedCountries:     cfg.AllowedCountries,
-		FetchInterval:        cfg.FetchInterval,
-		CheckInterval:        cfg.CheckInterval,
+		PoolMaxSize:           cfg.PoolMaxSize,
+		PoolHTTPRatio:         cfg.PoolHTTPRatio,
+		PoolMinPerProtocol:    cfg.PoolMinPerProtocol,
+		MaxLatencyMs:          cfg.MaxLatencyMs,
+		MaxLatencyEmergency:   cfg.MaxLatencyEmergency,
+		MaxLatencyHealthy:     cfg.MaxLatencyHealthy,
+		ValidateConcurrency:   cfg.ValidateConcurrency,
+		ValidateTimeout:       cfg.ValidateTimeout,
+		HealthCheckInterval:   cfg.HealthCheckInterval,
+		HealthCheckBatchSize:  cfg.HealthCheckBatchSize,
+		OptimizeInterval:      cfg.OptimizeInterval,
+		ReplaceThreshold:      cfg.ReplaceThreshold,
+		BlockedCountries:      cfg.BlockedCountries,
+		AllowedCountries:      cfg.AllowedCountries,
+		CustomProxyMode:       cfg.CustomProxyMode,
+		CustomPriority:        &customPriority,
+		CustomFreePriority:    &customFreePriority,
+		CustomProbeInterval:   cfg.CustomProbeInterval,
+		CustomRefreshInterval: cfg.CustomRefreshInterval,
+		SingBoxPath:           cfg.SingBoxPath,
+		SingBoxBasePort:       cfg.SingBoxBasePort,
+		FetchInterval:         cfg.FetchInterval,
+		CheckInterval:         cfg.CheckInterval,
 	}, "", "  ")
 	if err != nil {
 		return err

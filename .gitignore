@@ -46,3 +46,6 @@ docker-compose.dokploy.yml
 
 # Docker volumes
 .docker-data/
+
+
+tmp/

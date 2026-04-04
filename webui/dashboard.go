@@ -52,7 +52,7 @@ body::after{content:'';position:fixed;top:0;left:0;width:100%;height:100%;backgr
 .control-panel{background:var(--bg-card);border:1px solid var(--border-heavy);padding:20px;margin-bottom:20px;box-shadow:0 0 20px rgba(0,255,65,0.15)}
 .control-header{display:flex;align-items:center;justify-content:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
 .control-title{font-size:14px;font-weight:700;letter-spacing:0.12em;font-family:var(--mono);text-transform:uppercase;color:var(--fg);text-shadow:0 0 10px var(--fg)}
-.control-ops{display:flex;flex-direction:column;gap:8px}
+.control-ops{display:flex;flex-direction:row;gap:8px}
 .ctrl-btn-primary{width:100%;padding:10px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border-heavy);background:var(--bg-card);color:var(--fg);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em;transition:all 0.2s}
 .ctrl-btn-primary:hover{background:var(--border);box-shadow:0 0 15px var(--border-heavy);color:var(--fg);text-shadow:0 0 5px var(--fg)}
 .ctrl-btn-secondary{width:100%;padding:8px;font-size:9px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--fg-dim);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em;transition:all 0.2s}
@@ -78,16 +78,16 @@ body::after{content:'';position:fixed;top:0;left:0;width:100%;height:100%;backgr
 }
 
 /* Health Grid - 侧边栏紧凑布局 */
-.health-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:2px;background:var(--bg);border:1px solid var(--border);margin-bottom:16px;box-shadow:0 0 20px rgba(0,255,65,0.1)}
-.health-card{background:var(--bg-card);padding:16px;position:relative;border:1px solid var(--border)}
-.health-label{font-size:8px;text-transform:uppercase;letter-spacing:0.15em;color:var(--fg-dim);margin-bottom:8px;font-weight:600;font-family:var(--mono)}
-.health-value{font-size:24px;font-weight:700;font-family:var(--mono);line-height:1;letter-spacing:0.05em;color:var(--fg);text-shadow:0 0 10px var(--fg)}
+.health-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--bg);border:1px solid var(--border);margin-bottom:10px;box-shadow:0 0 20px rgba(0,255,65,0.1)}
+.health-card{background:var(--bg-card);padding:8px 10px;position:relative;border:1px solid var(--border)}
+.health-label{font-size:8px;text-transform:uppercase;letter-spacing:0.15em;color:var(--fg-dim);margin-bottom:4px;font-weight:600;font-family:var(--mono)}
+.health-value{font-size:18px;font-weight:700;font-family:var(--mono);line-height:1;letter-spacing:0.05em;color:var(--fg);text-shadow:0 0 10px var(--fg)}
 .health-status{position:absolute;top:16px;right:16px;width:8px;height:8px;border-radius:50%}
 .health-status.healthy{background:var(--green);box-shadow:0 0 8px var(--green)}
 .health-status.warning{background:var(--orange);box-shadow:0 0 8px var(--orange)}
 .health-status.critical{background:var(--red);box-shadow:0 0 8px var(--red)}
 .health-status.emergency{background:var(--red);box-shadow:0 0 15px var(--red),0 0 0 3px rgba(255,0,51,0.3);animation:pulse 1s infinite}
-.health-meta{font-size:9px;color:var(--gray-5);margin-top:6px;font-family:var(--mono)}
+.health-meta{font-size:8px;color:var(--gray-5);margin-top:3px;font-family:var(--mono)}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}}
 
@@ -184,7 +184,7 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
   .content-grid{grid-template-columns:1fr}
   .sidebar{position:static}
   .health-grid{grid-template-columns:repeat(4,1fr)}
-  .health-card{padding:20px}
+  .health-card{padding:10px 12px}
   .health-value{font-size:32px}
   .log-box{height:400px}
   .sidebar .section{border:1px solid var(--border)}
@@ -225,8 +225,12 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
                 <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
               </svg>
             </a>
+            <button class="tab guest-only" onclick="openContributeModal()" style="color:var(--yellow)" data-i18n="contribute.nav">贡献订阅</button>
             <a href="/login" class="tab" id="login-link" style="display: none;" data-i18n="nav.login">登录</a>
             <a href="/logout" class="tab admin-only" data-i18n="nav.logout">退出</a>
+            <button class="tab admin-only" onclick="openSettings()" title="" data-i18n-title="contribute.settings" style="padding:4px 8px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            </button>
           </div>
         </div>
         <div class="proxy-content">
@@ -243,10 +247,25 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
         <div class="control-ops">
           <button class="ctrl-btn-primary" onclick="triggerFetch()" data-i18n="actions.fetch">抓取代理</button>
           <button class="ctrl-btn-secondary" onclick="refreshLatency()" data-i18n="actions.refresh">刷新延迟</button>
-          <button class="ctrl-btn-secondary" onclick="openSettings()" data-i18n="actions.config">配置池子</button>
+          <!-- 配置按钮已移到顶部导航 -->
         </div>
       </div>
 
+      <!-- 订阅管理面板 -->
+      <div class="control-panel admin-only" style="margin-bottom:20px">
+        <div class="control-header">
+          <div class="control-title">[ SUBSCRIPTIONS ]</div>
+        </div>
+        <div id="sub-list" style="margin-bottom:8px;font-size:11px;max-height:200px;overflow-y:auto"></div>
+        <div class="control-ops">
+          <button class="ctrl-btn-primary" onclick="openSubModal()" data-i18n="sub.add">添加订阅</button>
+          <button class="ctrl-btn-secondary" onclick="refreshAllSubs()" data-i18n="sub.refresh_all">刷新所有订阅</button>
+        </div>
+        <div id="sub-status" style="margin-top:8px;font-size:10px;color:var(--fg-dim)"></div>
+      </div>
+
+      <!-- 免费代理池 -->
+      <div style="font-size:8px;color:var(--fg-dim);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:2px;font-weight:600" data-i18n="health.free_pool">[ FREE_POOL ]</div>
       <div class="health-grid">
         <div class="health-card">
           <div class="health-label" data-i18n="health.status">池子状态</div>
@@ -254,7 +273,7 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
           <div class="health-status" id="pool-status-dot"></div>
         </div>
         <div class="health-card">
-          <div class="health-label" data-i18n="health.total">总代理数</div>
+          <div class="health-label" data-i18n="health.total">免费代理</div>
           <div class="health-value" id="stat-total">0</div>
           <div class="health-meta"><span id="stat-capacity">0</span> <span data-i18n="health.capacity">容量</span></div>
         </div>
@@ -267,6 +286,26 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
           <div class="health-label">SOCKS5</div>
           <div class="health-value" id="stat-socks5">0</div>
           <div class="health-meta"><span id="socks5-slots">0</span> <span data-i18n="health.slots">槽位</span> · <span id="socks5-avg">—</span>ms <span data-i18n="health.avg">平均</span></div>
+        </div>
+      </div>
+
+      <!-- 订阅代理池 -->
+      <div style="font-size:8px;color:var(--yellow);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:2px;font-weight:600" data-i18n="health.sub_pool">[ SUBSCRIPTION_POOL ]</div>
+      <div class="health-grid" style="grid-template-columns:repeat(3,1fr)">
+        <div class="health-card">
+          <div class="health-label" data-i18n="health.sub_sources">订阅源</div>
+          <div class="health-value" id="stat-sub-count">0</div>
+          <div class="health-meta" id="stat-sub-meta">—</div>
+        </div>
+        <div class="health-card">
+          <div class="health-label" data-i18n="health.available">可用</div>
+          <div class="health-value" id="stat-custom">0</div>
+          <div class="health-meta" id="custom-meta">—</div>
+        </div>
+        <div class="health-card">
+          <div class="health-label" data-i18n="health.disabled">禁用/待恢复</div>
+          <div class="health-value" id="stat-custom-disabled">0</div>
+          <div class="health-meta" id="custom-disabled-meta" data-i18n="health.awaiting_probe">探测唤醒中</div>
         </div>
       </div>
 
@@ -301,74 +340,56 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
 
 <div class="modal-overlay" id="settings-modal" onclick="if(event.target===this) closeSettings()">
   <div class="modal">
-    <div class="modal-title" data-i18n="config.title">池子配置</div>
-    
+    <div class="modal-title" data-i18n="config.system_title">系统设置</div>
+
     <div class="form-section">
-      <div class="form-section-title" data-i18n="config.section_capacity">池子容量</div>
+      <div class="form-section-title" data-i18n="config.section_proxy_mode">代理使用模式</div>
+      <div class="form-grid">
+        <div class="form-group" style="grid-column:1/-1">
+          <label data-i18n="config.proxy_strategy">出站代理选择策略</label>
+          <select id="cfg-custom-mode" style="width:100%;padding:10px;background:var(--bg-card);border:1px solid var(--border);color:var(--fg);font-family:var(--mono);font-size:12px">
+            <option value="mixed_custom_priority" data-i18n="config.mode_mixed_custom">混合 · 订阅优先</option>
+            <option value="mixed_free_priority" data-i18n="config.mode_mixed_free">混合 · 免费优先</option>
+            <option value="mixed" data-i18n="config.mode_mixed">混合 · 平等</option>
+            <option value="custom_only" data-i18n="config.mode_custom_only">仅订阅代理</option>
+            <option value="free_only" data-i18n="config.mode_free_only">仅免费代理</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- 免费池设置 -->
+    <div class="form-section">
+      <div class="form-section-title" data-i18n="config.section_free_pool">免费代理池</div>
       <div class="form-grid">
         <div class="form-group">
-          <label data-i18n="config.max_size">最大容量</label>
+          <label data-i18n="config.pool_capacity">池子容量</label>
           <input type="number" id="cfg-pool-size" min="10" max="500">
-          <div class="form-help" data-i18n="config.max_size_help">代理池总槽位数</div>
+          <div class="form-help" data-i18n="config.pool_capacity_help">免费代理总槽位</div>
         </div>
         <div class="form-group">
-          <label data-i18n="config.http_ratio">HTTP占比</label>
+          <label data-i18n="config.http_ratio_label">HTTP 占比</label>
           <input type="number" id="cfg-http-ratio" min="0" max="1" step="0.05">
-          <div class="form-help" data-i18n="config.http_ratio_help">0.5 = 50% HTTP, 50% SOCKS5</div>
+          <div class="form-help" data-i18n="config.http_ratio_help">0.3 = 30% HTTP</div>
         </div>
         <div class="form-group">
           <label data-i18n="config.min_per_protocol">每协议最小数</label>
           <input type="number" id="cfg-min-per-protocol" min="1" max="50">
-          <div class="form-help" data-i18n="config.min_per_protocol_help">最小保证数量</div>
         </div>
-      </div>
-    </div>
-
-    <div class="form-section">
-      <div class="form-section-title" data-i18n="config.section_latency">延迟标准 (ms)</div>
-      <div class="form-grid">
         <div class="form-group">
-          <label data-i18n="config.latency_standard">标准模式</label>
+          <label data-i18n="config.latency_standard">标准延迟 (ms)</label>
           <input type="number" id="cfg-max-latency" min="500" max="5000" step="100">
         </div>
         <div class="form-group">
-          <label data-i18n="config.latency_healthy">健康模式</label>
+          <label data-i18n="config.latency_healthy">健康延迟 (ms)</label>
           <input type="number" id="cfg-max-latency-healthy" min="500" max="3000" step="100">
         </div>
         <div class="form-group">
-          <label data-i18n="config.latency_emergency">紧急模式</label>
+          <label data-i18n="config.latency_emergency">紧急延迟 (ms)</label>
           <input type="number" id="cfg-max-latency-emergency" min="1000" max="5000" step="100">
         </div>
-      </div>
-    </div>
-
-    <div class="form-section">
-      <div class="form-section-title" data-i18n="config.section_validation">验证与健康检查</div>
-      <div class="form-grid">
         <div class="form-group">
-          <label data-i18n="config.validate_concurrency">验证并发数</label>
-          <input type="number" id="cfg-concurrency" min="50" max="500" step="50">
-        </div>
-        <div class="form-group">
-          <label data-i18n="config.validate_timeout">验证超时(秒)</label>
-          <input type="number" id="cfg-timeout" min="3" max="15">
-        </div>
-        <div class="form-group">
-          <label data-i18n="config.health_interval">检查间隔(分钟)</label>
-          <input type="number" id="cfg-health-interval" min="1" max="60">
-        </div>
-        <div class="form-group">
-          <label data-i18n="config.health_batch">每批数量</label>
-          <input type="number" id="cfg-health-batch" min="10" max="100" step="10">
-        </div>
-      </div>
-    </div>
-
-    <div class="form-section">
-      <div class="form-section-title" data-i18n="config.section_optimization">优化设置</div>
-      <div class="form-grid">
-        <div class="form-group">
-          <label data-i18n="config.optimize_interval">优化间隔(分钟)</label>
+          <label data-i18n="config.optimize_interval">优化间隔 (分钟)</label>
           <input type="number" id="cfg-optimize-interval" min="10" max="120" step="10">
         </div>
         <div class="form-group">
@@ -379,13 +400,54 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
       </div>
     </div>
 
+    <!-- 订阅池设置 -->
+    <div class="form-section">
+      <div class="form-section-title" data-i18n="config.section_sub_pool">订阅代理池</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label data-i18n="config.probe_interval">探测间隔 (分钟)</label>
+          <input type="number" id="cfg-custom-probe" min="5" max="120" step="5">
+          <div class="form-help" data-i18n="config.probe_interval_help">禁用代理的唤醒探测间隔</div>
+        </div>
+        <div class="form-group">
+          <label data-i18n="config.refresh_interval">默认刷新间隔 (分钟)</label>
+          <input type="number" id="cfg-custom-refresh" min="10" max="1440" step="10">
+          <div class="form-help" data-i18n="config.refresh_interval_help">新订阅的默认刷新周期</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 验证与检查 -->
+    <div class="form-section">
+      <div class="form-section-title" data-i18n="config.section_validation">验证与健康检查</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label data-i18n="config.validate_concurrency">验证并发数</label>
+          <input type="number" id="cfg-concurrency" min="50" max="500" step="50">
+        </div>
+        <div class="form-group">
+          <label data-i18n="config.validate_timeout">验证超时 (秒)</label>
+          <input type="number" id="cfg-timeout" min="3" max="15">
+        </div>
+        <div class="form-group">
+          <label data-i18n="config.health_interval">检查间隔 (分钟)</label>
+          <input type="number" id="cfg-health-interval" min="1" max="60">
+        </div>
+        <div class="form-group">
+          <label data-i18n="config.health_batch">每批数量</label>
+          <input type="number" id="cfg-health-batch" min="10" max="100" step="10">
+        </div>
+      </div>
+    </div>
+
+    <!-- 地理过滤 -->
     <div class="form-section">
       <div class="form-section-title" data-i18n="config.section_geo_filter">地理过滤</div>
       <div class="form-grid">
         <div class="form-group">
           <label data-i18n="config.allowed_countries">允许国家（白名单）</label>
           <input type="text" id="cfg-allowed-countries" placeholder="US,JP,KR,SG">
-          <div class="form-help" data-i18n="config.allowed_countries_help">非空时仅允许这些国家入池，忽略黑名单</div>
+          <div class="form-help" data-i18n="config.allowed_countries_help">非空时仅允许这些国家，忽略黑名单</div>
         </div>
         <div class="form-group">
           <label data-i18n="config.blocked_countries">屏蔽国家（黑名单）</label>
@@ -398,6 +460,99 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeSettings()" data-i18n="config.cancel">取消</button>
       <button class="btn" onclick="saveConfig()" data-i18n="config.save">保存配置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加订阅弹窗 -->
+<div class="modal-overlay" id="sub-modal" onclick="if(event.target===this) closeSubModal()" style="display:none">
+  <div class="modal" style="max-width:500px">
+    <div class="modal-title" data-i18n="sub.add_title">添加订阅</div>
+    <div class="form-section">
+      <div class="form-grid">
+        <div class="form-group">
+          <label data-i18n="sub.name">名称</label>
+          <input type="text" id="sub-name" placeholder="">
+        </div>
+        <div class="form-group" style="grid-column:1/-1">
+          <label data-i18n="sub.import_mode">导入方式</label>
+          <div style="display:flex;gap:8px;margin-bottom:8px">
+            <button id="tab-url" class="ctrl-btn-primary" onclick="switchSubTab('url')" style="flex:1" data-i18n="sub.tab_url">订阅 URL</button>
+            <button id="tab-file" class="ctrl-btn-secondary" onclick="switchSubTab('file')" style="flex:1" data-i18n="sub.tab_file">上传文件</button>
+          </div>
+        </div>
+        <div class="form-group" id="sub-url-group" style="grid-column:1/-1">
+          <label data-i18n="sub.url_label">订阅 URL</label>
+          <input type="text" id="sub-url" placeholder="https://example.com/sub?token=xxx">
+          <div class="form-help" data-i18n="sub.url_help">自动识别格式</div>
+        </div>
+        <div class="form-group" id="sub-file-group" style="grid-column:1/-1;display:none">
+          <label data-i18n="sub.file_label">配置文件</label>
+          <div style="border:1px dashed var(--border);padding:16px;text-align:center;cursor:pointer;transition:all 0.2s"
+               onclick="document.getElementById('sub-file-input').click()"
+               ondragover="event.preventDefault();this.style.borderColor='var(--fg)'"
+               ondragleave="this.style.borderColor='var(--border)'"
+               ondrop="event.preventDefault();this.style.borderColor='var(--border)';handleFileDrop(event)">
+            <div id="sub-file-label" style="color:var(--fg-dim);font-size:11px" data-i18n="sub.file_drop">点击选择或拖拽文件到此处</div>
+          </div>
+          <input type="file" id="sub-file-input" accept=".yaml,.yml,.txt,.conf,.json" style="display:none" onchange="handleFileSelect(this)">
+        </div>
+        <div class="form-group">
+          <label data-i18n="sub.refresh_min">刷新间隔 (分钟)</label>
+          <input type="number" id="sub-refresh" value="60" min="10" max="1440" step="10">
+          <div class="form-help" data-i18n="sub.refresh_min_help">仅 URL 模式有效</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeSubModal()" data-i18n="sub.cancel">取消</button>
+      <button class="btn" onclick="addSubscription()" data-i18n="sub.submit">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- 访客贡献订阅弹窗 -->
+<div class="modal-overlay" id="contribute-modal" onclick="if(event.target===this) closeContributeModal()" style="display:none">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-title" data-i18n="contribute.title">贡献订阅</div>
+    <div style="color:var(--fg-dim);font-size:11px;margin-bottom:16px;line-height:1.6">
+      <span data-i18n="contribute.desc">分享你的代理订阅，帮助丰富代理池。</span><br>
+      <span style="color:var(--gray-5);font-size:10px" data-i18n="contribute.privacy">你的订阅仅用于此代理池，不会被用于其他渠道。连续探测无可用节点将自动移除。</span>
+    </div>
+    <div class="form-section">
+      <div class="form-grid">
+        <div class="form-group" style="grid-column:1/-1">
+          <label data-i18n="sub.name">名称</label>
+          <input type="text" id="contribute-name" placeholder="">
+        </div>
+        <div class="form-group" style="grid-column:1/-1">
+          <label data-i18n="sub.import_mode">导入方式</label>
+          <div style="display:flex;gap:8px;margin-bottom:8px">
+            <button id="ctab-url" class="ctrl-btn-primary" onclick="switchContributeTab('url')" style="flex:1" data-i18n="sub.tab_url">订阅 URL</button>
+            <button id="ctab-file" class="ctrl-btn-secondary" onclick="switchContributeTab('file')" style="flex:1" data-i18n="sub.tab_file">上传文件</button>
+          </div>
+        </div>
+        <div class="form-group" id="contribute-url-group" style="grid-column:1/-1">
+          <label data-i18n="sub.url_label">订阅 URL</label>
+          <input type="text" id="contribute-url" placeholder="https://example.com/sub?token=xxx">
+          <div class="form-help" data-i18n="sub.url_help">自动识别格式</div>
+        </div>
+        <div class="form-group" id="contribute-file-group" style="grid-column:1/-1;display:none">
+          <label data-i18n="sub.file_label">配置文件</label>
+          <div style="border:1px dashed var(--border);padding:16px;text-align:center;cursor:pointer;transition:all 0.2s"
+               onclick="document.getElementById('contribute-file-input').click()"
+               ondragover="event.preventDefault();this.style.borderColor='var(--fg)'"
+               ondragleave="this.style.borderColor='var(--border)'"
+               ondrop="event.preventDefault();this.style.borderColor='var(--border)';handleContributeFileDrop(event)">
+            <div id="contribute-file-label" style="color:var(--fg-dim);font-size:11px" data-i18n="sub.file_drop">点击选择或拖拽文件到此处</div>
+          </div>
+          <input type="file" id="contribute-file-input" accept=".yaml,.yml,.txt,.conf,.json" style="display:none" onchange="handleContributeFileSelect(this)">
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeContributeModal()" data-i18n="sub.cancel">取消</button>
+      <button class="btn" id="contribute-submit-btn" onclick="submitContribution()" data-i18n="contribute.submit">提交</button>
     </div>
   </div>
 </div>
@@ -483,6 +638,82 @@ const i18n = {
     'msg.delete_confirm': '确定删除代理',
     'msg.config_saved': '配置保存成功',
     'msg.config_failed': '配置保存失败',
+    // 设置弹窗新增
+    'config.system_title': '系统设置',
+    'config.section_proxy_mode': '代理使用模式',
+    'config.proxy_strategy': '出站代理选择策略',
+    'config.mode_mixed_custom': '混合 · 订阅优先（有订阅代理时优先使用，无可用则降级到免费）',
+    'config.mode_mixed_free': '混合 · 免费优先（有免费代理时优先使用，无可用则降级到订阅）',
+    'config.mode_mixed': '混合 · 平等（不区分来源，按延迟/随机选择）',
+    'config.mode_custom_only': '仅订阅代理（只使用订阅导入的代理）',
+    'config.mode_free_only': '仅免费代理（只使用公开抓取的代理）',
+    'config.section_free_pool': '免费代理池',
+    'config.pool_capacity': '池子容量',
+    'config.pool_capacity_help': '免费代理总槽位',
+    'config.http_ratio_label': 'HTTP 占比',
+    'config.latency_standard': '标准延迟 (ms)',
+    'config.latency_healthy': '健康延迟 (ms)',
+    'config.latency_emergency': '紧急延迟 (ms)',
+    'config.section_sub_pool': '订阅代理池',
+    'config.probe_interval': '探测间隔 (分钟)',
+    'config.probe_interval_help': '禁用代理的唤醒探测间隔',
+    'config.refresh_interval': '默认刷新间隔 (分钟)',
+    'config.refresh_interval_help': '新订阅的默���刷新周期',
+    'config.geo_filter_help': '免费代理删除，订阅代理禁用',
+    // 健康面板
+    'health.free_pool': 'FREE_POOL',
+    'health.sub_pool': 'SUBSCRIPTION_POOL',
+    'health.free_proxies': '免费代理',
+    'health.sub_sources': '订阅源',
+    'health.available': '可用',
+    'health.disabled': '禁用/待恢复',
+    'health.awaiting_probe': '等待探测唤醒',
+    'health.no_disabled': '无禁用节点',
+    'health.singbox_running': 'sing-box 运行中',
+    'health.ready': '就绪',
+    'health.not_added': '未添加',
+    'health.total_nodes': '共 {0} 节点',
+    // 订阅面板
+    'sub.title': 'SUBSCRIPTIONS',
+    'sub.add': '添加订阅',
+    'sub.refresh_all': '刷新所有订阅',
+    'sub.empty': '暂无订阅',
+    'sub.nodes': '节点',
+    'sub.available': '可用',
+    'sub.disabled_label': '禁用',
+    'sub.contributed': '贡献',
+    // 添加订阅弹窗
+    'sub.add_title': '添加订阅',
+    'sub.name': '名称',
+    'sub.import_mode': '导入方式',
+    'sub.tab_url': '订阅 URL',
+    'sub.tab_file': '上传文件',
+    'sub.url_label': '订阅 URL',
+    'sub.url_help': '自动识别格式：Clash YAML / V2ray 链接 / Base64 / 纯文本',
+    'sub.file_label': '配置文件',
+    'sub.file_drop': '点击选择或拖拽文件到此处',
+    'sub.file_formats': '支持 Clash YAML / V2ray 订阅 / 纯文本',
+    'sub.refresh_min': '刷新间隔 (分钟)',
+    'sub.refresh_min_help': '仅 URL 模式有效，上传文件不自动刷新',
+    'sub.cancel': '取消',
+    'sub.submit': '添加',
+    // 贡献订阅弹窗
+    'contribute.title': '贡献订阅',
+    'contribute.desc': '分享你的代理订阅，帮助丰富代理池。',
+    'contribute.privacy': '你的订阅仅用于此代理池，不会被用于其他渠道。连续探测无可用节点将自动移除。',
+    'contribute.submit': '提交',
+    'contribute.validating': '验证中...',
+    'contribute.nav': '贡献订阅',
+    'contribute.settings': '系统设置',
+    // 消息
+    'msg.sub_added': '订阅已添加，正在导入节点...',
+    'msg.sub_refreshed': '刷新已启动',
+    'msg.sub_refresh_all': '所有订阅刷新已启动',
+    'msg.sub_delete_confirm': '确定删除此订阅？',
+    'msg.sub_url_required': '请填写订阅 URL',
+    'msg.sub_file_required': '请选择或拖拽配置文件',
+    'msg.contribute_thanks': '感谢贡献！订阅已添加，正在导入节点...',
+    'msg.submit_failed': '提交失败: ',
   },
   en: {
     'nav.config': 'Config',
@@ -562,6 +793,76 @@ const i18n = {
     'msg.delete_confirm': 'Delete proxy',
     'msg.config_saved': 'Configuration saved successfully',
     'msg.config_failed': 'Failed to save configuration',
+    'config.system_title': 'System Settings',
+    'config.section_proxy_mode': 'Proxy Mode',
+    'config.proxy_strategy': 'Outbound Proxy Strategy',
+    'config.mode_mixed_custom': 'Mixed · Subscription Priority',
+    'config.mode_mixed_free': 'Mixed · Free Priority',
+    'config.mode_mixed': 'Mixed · Equal (select by latency/random)',
+    'config.mode_custom_only': 'Subscription Only',
+    'config.mode_free_only': 'Free Only',
+    'config.section_free_pool': 'Free Proxy Pool',
+    'config.pool_capacity': 'Pool Capacity',
+    'config.pool_capacity_help': 'Total free proxy slots',
+    'config.http_ratio_label': 'HTTP Ratio',
+    'config.latency_standard': 'Standard Latency (ms)',
+    'config.latency_healthy': 'Healthy Latency (ms)',
+    'config.latency_emergency': 'Emergency Latency (ms)',
+    'config.section_sub_pool': 'Subscription Pool',
+    'config.probe_interval': 'Probe Interval (min)',
+    'config.probe_interval_help': 'Wake-up probe interval for disabled proxies',
+    'config.refresh_interval': 'Default Refresh (min)',
+    'config.refresh_interval_help': 'Default refresh cycle for new subscriptions',
+    'config.geo_filter_help': 'Free: delete, Subscription: disable',
+    'health.free_pool': 'FREE_POOL',
+    'health.sub_pool': 'SUBSCRIPTION_POOL',
+    'health.free_proxies': 'Free Proxies',
+    'health.sub_sources': 'Sources',
+    'health.available': 'Available',
+    'health.disabled': 'Disabled',
+    'health.awaiting_probe': 'Awaiting probe',
+    'health.no_disabled': 'No disabled nodes',
+    'health.singbox_running': 'sing-box running',
+    'health.ready': 'Ready',
+    'health.not_added': 'None',
+    'health.total_nodes': '{0} total nodes',
+    'sub.title': 'SUBSCRIPTIONS',
+    'sub.add': 'Add Subscription',
+    'sub.refresh_all': 'Refresh All',
+    'sub.empty': 'No subscriptions',
+    'sub.nodes': 'nodes',
+    'sub.available': 'available',
+    'sub.disabled_label': 'disabled',
+    'sub.contributed': 'Contributed',
+    'sub.add_title': 'Add Subscription',
+    'sub.name': 'Name',
+    'sub.import_mode': 'Import Mode',
+    'sub.tab_url': 'URL',
+    'sub.tab_file': 'Upload File',
+    'sub.url_label': 'Subscription URL',
+    'sub.url_help': 'Auto-detect: Clash YAML / V2ray / Base64 / Plain text',
+    'sub.file_label': 'Config File',
+    'sub.file_drop': 'Click or drag file here',
+    'sub.file_formats': 'Supports Clash YAML / V2ray / Plain text',
+    'sub.refresh_min': 'Refresh Interval (min)',
+    'sub.refresh_min_help': 'URL mode only; file uploads do not auto-refresh',
+    'sub.cancel': 'Cancel',
+    'sub.submit': 'Add',
+    'contribute.title': 'Contribute Subscription',
+    'contribute.desc': 'Share your proxy subscription to enrich the pool.',
+    'contribute.privacy': 'Your subscription is only used for this proxy pool. Subscriptions with no available nodes for 7 days will be auto-removed.',
+    'contribute.submit': 'Submit',
+    'contribute.validating': 'Validating...',
+    'contribute.nav': 'Contribute',
+    'contribute.settings': 'Settings',
+    'msg.sub_added': 'Subscription added, importing nodes...',
+    'msg.sub_refreshed': 'Refresh started',
+    'msg.sub_refresh_all': 'Refreshing all subscriptions',
+    'msg.sub_delete_confirm': 'Delete this subscription?',
+    'msg.sub_url_required': 'Please enter subscription URL',
+    'msg.sub_file_required': 'Please select or drag a config file',
+    'msg.contribute_thanks': 'Thanks! Subscription added, importing nodes...',
+    'msg.submit_failed': 'Submit failed: ',
   }
 };
 
@@ -582,9 +883,14 @@ function updateI18n() {
     const key = el.getAttribute('data-i18n');
     el.textContent = t(key);
   });
+  // 更新 title 属性
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    const key = el.getAttribute('data-i18n-title');
+    el.title = t(key);
+  });
   document.getElementById('lang-btn').textContent = currentLang === 'zh' ? 'EN' : '中';
   document.title = currentLang === 'zh' ? 'GoProxy — 智能代理池' : 'GoProxy — Intelligent Pool';
-  
+
   // 更新筛选下拉框标签
   const protocolLabel = document.getElementById('protocol-filter-label');
   if (protocolLabel) protocolLabel.textContent = t('proxy.filter_protocol');
@@ -600,6 +906,9 @@ function toggleLang() {
   if (allProxies.length > 0) {
     filterAndRender();
   }
+  // 重新渲染包含动态 t() 文字的模块
+  loadSubscriptions();
+  loadPoolStatus();
 }
 
 // 页面加载时恢复语言设置
@@ -643,15 +952,12 @@ function updateUIByRole() {
     }
   });
   
-  // 显示/隐藏登录链接（访客模式下显示）
+  // 显示/隐藏登录链接和访客专属元素
   const loginLink = document.getElementById('login-link');
-  if (loginLink) {
-    if (isAdmin) {
-      loginLink.style.display = 'none';
-    } else {
-      loginLink.style.display = 'inline-flex';
-    }
-  }
+  if (loginLink) loginLink.style.display = isAdmin ? 'none' : 'inline-flex';
+  document.querySelectorAll('.guest-only').forEach(el => {
+    el.style.display = isAdmin ? 'none' : 'inline-flex';
+  });
   
   // 更新用户模式标识
   const modeEl = document.getElementById('user-mode');
@@ -702,7 +1008,8 @@ async function loadPoolStatus() {
   const status = await api('/api/pool/status');
   if (!status) return;
 
-  document.getElementById('stat-total').textContent = status.Total;
+  const freeTotal = status.Total - (status.CustomCount || 0);
+  document.getElementById('stat-total').textContent = freeTotal;
   document.getElementById('stat-capacity').textContent = status.HTTPSlots + status.SOCKS5Slots;
   document.getElementById('stat-http').textContent = status.HTTP;
   document.getElementById('stat-socks5').textContent = status.SOCKS5;
@@ -739,11 +1046,19 @@ async function loadQualityDistribution() {
   }
 }
 
+let subNameMap = {};
 async function loadProxies() {
+  // 先加载订阅名称映射
+  const subs = await api('/api/subscriptions');
+  if (subs) {
+    subNameMap = {};
+    subs.forEach(s => { subNameMap[s.id] = s.name || t('sub.add_title'); });
+  }
+
   const path = currentProtocol ? '/api/proxies?protocol=' + currentProtocol : '/api/proxies';
   const proxies = await api(path);
   if (!proxies) return;
-  
+
   allProxies = proxies;
   updateCountryOptions();
   filterAndRender();
@@ -811,10 +1126,16 @@ function renderProxies(proxies) {
       const grade = (p.quality_grade || 'C').toLowerCase();
       const latencyClass = 'grade-' + grade;
       
-      html += '<tr>';
+      const rowStyle = p.source === 'custom' ? ' style="border-left:2px solid var(--yellow)"' : '';
+      html += '<tr' + rowStyle + '>';
       html += '<td class="cell-grade grade-' + grade + '">' + (p.quality_grade || 'C') + '</td>';
-      html += '<td><span class="badge badge-' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>';
-      html += '<td class="cell-mono cell-clickable" onclick="copyToClipboard(\'' + p.address + '\')" title="点击复制">' + p.address + '</td>';
+      html += '<td><span class="badge badge-' + p.protocol + '">' + p.protocol.toUpperCase() + '</span>';
+      if (p.source === 'custom') {
+        const subName = subNameMap[p.subscription_id] || t('sub.add_title');
+        html += ' <span style="display:inline-block;background:var(--yellow);color:#000;font-size:8px;font-weight:700;padding:1px 4px;margin-left:4px;letter-spacing:0.05em">' + subName + '</span>';
+      }
+      html += '</td>';
+      html += '<td class="cell-mono cell-clickable" onclick="copyToClipboard(\'' + p.address + '\')" title="Copy">' + p.address + '</td>';
       html += '<td class="cell-mono">' + (p.exit_ip || '—') + '</td>';
       html += '<td>' + flag + ' ' + (p.exit_location || '—') + '</td>';
       html += '<td class="cell-mono ' + latencyClass + '">' + (p.latency > 0 ? p.latency + 'ms' : '—') + '</td>';
@@ -905,6 +1226,19 @@ async function openSettings() {
   document.getElementById('cfg-replace-threshold').value = cfg.replace_threshold;
   document.getElementById('cfg-blocked-countries').value = (cfg.blocked_countries || []).join(',');
   document.getElementById('cfg-allowed-countries').value = (cfg.allowed_countries || []).join(',');
+  // 将 mode + priority 映射到5种模式
+  const mode = cfg.custom_proxy_mode || 'mixed';
+  const customPri = cfg.custom_priority === true;
+  const freePri = cfg.custom_free_priority === true;
+  let uiMode = 'mixed';
+  if (mode === 'custom_only') uiMode = 'custom_only';
+  else if (mode === 'free_only') uiMode = 'free_only';
+  else if (mode === 'mixed' && customPri) uiMode = 'mixed_custom_priority';
+  else if (mode === 'mixed' && freePri) uiMode = 'mixed_free_priority';
+  else uiMode = 'mixed';
+  document.getElementById('cfg-custom-mode').value = uiMode;
+  document.getElementById('cfg-custom-probe').value = cfg.custom_probe_interval || 10;
+  document.getElementById('cfg-custom-refresh').value = cfg.custom_refresh_interval || 60;
 
   document.getElementById('settings-modal').classList.add('show');
 }
@@ -929,6 +1263,21 @@ async function saveConfig() {
     replace_threshold: parseFloat(document.getElementById('cfg-replace-threshold').value),
     blocked_countries: document.getElementById('cfg-blocked-countries').value.split(',').map(s => s.trim().toUpperCase()).filter(s => s),
     allowed_countries: document.getElementById('cfg-allowed-countries').value.split(',').map(s => s.trim().toUpperCase()).filter(s => s),
+    custom_proxy_mode: (() => {
+      const m = document.getElementById('cfg-custom-mode').value;
+      if (m === 'custom_only') return 'custom_only';
+      if (m === 'free_only') return 'free_only';
+      return 'mixed';
+    })(),
+    custom_priority: (() => {
+      const m = document.getElementById('cfg-custom-mode').value;
+      if (m === 'mixed_custom_priority') return true;
+      if (m === 'mixed_free_priority') return false;
+      return false;
+    })(),
+    custom_free_priority: document.getElementById('cfg-custom-mode').value === 'mixed_free_priority',
+    custom_probe_interval: parseInt(document.getElementById('cfg-custom-probe').value),
+    custom_refresh_interval: parseInt(document.getElementById('cfg-custom-refresh').value),
   };
 
   const result = await api('/api/config/save', {
@@ -954,10 +1303,273 @@ async function loadAll() {
   loadLogs();
 }
 
+// ========== 订阅管理 ==========
+
+async function loadSubscriptions() {
+  const subs = await api('/api/subscriptions');
+  const el = document.getElementById('sub-list');
+  if (!el || !subs) return;
+
+  if (subs.length === 0) {
+    el.innerHTML = '<div style="color:var(--gray-5);text-align:center;padding:8px">' + t('sub.empty') + '</div>';
+    return;
+  }
+
+  el.innerHTML = subs.map(s => {
+    const statusColor = s.status === 'active' ? 'var(--green)' : 'var(--gray-5)';
+    const statusIcon = s.status === 'active' ? '●' : '○';
+    const active = s.active_count || 0;
+    const disabled = s.disabled_count || 0;
+    const total = active + disabled;
+    const statsText = total + ' ' + t('sub.nodes') + ' · ' + active + ' ' + t('sub.available') + (disabled > 0 ? ' · ' + disabled + ' ' + t('sub.disabled_label') : '');
+    const badge = s.contributed ? '<span style="display:inline-block;background:var(--orange);color:#000;font-size:7px;font-weight:700;padding:0 3px;margin-left:4px;vertical-align:middle">' + t('sub.contributed') + '</span>' : '';
+    return '<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">' +
+      '<div style="flex:1;min-width:0">' +
+        '<span style="color:' + statusColor + '">' + statusIcon + '</span> ' +
+        '<span style="font-weight:600">' + (s.name||t('sub.add_title')) + '</span>' + badge +
+        '<span style="color:var(--gray-5);margin-left:8px">' + statsText + '</span>' +
+      '</div>' +
+      '<div style="display:flex;gap:4px;flex-shrink:0">' +
+        '<button onclick="refreshSub(' + s.id + ')" style="background:none;border:1px solid var(--border);color:var(--fg-dim);cursor:pointer;padding:2px 6px;font-size:9px;font-family:var(--mono)">↻</button>' +
+        '<button onclick="toggleSub(' + s.id + ')" style="background:none;border:1px solid var(--border);color:var(--fg-dim);cursor:pointer;padding:2px 6px;font-size:9px;font-family:var(--mono)">' + (s.status === 'active' ? '⏸' : '▶') + '</button>' +
+        '<button onclick="deleteSub(' + s.id + ')" style="background:none;border:1px solid var(--red);color:var(--red);cursor:pointer;padding:2px 6px;font-size:9px;font-family:var(--mono)">✕</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  // 加载状态
+  const status = await api('/api/custom/status');
+  const statusEl = document.getElementById('sub-status');
+  if (status && statusEl) {
+    const parts = [];
+    if (status.singbox_running) parts.push('sing-box ✅ ' + status.singbox_nodes + ' ' + t('sub.nodes'));
+    statusEl.textContent = parts.length > 0 ? parts.join(' · ') : '';
+  }
+
+  // 更新订阅代理统计卡片
+  if (status) {
+    const active = status.custom_count || 0;
+    const disabled = status.disabled_count || 0;
+    const subCount = status.subscription_count || 0;
+
+    const subCountEl = document.getElementById('stat-sub-count');
+    const subMetaEl = document.getElementById('stat-sub-meta');
+    if (subCountEl) subCountEl.textContent = subCount;
+    if (subMetaEl) subMetaEl.textContent = status.singbox_running ? t('health.singbox_running') : (subCount > 0 ? t('health.ready') : t('health.not_added'));
+
+    const customEl = document.getElementById('stat-custom');
+    const customMeta = document.getElementById('custom-meta');
+    if (customEl) customEl.textContent = active;
+    if (customMeta) customMeta.textContent = (active + disabled) > 0 ? t('health.total_nodes').replace('{0}', active + disabled) : '—';
+
+    const disabledEl = document.getElementById('stat-custom-disabled');
+    const disabledMeta = document.getElementById('custom-disabled-meta');
+    if (disabledEl) disabledEl.textContent = disabled;
+    if (disabledMeta) disabledMeta.textContent = disabled > 0 ? t('health.awaiting_probe') : t('health.no_disabled');
+  }
+}
+
+let subFileContent = '';
+let subTab = 'url';
+
+function switchSubTab(tab) {
+  subTab = tab;
+  document.getElementById('sub-url-group').style.display = tab === 'url' ? '' : 'none';
+  document.getElementById('sub-file-group').style.display = tab === 'file' ? '' : 'none';
+  document.getElementById('tab-url').className = tab === 'url' ? 'ctrl-btn-primary' : 'ctrl-btn-secondary';
+  document.getElementById('tab-file').className = tab === 'file' ? 'ctrl-btn-primary' : 'ctrl-btn-secondary';
+}
+
+function handleFileSelect(input) {
+  if (input.files && input.files[0]) readSubFile(input.files[0]);
+}
+
+function handleFileDrop(e) {
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) readSubFile(e.dataTransfer.files[0]);
+}
+
+function readSubFile(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    subFileContent = e.target.result;
+    document.getElementById('sub-file-label').innerHTML =
+      '<span style="color:var(--fg)">✅ ' + file.name + '</span><br>' +
+      '<span style="font-size:9px;opacity:0.6">' + (subFileContent.length / 1024).toFixed(1) + ' KB</span>';
+  };
+  reader.readAsText(file);
+}
+
+function openSubModal() {
+  subFileContent = '';
+  subTab = 'url';
+  switchSubTab('url');
+  document.getElementById('sub-modal').style.display = 'flex';
+}
+
+function closeSubModal() {
+  document.getElementById('sub-modal').style.display = 'none';
+}
+
+async function addSubscription() {
+  const name = document.getElementById('sub-name').value || t('sub.add_title');
+  const url = document.getElementById('sub-url').value;
+  const refreshMin = parseInt(document.getElementById('sub-refresh').value) || 60;
+
+  const data = { name, refresh_min: refreshMin };
+
+  if (subTab === 'url') {
+    if (!url) { alert(t('msg.sub_url_required')); return; }
+    data.url = url;
+  } else {
+    if (!subFileContent) { alert(t('msg.sub_file_required')); return; }
+    data.file_content = subFileContent;
+  }
+
+  const result = await api('/api/subscription/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  });
+
+  if (result && result.error) {
+    alert(t('msg.submit_failed') + result.error);
+    return;
+  }
+  if (result && result.status === 'added') {
+    closeSubModal();
+    showToast(t('msg.sub_added'));
+    document.getElementById('sub-name').value = '';
+    document.getElementById('sub-url').value = '';
+    subFileContent = '';
+    document.getElementById('sub-file-label').innerHTML = '' + t('sub.file_drop') + '';
+    setTimeout(loadSubscriptions, 3000);
+    setTimeout(loadProxies, 5000);
+  }
+}
+
+async function refreshSub(id) {
+  await api('/api/subscription/refresh', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id})
+  });
+  showToast(t('msg.sub_refreshed'));
+  setTimeout(loadSubscriptions, 3000);
+}
+
+async function refreshAllSubs() {
+  await api('/api/subscription/refresh-all', {method: 'POST'});
+  showToast(t('msg.sub_refresh_all'));
+  setTimeout(loadSubscriptions, 3000);
+}
+
+async function toggleSub(id) {
+  await api('/api/subscription/toggle', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id})
+  });
+  loadSubscriptions();
+}
+
+async function deleteSub(id) {
+  if (!confirm(t('msg.sub_delete_confirm'))) return;
+  await api('/api/subscription/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id})
+  });
+  loadSubscriptions();
+}
+
+// ========== 访客贡献订阅 ==========
+
+let contributeFileContent = '';
+let contributeTab = 'url';
+
+function switchContributeTab(tab) {
+  contributeTab = tab;
+  document.getElementById('contribute-url-group').style.display = tab === 'url' ? '' : 'none';
+  document.getElementById('contribute-file-group').style.display = tab === 'file' ? '' : 'none';
+  document.getElementById('ctab-url').className = tab === 'url' ? 'ctrl-btn-primary' : 'ctrl-btn-secondary';
+  document.getElementById('ctab-file').className = tab === 'file' ? 'ctrl-btn-primary' : 'ctrl-btn-secondary';
+}
+
+function handleContributeFileSelect(input) {
+  if (input.files && input.files[0]) readContributeFile(input.files[0]);
+}
+function handleContributeFileDrop(e) {
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) readContributeFile(e.dataTransfer.files[0]);
+}
+function readContributeFile(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    contributeFileContent = e.target.result;
+    document.getElementById('contribute-file-label').innerHTML =
+      '<span style="color:var(--fg)">✅ ' + file.name + '</span><br>' +
+      '<span style="font-size:9px;opacity:0.6">' + (contributeFileContent.length / 1024).toFixed(1) + ' KB</span>';
+  };
+  reader.readAsText(file);
+}
+
+function openContributeModal() {
+  contributeFileContent = '';
+  contributeTab = 'url';
+  switchContributeTab('url');
+  document.getElementById('contribute-modal').style.display = 'flex';
+}
+
+function closeContributeModal() {
+  document.getElementById('contribute-modal').style.display = 'none';
+}
+
+async function submitContribution() {
+  const name = document.getElementById('contribute-name').value || t('contribute.title');
+  const data = { name };
+
+  if (contributeTab === 'url') {
+    const url = document.getElementById('contribute-url').value;
+    if (!url) { alert(t('msg.sub_url_required')); return; }
+    data.url = url;
+  } else {
+    if (!contributeFileContent) { alert(t('msg.sub_file_required')); return; }
+    data.file_content = contributeFileContent;
+  }
+
+  const btn = document.getElementById('contribute-submit-btn');
+  btn.textContent = t('contribute.validating');
+  btn.disabled = true;
+
+  const result = await api('/api/subscription/contribute', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  });
+
+  btn.textContent = t('contribute.submit');
+  btn.disabled = false;
+
+  if (result && result.error) {
+    alert(t('msg.submit_failed') + result.error);
+    return;
+  }
+  if (result && result.status === 'contributed') {
+    closeContributeModal();
+    showToast(t('msg.contribute_thanks'));
+    document.getElementById('contribute-name').value = '';
+    document.getElementById('contribute-url').value = '';
+    contributeFileContent = '';
+    document.getElementById('contribute-file-label').innerHTML = '' + t('sub.file_drop') + '';
+    setTimeout(loadSubscriptions, 3000);
+  }
+}
+
 loadAll();
+loadSubscriptions();
 setInterval(loadPoolStatus, 5000);
 setInterval(loadQualityDistribution, 10000);
 setInterval(loadLogs, 5000);
+setInterval(loadSubscriptions, 30000);
 
 // 日志倒计时
 setInterval(() => {

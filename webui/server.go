@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"goproxy/config"
+	"goproxy/custom"
 	"goproxy/logger"
 	"goproxy/pool"
 	"goproxy/storage"
@@ -47,15 +50,17 @@ type Server struct {
 	storage       *storage.Storage
 	cfg           *config.Config
 	poolMgr       *pool.Manager
+	customMgr     *custom.Manager
 	fetchTrigger  FetchTrigger
 	configChanged chan<- struct{}
 }
 
-func New(s *storage.Storage, cfg *config.Config, pm *pool.Manager, ft FetchTrigger, cc chan<- struct{}) *Server {
+func New(s *storage.Storage, cfg *config.Config, pm *pool.Manager, cm *custom.Manager, ft FetchTrigger, cc chan<- struct{}) *Server {
 	return &Server{
 		storage:       s,
 		cfg:           cfg,
 		poolMgr:       pm,
+		customMgr:     cm,
 		fetchTrigger:  ft,
 		configChanged: cc,
 	}
@@ -90,6 +95,16 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/fetch", s.authMiddleware(s.apiFetch))
 	mux.HandleFunc("/api/refresh-latency", s.authMiddleware(s.apiRefreshLatency))
 	mux.HandleFunc("/api/config/save", s.authMiddleware(s.apiConfigSave))
+
+	// 订阅管理 API
+	mux.HandleFunc("/api/subscriptions", s.readOnlyMiddleware(s.apiSubscriptions))
+	mux.HandleFunc("/api/custom/status", s.readOnlyMiddleware(s.apiCustomStatus))
+	mux.HandleFunc("/api/subscription/contribute", s.apiSubscriptionContribute) // 访客可用
+	mux.HandleFunc("/api/subscription/add", s.authMiddleware(s.apiSubscriptionAdd))
+	mux.HandleFunc("/api/subscription/delete", s.authMiddleware(s.apiSubscriptionDelete))
+	mux.HandleFunc("/api/subscription/refresh", s.authMiddleware(s.apiSubscriptionRefresh))
+	mux.HandleFunc("/api/subscription/refresh-all", s.authMiddleware(s.apiSubscriptionRefreshAll))
+	mux.HandleFunc("/api/subscription/toggle", s.authMiddleware(s.apiSubscriptionToggle))
 
 	log.Printf("WebUI listening on %s", s.cfg.WebUIPort)
 	go func() {
@@ -180,11 +195,13 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	total, _ := s.storage.Count()
 	httpCount, _ := s.storage.CountByProtocol("http")
 	socks5Count, _ := s.storage.CountByProtocol("socks5")
+	customCount, _ := s.storage.CountBySource("custom")
 	jsonOK(w, map[string]interface{}{
-		"total":  total,
-		"http":   httpCount,
-		"socks5": socks5Count,
-		"port":   s.cfg.ProxyPort,
+		"total":        total,
+		"http":         httpCount,
+		"socks5":       socks5Count,
+		"custom_count": customCount,
+		"port":         s.cfg.ProxyPort,
 	})
 }
 
@@ -266,8 +283,13 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 			s.storage.UpdateExitInfo(req.Address, exitIP, exitLocation, latencyMs)
 			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", req.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
 		} else {
-			s.storage.Delete(req.Address)
-			log.Printf("[webui] proxy validation failed, removed: %s", req.Address)
+			if targetProxy.Source == "custom" {
+				s.storage.DisableProxy(req.Address)
+				log.Printf("[webui] custom proxy validation failed, disabled: %s", req.Address)
+			} else {
+				s.storage.Delete(req.Address)
+				log.Printf("[webui] proxy validation failed, removed: %s", req.Address)
+			}
 		}
 	}()
 
@@ -311,7 +333,11 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 				s.storage.UpdateExitInfo(r.Proxy.Address, r.ExitIP, r.ExitLocation, latencyMs)
 				updated++
 			} else {
-				s.storage.Delete(r.Proxy.Address)
+				if r.Proxy.Source == "custom" {
+					s.storage.DisableProxy(r.Proxy.Address)
+				} else {
+					s.storage.Delete(r.Proxy.Address)
+				}
 			}
 		}
 		log.Printf("[webui] latency refresh done: updated=%d", updated)
@@ -357,6 +383,13 @@ func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
 		// 地理过滤配置
 		"blocked_countries":      cfg.BlockedCountries,
 		"allowed_countries":      cfg.AllowedCountries,
+
+		// 自定义订阅代理配置
+		"custom_proxy_mode":       cfg.CustomProxyMode,
+		"custom_priority":         cfg.CustomPriority,
+		"custom_free_priority":    cfg.CustomFreePriority,
+		"custom_probe_interval":   cfg.CustomProbeInterval,
+		"custom_refresh_interval": cfg.CustomRefreshInterval,
 	})
 }
 
@@ -382,6 +415,11 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 		ReplaceThreshold      float64  `json:"replace_threshold"`
 		BlockedCountries      []string `json:"blocked_countries"`
 		AllowedCountries      []string `json:"allowed_countries"`
+		CustomProxyMode       string   `json:"custom_proxy_mode"`
+		CustomPriority        *bool    `json:"custom_priority"`
+		CustomFreePriority    *bool    `json:"custom_free_priority"`
+		CustomProbeInterval   int      `json:"custom_probe_interval"`
+		CustomRefreshInterval int      `json:"custom_refresh_interval"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -416,6 +454,27 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	newCfg.ReplaceThreshold = req.ReplaceThreshold
 	newCfg.BlockedCountries = req.BlockedCountries
 	newCfg.AllowedCountries = req.AllowedCountries
+	if req.CustomProxyMode != "" {
+		newCfg.CustomProxyMode = req.CustomProxyMode
+	}
+	if req.CustomPriority != nil {
+		newCfg.CustomPriority = *req.CustomPriority
+		if *req.CustomPriority {
+			newCfg.CustomFreePriority = false // 互斥
+		}
+	}
+	if req.CustomFreePriority != nil {
+		newCfg.CustomFreePriority = *req.CustomFreePriority
+		if *req.CustomFreePriority {
+			newCfg.CustomPriority = false // 互斥
+		}
+	}
+	if req.CustomProbeInterval > 0 {
+		newCfg.CustomProbeInterval = req.CustomProbeInterval
+	}
+	if req.CustomRefreshInterval > 0 {
+		newCfg.CustomRefreshInterval = req.CustomRefreshInterval
+	}
 
 	if err := config.Save(&newCfg); err != nil {
 		jsonError(w, "save config error: "+err.Error(), http.StatusInternalServerError)
@@ -456,6 +515,314 @@ func (s *Server) apiQualityDistribution(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	jsonOK(w, dist)
+}
+
+// ========== 订阅管理 API ==========
+
+// apiSubscriptions 获取订阅列表（含每个订阅的可用/不可用代理数）
+func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
+	subs, err := s.storage.GetSubscriptions()
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if subs == nil {
+		subs = []storage.Subscription{}
+	}
+
+	// 附加每个订阅的代理统计
+	type subWithStats struct {
+		storage.Subscription
+		ActiveCount   int `json:"active_count"`
+		DisabledCount int `json:"disabled_count"`
+	}
+	var result []subWithStats
+	for _, sub := range subs {
+		active, disabled := s.storage.CountBySubscriptionID(sub.ID)
+		result = append(result, subWithStats{
+			Subscription:  sub,
+			ActiveCount:   active,
+			DisabledCount: disabled,
+		})
+	}
+	jsonOK(w, result)
+}
+
+// apiCustomStatus 获取订阅代理状态
+func (s *Server) apiCustomStatus(w http.ResponseWriter, r *http.Request) {
+	if s.customMgr == nil {
+		jsonOK(w, map[string]interface{}{
+			"singbox_running":    false,
+			"singbox_nodes":      0,
+			"custom_count":       0,
+			"disabled_count":     0,
+			"subscription_count": 0,
+		})
+		return
+	}
+	jsonOK(w, s.customMgr.GetStatus())
+}
+
+// apiSubscriptionContribute 访客贡献订阅（支持 URL 和文件上传，需验证通过才入库）
+func (s *Server) apiSubscriptionContribute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		FileContent string `json:"file_content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" && req.FileContent == "" {
+		jsonError(w, "请填写订阅 URL 或上传配置文件", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		req.Name = "贡献订阅"
+	}
+
+	// 如果上传了文件，保存到本地
+	filePath := ""
+	if req.FileContent != "" {
+		dataDir := os.Getenv("DATA_DIR")
+		if dataDir == "" {
+			dataDir = "."
+		}
+		subDir := filepath.Join(dataDir, "subscriptions")
+		os.MkdirAll(subDir, 0755)
+		filePath = filepath.Join(subDir, fmt.Sprintf("contribute_%d.yaml", time.Now().UnixMilli()))
+		if err := os.WriteFile(filePath, []byte(req.FileContent), 0644); err != nil {
+			jsonError(w, "保存文件失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		filePath, _ = filepath.Abs(filePath)
+	}
+
+	// 先验证能解析出节点
+	if s.customMgr != nil {
+		nodeCount, err := s.customMgr.ValidateSubscription(req.URL, filePath)
+		if err != nil {
+			if filePath != "" {
+				os.Remove(filePath)
+			}
+			jsonError(w, "订阅验证失败: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		log.Printf("[webui] 访客贡献订阅验证通过: %s (%d 个节点)", req.Name, nodeCount)
+	}
+
+	// 入库
+	refreshMin := config.Get().CustomRefreshInterval
+	var id int64
+	var err error
+	if req.URL != "" {
+		id, err = s.storage.AddContributedSubscription(req.Name, req.URL, refreshMin)
+	} else {
+		// 文件上传的贡献，用 AddSubscription + contributed 标记
+		id, err = s.storage.AddSubscription(req.Name, "", filePath, "auto", refreshMin)
+		if err == nil {
+			// 标记为贡献
+			s.storage.GetDB().Exec(`UPDATE subscriptions SET contributed = 1 WHERE id = ?`, id)
+		}
+	}
+	if err != nil {
+		if filePath != "" {
+			os.Remove(filePath)
+		}
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 异步刷新入池
+	if s.customMgr != nil {
+		go func() {
+			if err := s.customMgr.RefreshSubscription(id); err != nil {
+				log.Printf("[webui] 贡献订阅刷新失败: %v", err)
+			}
+		}()
+	}
+
+	log.Printf("[webui] 🎁 访客贡献订阅: %s (url=%v file=%v)", req.Name, req.URL != "", filePath != "")
+	jsonOK(w, map[string]interface{}{"status": "contributed", "id": id})
+}
+
+// apiSubscriptionAdd 添加订阅
+func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		FileContent string `json:"file_content"` // 上传的文件内容（Base64 编码）
+		RefreshMin  int    `json:"refresh_min"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" && req.FileContent == "" {
+		jsonError(w, "请填写订阅 URL 或上传配置文件", http.StatusBadRequest)
+		return
+	}
+	if req.RefreshMin <= 0 {
+		req.RefreshMin = config.Get().CustomRefreshInterval
+	}
+	if req.Name == "" {
+		req.Name = "订阅"
+	}
+
+	// 如果上传了文件内容，保存到本地
+	filePath := ""
+	if req.FileContent != "" {
+		dataDir := os.Getenv("DATA_DIR")
+		if dataDir == "" {
+			dataDir = "."
+		}
+		subDir := filepath.Join(dataDir, "subscriptions")
+		os.MkdirAll(subDir, 0755)
+		filePath = filepath.Join(subDir, fmt.Sprintf("sub_%d.yaml", time.Now().UnixMilli()))
+		if err := os.WriteFile(filePath, []byte(req.FileContent), 0644); err != nil {
+			jsonError(w, "保存文件失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		filePath, _ = filepath.Abs(filePath)
+	}
+
+	// 先验证：拉取并解析，确认能解析出节点后再入库
+	if s.customMgr != nil {
+		nodeCount, err := s.customMgr.ValidateSubscription(req.URL, filePath)
+		if err != nil {
+			// 清理已保存的文件
+			if filePath != "" {
+				os.Remove(filePath)
+			}
+			jsonError(w, "订阅验证失败: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		log.Printf("[webui] 订阅验证通过: %s (%d 个节点)", req.Name, nodeCount)
+	}
+
+	id, err := s.storage.AddSubscription(req.Name, req.URL, filePath, "auto", req.RefreshMin)
+	if err != nil {
+		jsonError(w, "add subscription error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 验证已通过，异步执行入池
+	if s.customMgr != nil {
+		go func() {
+			if err := s.customMgr.RefreshSubscription(id); err != nil {
+				log.Printf("[webui] 订阅刷新失败: %v", err)
+			}
+		}()
+	}
+
+	log.Printf("[webui] 添加订阅: %s (url=%v file=%v)", req.Name, req.URL != "", filePath != "")
+	jsonOK(w, map[string]interface{}{"status": "added", "id": id})
+}
+
+// apiSubscriptionDelete 删除订阅
+func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// 先删除该订阅关联的代理
+	if s.customMgr != nil {
+		deleted, _ := s.storage.DeleteBySubscriptionID(req.ID)
+		if deleted > 0 {
+			log.Printf("[webui] 清理订阅 #%d 关联的 %d 个代理", req.ID, deleted)
+		}
+	}
+
+	if err := s.storage.DeleteSubscription(req.ID); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 重建 sing-box 配置（剩余订阅的节点）
+	if s.customMgr != nil {
+		go s.customMgr.RefreshAll()
+	}
+
+	log.Printf("[webui] 删除订阅 #%d", req.ID)
+	jsonOK(w, map[string]string{"status": "deleted"})
+}
+
+// apiSubscriptionRefresh 刷新单个订阅
+func (s *Server) apiSubscriptionRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if s.customMgr != nil {
+		go func() {
+			if err := s.customMgr.RefreshSubscription(req.ID); err != nil {
+				log.Printf("[webui] 订阅 #%d 刷新失败: %v", req.ID, err)
+			}
+		}()
+	}
+
+	jsonOK(w, map[string]string{"status": "refresh started"})
+}
+
+// apiSubscriptionRefreshAll 刷新所有订阅
+func (s *Server) apiSubscriptionRefreshAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.customMgr != nil {
+		go s.customMgr.RefreshAll()
+	}
+
+	jsonOK(w, map[string]string{"status": "refresh all started"})
+}
+
+// apiSubscriptionToggle 切换订阅状态
+func (s *Server) apiSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.storage.ToggleSubscription(req.ID); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]string{"status": "toggled"})
 }
 
 func jsonOK(w http.ResponseWriter, data interface{}) {

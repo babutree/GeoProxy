@@ -78,9 +78,14 @@ func (hc *HealthChecker) RunOnce() {
 		} else {
 			// 失败次数+1
 			hc.storage.IncrementFailCount(result.Proxy.Address)
-			// 如果失败次数 >= 3，删除
+			// 如果失败次数 >= 3
 			if result.Proxy.FailCount+1 >= 3 {
-				hc.storage.Delete(result.Proxy.Address)
+				if result.Proxy.Source == "custom" {
+					// 订阅代理：禁用而非删除
+					hc.storage.DisableProxy(result.Proxy.Address)
+				} else {
+					hc.storage.Delete(result.Proxy.Address)
+				}
 				removeCount++
 			}
 		}
