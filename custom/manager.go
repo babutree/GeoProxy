@@ -1,19 +1,16 @@
 package custom
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 
-	"golang.org/x/net/proxy"
 	"goproxy/config"
 	"goproxy/storage"
 	"goproxy/validator"
@@ -21,11 +18,11 @@ import (
 
 // Manager 订阅管理器
 type Manager struct {
-	storage    *storage.Storage
-	validator  *validator.Validator
-	singbox    *SingBoxProcess
-	stopCh     chan struct{}
-	refreshMu  sync.Mutex // 防止并发刷新
+	storage   *storage.Storage
+	validator *validator.Validator
+	singbox   *SingBoxProcess
+	stopCh    chan struct{}
+	refreshMu sync.Mutex // 防止并发刷新
 }
 
 // NewManager 创建订阅管理器
@@ -101,9 +98,9 @@ func (m *Manager) refreshLoop() {
 	}
 }
 
-// checkAndRefresh 检查并刷新到期的订阅 + 清理长期无可用节点的订阅
+// checkAndRefresh 检查并刷新到期的订阅 + 暂停长期无可用节点的订阅
 func (m *Manager) checkAndRefresh() {
-	// 清理连续 7 天无可用节点的订阅
+	// 暂停连续 7 天无可用节点的订阅，保留订阅和节点记录供人工排查。
 	m.cleanupStaleSubscriptions()
 
 	subs, err := m.storage.GetSubscriptions()
@@ -127,7 +124,7 @@ func (m *Manager) checkAndRefresh() {
 	}
 }
 
-// cleanupStaleSubscriptions 清理连续 7 天无可用节点的订阅
+// cleanupStaleSubscriptions 暂停连续 7 天无可用节点的订阅
 func (m *Manager) cleanupStaleSubscriptions() {
 	staleSubs, err := m.storage.GetStaleSubscriptions(7)
 	if err != nil || len(staleSubs) == 0 {
@@ -135,14 +132,11 @@ func (m *Manager) cleanupStaleSubscriptions() {
 	}
 
 	for _, sub := range staleSubs {
-		deleted, _ := m.storage.DeleteBySubscriptionID(sub.ID)
-		m.storage.DeleteSubscription(sub.ID)
-		log.Printf("[custom] 🗑️ 自动移除订阅 [%s]：连续 7 天无可用节点（清理 %d 个代理）", sub.Name, deleted)
-	}
-
-	// 重建 sing-box 配置
-	if len(staleSubs) > 0 {
-		m.RefreshAll()
+		if err := m.storage.PauseSubscription(sub.ID); err != nil {
+			log.Printf("[custom] ⚠️ 暂停订阅 [%s] 失败: %v", sub.Name, err)
+			continue
+		}
+		log.Printf("[custom] ⚠️ 暂停订阅 [%s]：连续 7 天无可用节点，已保留订阅和节点记录", sub.Name)
 	}
 }
 
@@ -260,8 +254,8 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	for _, node := range directNodes {
 		addr := node.DirectAddress()
 		proto := node.DirectProtocol()
-		m.storage.AddProxyWithSource(addr, proto, "custom", subID)
-		allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: proto, Source: "custom"})
+		m.storage.AddProxyWithSource(addr, proto, storage.SourceSubscription, subID)
+		allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: proto, Source: storage.SourceSubscription})
 	}
 	if len(directNodes) > 0 {
 		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
@@ -295,8 +289,8 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 				key := node.NodeKey()
 				if port, ok := portMap[key]; ok {
 					addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-					m.storage.AddProxyWithSource(addr, "socks5", "custom", subID)
-					allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: "socks5", Source: "custom"})
+					m.storage.AddProxyWithSource(addr, "socks5", storage.SourceSubscription, subID)
+					allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: "socks5", Source: storage.SourceSubscription})
 				}
 			}
 			log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", len(tunnelNodes))
@@ -376,63 +370,16 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 		return nil, fmt.Errorf("订阅未配置 URL 或文件路径")
 	}
 
-	// 尝试拉取（直连 → 代理）
-	data, err := m.fetchWithRetry(sub.URL)
+	data, err := m.fetchSubscriptionURL(sub.URL)
 	if err != nil {
 		return nil, err
 	}
 	return data, nil
 }
 
-// fetchWithRetry 尝试拉取 URL（直连 → 代理，多种方式）
-func (m *Manager) fetchWithRetry(urlStr string) ([]byte, error) {
-	// 先尝试直连
-	data, err := m.fetchURL(urlStr, nil)
-	if err == nil {
-		return data, nil
-	}
-	log.Printf("[custom] 直连订阅 URL 失败: %v，尝试通过代理访问...", err)
-
-	// 直连失败，尝试通过池中已有代理访问
-	for i := 0; i < 3; i++ {
-		p, pErr := m.storage.GetRandom()
-		if pErr != nil {
-			break
-		}
-		data, err = m.fetchURL(urlStr, p)
-		if err == nil {
-			log.Printf("[custom] ✅ 通过代理 %s 成功访问订阅 URL", p.Address)
-			return data, nil
-		}
-		log.Printf("[custom] 代理 %s 访问订阅 URL 失败: %v", p.Address, err)
-	}
-
-	return nil, fmt.Errorf("直连和代理均无法访问订阅 URL: %w", err)
-}
-
-// fetchURL 通过指定代理（或直连）拉取 URL 内容
-func (m *Manager) fetchURL(urlStr string, p *storage.Proxy) ([]byte, error) {
+// fetchSubscriptionURL 直连拉取订阅 URL；失败时显式返回错误，不通过上游节点兜底。
+func (m *Manager) fetchSubscriptionURL(urlStr string) ([]byte, error) {
 	transport := &http.Transport{}
-
-	if p != nil {
-		// 通过代理访问时跳过 TLS 验证（免费代理可能 MITM）
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-
-		switch p.Protocol {
-		case "socks5":
-			dialer, err := proxy.SOCKS5("tcp", p.Address, nil, proxy.Direct)
-			if err != nil {
-				return nil, err
-			}
-			transport.Dial = dialer.Dial
-		default: // http
-			proxyURL, err := url.Parse(fmt.Sprintf("http://%s", p.Address))
-			if err != nil {
-				return nil, err
-			}
-			transport.Proxy = http.ProxyURL(proxyURL)
-		}
-	}
 
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
 	req, err := http.NewRequest("GET", urlStr, nil)
@@ -444,12 +391,12 @@ func (m *Manager) fetchURL(urlStr string, p *storage.Proxy) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("直接拉取订阅 URL 失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("直接拉取订阅 URL 返回 HTTP %d", resp.StatusCode)
 	}
 
 	return io.ReadAll(resp.Body)
@@ -495,16 +442,16 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 
 // GetStatus 获取订阅管理器状态
 func (m *Manager) GetStatus() map[string]interface{} {
-	customCount, _ := m.storage.CountBySource("custom")
+	subscriptionCount, _ := m.storage.CountBySource(storage.SourceSubscription)
 	disabled, _ := m.storage.GetDisabledCustomProxies()
 	subs, _ := m.storage.GetSubscriptions()
 
 	return map[string]interface{}{
-		"singbox_running":   m.singbox.IsRunning(),
-		"singbox_nodes":     m.singbox.GetNodeCount(),
-		"custom_count":      customCount,
-		"disabled_count":    len(disabled),
-		"subscription_count": len(subs),
+		"singbox_running":    m.singbox.IsRunning(),
+		"singbox_nodes":      m.singbox.GetNodeCount(),
+		"subscription_count": subscriptionCount,
+		"disabled_count":     len(disabled),
+		"subscription_total": len(subs),
 	}
 }
 
@@ -519,7 +466,7 @@ func (m *Manager) ValidateSubscription(url, filePath string) (int, error) {
 			return 0, fmt.Errorf("读取文件失败: %w", err)
 		}
 	} else if url != "" {
-		data, err = m.fetchWithRetry(url)
+		data, err = m.fetchSubscriptionURL(url)
 		if err != nil {
 			return 0, err
 		}
@@ -567,4 +514,68 @@ func isGeoBlocked(exitLocation string, cfg *config.Config) bool {
 // GetSingBox 获取 sing-box 进程管理器
 func (m *Manager) GetSingBox() *SingBoxProcess {
 	return m.singbox
+}
+
+// AddManualNode 从单个链接添加人工节点，存储为 source=manual。
+// 直连节点（http/socks5）直接入库；加密节点通过 sing-box 转换为本地 socks5 后入库。
+func (m *Manager) AddManualNode(link, region, note string) error {
+	node, err := ParseSingleLink(link)
+	if err != nil {
+		return fmt.Errorf("解析节点链接失败: %w", err)
+	}
+
+	if node.IsDirect() {
+		addr := node.DirectAddress()
+		proto := node.DirectProtocol()
+		if err := m.storage.AddManualProxy(addr, proto, region, note); err != nil {
+			return fmt.Errorf("存储直连节点失败: %w", err)
+		}
+		return nil
+	}
+
+	return m.addManualTunnelNode(node, region, note)
+}
+
+// addManualTunnelNode 处理加密节点：合并进现有 sing-box 节点集后重载，取本地端口入库。
+func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	mergedNodes := m.mergeWithExistingTunnelNodes(node)
+	if err := m.singbox.Reload(mergedNodes); err != nil {
+		return fmt.Errorf("sing-box 重载失败: %w", err)
+	}
+
+	key := node.NodeKey()
+	port, ok := m.singbox.GetPortMap()[key]
+	if !ok {
+		return fmt.Errorf("sing-box 未为节点 %s 分配本地端口", key)
+	}
+
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if err := m.storage.AddManualProxy(addr, "socks5", region, note); err != nil {
+		return fmt.Errorf("存储人工节点失败: %w", err)
+	}
+	return nil
+}
+
+// mergeWithExistingTunnelNodes 将人工节点合并进现有订阅 tunnel 节点集，按 NodeKey 去重，
+// 避免 Reload 时驱逐已有订阅 tunnel 节点。
+func (m *Manager) mergeWithExistingTunnelNodes(node *ParsedNode) []ParsedNode {
+	allTunnelNodes, err := m.collectAllTunnelNodes()
+	if err != nil {
+		log.Printf("[custom] ⚠️ 收集 tunnel 节点失败: %v", err)
+	}
+
+	nodeMap := make(map[string]ParsedNode)
+	for _, n := range allTunnelNodes {
+		nodeMap[n.NodeKey()] = n
+	}
+	nodeMap[node.NodeKey()] = *node
+
+	mergedNodes := make([]ParsedNode, 0, len(nodeMap))
+	for _, n := range nodeMap {
+		mergedNodes = append(mergedNodes, n)
+	}
+	return mergedNodes
 }

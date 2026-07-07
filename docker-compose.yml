@@ -1,20 +1,17 @@
 services:
   goproxy:
-    # 使用预构建镜像（每次部署自动拉取最新版本）
     image: ghcr.io/isboyjc/goproxy:latest
     pull_policy: always
-    
-    # 或使用本地构建（取消下面注释，注释上面的 image 和 pull_policy 行）
+
+    # For local builds, comment image/pull_policy and uncomment build.
     # build: .
-    
+
     container_name: ${CONTAINER_NAME:-goproxy}
     restart: unless-stopped
     ports:
-      - "${STABLE_PORT:-7776}:7776"          # HTTP 最低延迟
-      - "${RANDOM_PORT:-7777}:7777"          # HTTP 随机轮换
-      - "${WEBUI_PORT:-7778}:7778"           # WebUI（有登录认证）
-      - "${SOCKS5_RANDOM_PORT:-7779}:7779"   # SOCKS5 随机轮换
-      - "${SOCKS5_STABLE_PORT:-7780}:7780"   # SOCKS5 最低延迟
+      - "${WEBUI_PORT:-7800}:7800"     # WebUI
+      - "${SOCKS5_PORT:-7801}:7801"   # SOCKS5 proxy
+      - "${HTTP_PORT:-7802}:7802"     # HTTP proxy
     volumes:
       - goproxy-data:/app/data
     environment:
@@ -22,14 +19,17 @@ services:
       - DATA_DIR=/app/data
       - WEBUI_PASSWORD=${WEBUI_PASSWORD:-goproxy}
       - PROXY_AUTH_ENABLED=${PROXY_AUTH_ENABLED:-false}
-      - PROXY_AUTH_USERNAME=${PROXY_AUTH_USERNAME:-proxy}
+      - PROXY_AUTH_USERNAME=${PROXY_AUTH_USERNAME:-acct}
       - PROXY_AUTH_PASSWORD=${PROXY_AUTH_PASSWORD}
-      - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES:-CN}
+      - SESSION_TTL_MINUTES=${SESSION_TTL_MINUTES:-10}
+      - DEFAULT_REGION=${DEFAULT_REGION}
       - ALLOWED_COUNTRIES=${ALLOWED_COUNTRIES}
-      - CUSTOM_PROXY_MODE=${CUSTOM_PROXY_MODE:-mixed}
-      - SINGBOX_PATH=sing-box
+      - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES}
+      - HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-5}
+      - MAX_RETRY=${MAX_RETRY:-3}
+      - SINGBOX_PATH=${SINGBOX_PATH:-sing-box}
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:7778/ || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:7800/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -1,12 +1,24 @@
 # Baseline Snapshot
 
-Task: P0-01 Establish dev branch and baseline snapshot
+Task: P0 combined cleanup baseline
 
-Created at: 2026-07-07T00:41:24.8431443+08:00
+Updated at: 2026-07-07
 
-## Baseline Commit
+## Repository State
 
-`49e99a526e6beaa518efd0392735a908902276ce`
+- Branch: `feature/geo-gateway`
+- Baseline commit during verification: `6ed98dc`
+
+## Canonical Build Environment
+
+Run this PowerShell environment prefix before Go commands:
+
+```powershell
+$env:PATH="C:\Program Files\Go\bin;C:\ProgramData\mingw64\mingw64\bin;"+$env:PATH
+$env:CGO_ENABLED='1'
+$env:GOPROXY="https://goproxy.cn,direct"
+$env:ALL_PROXY="socks5://10.0.1.9:7890"
+```
 
 ## Toolchain
 
@@ -14,68 +26,30 @@ Created at: 2026-07-07T00:41:24.8431443+08:00
 
 Command: `go version`
 
-Result: failed. `go` is not available in the current PATH, so the required Go version check (`>= 1.25`) could not be verified.
-
-Error output:
+Result:
 
 ```text
-go:
-Line |
-   2 |  go version
-     |  ~~
-     | The term 'go' is not recognized as a name of a cmdlet, function, script file, or executable program.
-     | Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+go version go1.26.4 windows/amd64
 ```
 
 ### CGO Compiler
 
 Command: `gcc --version`
 
-Result: failed. `gcc` is not available in the current PATH.
-
-Additional MinGW/MSYS2 presence check:
-
-Checked common gcc paths:
+Result:
 
 ```text
-C:\msys64\mingw64\bin\gcc.exe
-C:\msys64\ucrt64\bin\gcc.exe
-C:\mingw64\bin\gcc.exe
-C:\MinGW\bin\gcc.exe
+gcc.exe (x86_64-posix-seh-rev0, Built by MinGW-Builds project) 16.1.0
 ```
 
-No gcc executable was found at those paths.
-
-CGO compiler available: no
-
-Error output:
-
-```text
-gcc:
-Line |
-   2 |  gcc --version
-     |  ~~~
-     | The term 'gcc' is not recognized as a name of a cmdlet, function, script file, or executable program.
-     | Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
-```
+CGO compiler available: yes
 
 ## Build Verification
 
 Command:
 
 ```powershell
-$env:CGO_ENABLED='1'; go build ./...
+go build ./...
 ```
 
-Result: fail
-
-Full error output:
-
-```text
-go:
-Line |
-   2 |  $env:CGO_ENABLED='1'; go build ./...
-     |                        ~~
-     | The term 'go' is not recognized as a name of a cmdlet, function, script file, or executable program.
-     | Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
-```
+Result: pass, exit code 0

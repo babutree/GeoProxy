@@ -12,7 +12,7 @@ from requests.exceptions import RequestException
 
 # 配置
 PROXY_HOST = "127.0.0.1"
-PROXY_PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 7777
+PROXY_PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 7802
 TEST_URL = "http://ip-api.com/json/?fields=countryCode,query"
 DELAY_SECONDS = 1
 

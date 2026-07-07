@@ -8,10 +8,10 @@
 ### 
 
 # GoProxy SOCKS5 代理测试脚本
-# 用法: ./test_socks5.sh [端口号，默认7779]
+# 用法: ./test_socks5.sh [端口号，默认7801]
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
-PROXY_PORT="${1:-7779}"
+PROXY_PORT="${1:-7801}"
 TEST_URL="https://httpbin.org/ip"
 DELAY=1
 
@@ -54,7 +54,7 @@ echo ""
 while true; do
     total=$((total + 1))
     
-    # 使用 curl 的 SOCKS5 支持（-k 跳过 SSL 验证，因为免费代理证书常有问题）
+    # 使用 curl 的 SOCKS5 支持；-k 用于避免上游 TLS 验证差异影响连通性测试
     start=$(get_ms_time)
     response=$(curl -s -k --socks5-hostname ${PROXY_HOST}:${PROXY_PORT} ${TEST_URL} --max-time 10 2>&1)
     end=$(get_ms_time)

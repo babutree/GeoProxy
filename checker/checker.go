@@ -21,11 +21,11 @@ func (c *Checker) Start() {
 	go func() {
 		for {
 			cfg := config.Get()
-			time.Sleep(time.Duration(cfg.CheckInterval) * time.Minute)
+			time.Sleep(time.Duration(cfg.HealthIntervalMinutes) * time.Minute)
 			c.run()
 		}
 	}()
-	log.Printf("health checker started, interval: %d min", config.Get().CheckInterval)
+	log.Printf("health checker started, interval: %d min", config.Get().HealthIntervalMinutes)
 }
 
 func (c *Checker) run() {
@@ -52,27 +52,24 @@ func (c *Checker) run() {
 	for _, r := range results {
 		if r.Valid {
 			valid++
-			// 更新出口 IP、位置和延迟信息
 			latencyMs := int(r.Latency.Milliseconds())
-			if r.ExitIP != "" && r.Proxy.ExitIP == "" {
-				// 如果之前没有出口 IP 信息，更新完整信息
+			if r.ExitIP != "" && r.ExitLocation != "" {
 				if err := c.storage.UpdateExitInfo(r.Proxy.Address, r.ExitIP, r.ExitLocation, latencyMs); err != nil {
 					log.Printf("[checker] update exit info error: %v", err)
 				}
 			} else if r.Latency > 0 {
-				// 否则只更新延迟
 				if err := c.storage.UpdateLatency(r.Proxy.Address, latencyMs); err != nil {
 					log.Printf("[checker] update latency error: %v", err)
 				}
 			}
 		} else {
 			invalid++
-			if err := c.storage.Delete(r.Proxy.Address); err != nil {
-				log.Printf("[checker] delete error: %v", err)
+			if err := c.storage.DisableProxy(r.Proxy.Address); err != nil {
+				log.Printf("[checker] disable error: %v", err)
 			}
 		}
 	}
 
-	count, _ := c.storage.Count()
-	log.Printf("[checker] done: valid=%d invalid(deleted)=%d remaining=%d", valid, invalid, count)
+	count, _ := c.storage.CountAll()
+	log.Printf("[checker] done: valid=%d invalid(disabled)=%d remaining=%d", valid, invalid, count)
 }

@@ -19,7 +19,7 @@ const (
 	delaySeconds = 1
 )
 
-var proxyPort = "7777"
+var proxyPort = "7802"
 
 type IPResponse struct {
 	Query       string `json:"query"`

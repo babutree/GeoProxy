@@ -2,12 +2,12 @@
 
 # GoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
 # 按 Ctrl+C 停止测试
-# 用法: ./test_proxy.sh [端口号，默认7777]
+# 用法: ./test_proxy.sh [端口号，默认7802]
 
 # PROXY_HOST="192.227.184.201"
 # PROXY_HOST="proxy.amux.ai"
 PROXY_HOST="127.0.0.1"
-PROXY_PORT="${1:-7777}"
+PROXY_PORT="${1:-7802}"
 TEST_URL="http://ip-api.com/json/?fields=countryCode,query"
 DELAY=1
 

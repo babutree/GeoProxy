@@ -52,6 +52,29 @@ func Parse(data []byte, format string) ([]ParsedNode, error) {
 	return parseAutoDetect(data)
 }
 
+// ParseSingleLink 解析单个节点链接，复用已有的协议链接 / 纯文本解析逻辑。
+// tunnel 链接（vmess:// 等）走 parseProxyLink；http/socks5/裸 IP:PORT 走 parsePlain。
+func ParseSingleLink(link string) (*ParsedNode, error) {
+	link = strings.TrimSpace(link)
+	if link == "" {
+		return nil, fmt.Errorf("节点链接为空")
+	}
+	if looksLikeProxyLinks(link) {
+		return parseProxyLink(link)
+	}
+	nodes, err := parsePlain([]byte(link))
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("无法解析节点链接: %s", safePreview(link, singleLinkPreviewLen))
+	}
+	return &nodes[0], nil
+}
+
+// singleLinkPreviewLen 是错误信息中链接预览的最大长度。
+const singleLinkPreviewLen = 30
+
 // parseAutoDetect 自动检测订阅格式并解析
 func parseAutoDetect(data []byte) ([]ParsedNode, error) {
 	content := strings.TrimSpace(string(data))
