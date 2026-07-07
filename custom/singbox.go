@@ -106,9 +106,9 @@ func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
 		})
 
 		// 出站：根据节点类型生成
-		outbound := buildOutbound(node, tag)
-		if outbound == nil {
-			log.Printf("[custom] 跳过不支持的节点类型: %s (%s)", node.Name, node.Type)
+		outbound, err := buildOutbound(node, tag)
+		if err != nil {
+			log.Printf("[custom] 跳过节点 %s (%s): %v", node.Name, node.Type, err)
 			delete(s.portMap, key)
 			continue
 		}
@@ -147,8 +147,10 @@ func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
 	return os.WriteFile(s.configFile, data, 0644)
 }
 
-// buildOutbound 根据节点类型构建 sing-box 出站配置
-func buildOutbound(node ParsedNode, tag string) map[string]interface{} {
+// buildOutbound 根据节点类型构建 sing-box 出站配置。
+// 返回 error 而非静默丢弃：不支持的协议类型或传输层（如 Xray 私有的 xhttp）必须显式失败，
+// 避免生成"能过 sing-box check 但实际连不上"的假配置。
+func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) {
 	raw := node.Raw
 	out := map[string]interface{}{
 		"tag":    fmt.Sprintf("out-%s", tag),
@@ -165,20 +167,26 @@ func buildOutbound(node ParsedNode, tag string) map[string]interface{} {
 		out["alter_id"] = getInt(raw, "alterId")
 		out["security"] = getStrDefault(raw, "cipher", "auto")
 		applyTLS(raw, out)
-		applyTransport(raw, out)
+		if err := applyTransport(raw, out); err != nil {
+			return nil, err
+		}
 
 	case "vless":
 		out["type"] = "vless"
 		out["uuid"] = getStr(raw, "uuid")
 		out["flow"] = getStr(raw, "flow")
 		applyTLS(raw, out)
-		applyTransport(raw, out)
+		if err := applyTransport(raw, out); err != nil {
+			return nil, err
+		}
 
 	case "trojan":
 		out["type"] = "trojan"
 		out["password"] = getStr(raw, "password")
 		applyTLS(raw, out)
-		applyTransport(raw, out)
+		if err := applyTransport(raw, out); err != nil {
+			return nil, err
+		}
 
 	case "shadowsocks":
 		out["type"] = "shadowsocks"
@@ -221,10 +229,10 @@ func buildOutbound(node ParsedNode, tag string) map[string]interface{} {
 		forceTLS(raw, out)
 
 	default:
-		return nil
+		return nil, fmt.Errorf("不支持的节点类型: %s", node.Type)
 	}
 
-	return out
+	return out, nil
 }
 
 // forceTLS 强制应用 TLS 配置（用于 anytls 等必须 TLS 的协议）
@@ -286,11 +294,18 @@ func applyTLS(raw map[string]interface{}, out map[string]interface{}) {
 	out["tls"] = tlsConfig
 }
 
-// applyTransport 应用传输层配置
-func applyTransport(raw map[string]interface{}, out map[string]interface{}) {
+// applyTransport 应用传输层配置。
+// 对 sing-box 支持的传输层写入 out["transport"]；tcp/空表示裸 TCP，无需 transport。
+// 对 sing-box 明确不支持的传输层（如 Xray 私有的 xhttp/splithttp）返回错误，
+// 由调用方跳过该节点，避免生成"能过 check 但连不上"的静默降级配置。
+func applyTransport(raw map[string]interface{}, out map[string]interface{}) error {
 	network := getStrDefault(raw, "network", "tcp")
 
 	switch network {
+	case "tcp", "":
+		// 裸 TCP，sing-box 默认即为此，无需 transport 字段。
+		return nil
+
 	case "ws":
 		transport := map[string]interface{}{
 			"type": "ws",
@@ -304,6 +319,7 @@ func applyTransport(raw map[string]interface{}, out map[string]interface{}) {
 			}
 		}
 		out["transport"] = transport
+		return nil
 
 	case "grpc":
 		transport := map[string]interface{}{
@@ -315,6 +331,7 @@ func applyTransport(raw map[string]interface{}, out map[string]interface{}) {
 			}
 		}
 		out["transport"] = transport
+		return nil
 
 	case "h2":
 		transport := map[string]interface{}{
@@ -331,6 +348,7 @@ func applyTransport(raw map[string]interface{}, out map[string]interface{}) {
 			}
 		}
 		out["transport"] = transport
+		return nil
 
 	case "httpupgrade":
 		transport := map[string]interface{}{
@@ -347,6 +365,11 @@ func applyTransport(raw map[string]interface{}, out map[string]interface{}) {
 			}
 		}
 		out["transport"] = transport
+		return nil
+
+	default:
+		// xhttp / splithttp 等 Xray 私有传输层 sing-box 不支持；显式失败而非静默丢弃。
+		return fmt.Errorf("sing-box 不支持的传输层: %s", network)
 	}
 }
 
