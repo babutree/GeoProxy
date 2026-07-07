@@ -76,9 +76,8 @@ sqlite3 /app/data/proxy.db "SELECT COUNT(*) FROM proxies;"
 
 **备份数据**：
 ```bash
-# 手动导出卷
-docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/goproxy-backup-$(date +%Y%m%d).tar.gz -C /data .
+# 从运行中的 compose 服务导出数据目录
+docker compose exec -T goproxy tar czf - -C /app/data . > goproxy-backup-$(date +%Y%m%d).tar.gz
 ```
 
 **恢复数据**：
@@ -86,17 +85,16 @@ docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
 # 停止服务
 docker compose down
 
-# 恢复备份
-docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
-  alpine sh -c "cd /data && tar xzf /backup/goproxy-backup-20260328.tar.gz"
+# 恢复备份到 compose 管理的数据卷
+docker compose run --rm --no-deps --entrypoint sh goproxy -c "cd /app/data && tar xzf -" < goproxy-backup-20260328.tar.gz
 
 # 重启服务
 docker compose up -d
 ```
 
-### 本地开发（相对路径挂载）
+### 本地开发（可选相对路径挂载）
 
-如果使用 `docker run -v "$(pwd)/data:/app/data"`，数据会保存在项目目录的 `./data` 文件夹中。
+默认 `docker-compose.yml` 使用 Docker named volume。若你手动把 compose 的 `volumes` 改成 `./data:/app/data`，数据会保存在项目目录的 `./data` 文件夹中。
 
 **查看数据**：
 ```bash
@@ -136,14 +134,6 @@ volumes:
 - ✅ 支持备份和迁移
 - ✅ 适合生产环境和自动化部署
 
-### 使用本地目录（本地开发）
-
-在 `docker run` 中：
-
-```bash
-docker run -v "$(pwd)/data:/app/data" ...
-```
-
 ### 为什么需要持久化？
 
 **持久化数据**：
@@ -167,15 +157,6 @@ volumes:
 - 宿主机目录：`./data`（docker-compose.yml 所在目录下）
 - 容器内路径：`/app/data`
 - 首次启动会自动创建 `data/` 目录
-
-### Docker Run 配置
-
-```bash
-docker run -d \
-  -v "$(pwd)/data:/app/data" \  # 挂载 data 目录
-  -e DATA_DIR=/app/data \        # 告诉程序数据目录位置
-  ghcr.io/isboyjc/goproxy:latest
-```
 
 ## 📊 数据大小
 

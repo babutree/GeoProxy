@@ -2,8 +2,6 @@
 
 > Geo-aware proxy gateway for private upstream nodes. GoProxy exposes one HTTP proxy, one SOCKS5 proxy, and an authenticated WebUI while routing traffic by username DSL, region, and short-lived session affinity.
 
-[![Docker Hub](https://img.shields.io/docker/v/isboyjc/goproxy?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/isboyjc/goproxy)
-[![GitHub Container Registry](https://img.shields.io/badge/GHCR-latest-blue?logo=github)](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
 
@@ -32,7 +30,7 @@ There is no active public proxy pool or automatic public source collector in the
 
 ```bash
 cp .env.example .env
-docker compose up -d
+docker compose up -d --build
 ```
 
 Open the WebUI at `http://localhost:7800`. The default WebUI password is `goproxy`; set `WEBUI_PASSWORD` before production use.
@@ -51,7 +49,6 @@ On Windows, use the project build/test environment before Go commands:
 $env:PATH="C:\Program Files\Go\bin;C:\ProgramData\mingw64\mingw64\bin;"+$env:PATH
 $env:CGO_ENABLED='1'
 $env:GOPROXY="https://goproxy.cn,direct"
-$env:ALL_PROXY="socks5://10.0.1.9:7890"
 ```
 
 ## Proxy Authentication And Username DSL
@@ -158,15 +155,13 @@ Existing legacy rows using old source values are migrated into the current `manu
 
 ## Deployment Notes
 
+This fork must be deployed from the local source tree. Do not deploy the upstream `isboyjc/goproxy` container image for this geo-gateway build.
+
+Docker Compose builds the local `Dockerfile` by default:
+
 ```bash
-docker run -d --name goproxy \
-  -p 7800:7800 -p 7801:7801 -p 7802:7802 \
-  -e WEBUI_PASSWORD=change-me \
-  -e PROXY_AUTH_ENABLED=true \
-  -e PROXY_AUTH_USERNAME=acct \
-  -e PROXY_AUTH_PASSWORD=change-me \
-  -v goproxy-data:/app/data \
-  ghcr.io/isboyjc/goproxy:latest
+cp .env.example .env
+docker compose up -d --build
 ```
 
 Security recommendations:

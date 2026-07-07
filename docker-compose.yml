@@ -1,10 +1,7 @@
 services:
   goproxy:
-    image: ghcr.io/isboyjc/goproxy:latest
-    pull_policy: always
-
-    # For local builds, comment image/pull_policy and uncomment build.
-    # build: .
+    build: .
+    image: goproxy-geo:local
 
     container_name: ${CONTAINER_NAME:-goproxy}
     restart: unless-stopped
