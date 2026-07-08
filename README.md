@@ -61,20 +61,73 @@ PROXY_AUTH_USERNAME=acct
 PROXY_AUTH_PASSWORD=change-me
 ```
 
-The username can include optional routing suffixes:
+### How routing is passed
+
+Standard proxy protocols (HTTP Basic auth, SOCKS5 user/pass) only carry a
+**username** and a **password** — there is no separate field for region or
+session. This gateway therefore encodes routing parameters **inside the proxy
+username string itself** (a "username DSL"). You put the whole string into your
+client's proxy-username field.
+
+The full username has the form:
+
+```
+<base>[-region-<cc>][-session-<id>]
+```
+
+For example, `acct-region-jp-session-browser` is parsed by the server as:
+
+| Part | Value | Role |
+|------|-------|------|
+| base | `acct` | Must equal `PROXY_AUTH_USERNAME`. This is the only part checked against the configured credential. |
+| region | `jp` | Selects a `jp` region node. |
+| session | `browser` | Sticky key: same key reuses the same exit node within the TTL. |
+
+Only the **base** takes part in password authentication (base must equal
+`PROXY_AUTH_USERNAME`, and the password must equal `PROXY_AUTH_PASSWORD`). The
+`-region-` and `-session-` parts are routing hints, not credentials.
+
+### Username forms
 
 | Username | Meaning |
 |----------|---------|
-| `acct` | Use any available node. |
+| `acct` | Authenticate as `acct`; use any available node. |
 | `acct-region-us` | Use an available `us` region node. |
-| `acct-session-browser` | Bind this session key to one node for the configured TTL. |
-| `acct-region-jp-session-app01` | Use `jp` nodes and keep `app01` sticky when possible. |
+| `acct-session-browser` | Bind session key `browser` to one node for the configured TTL. |
+| `acct-region-jp-session-app01` | Use `jp` nodes and keep session `app01` sticky when possible. |
 
-Rules:
+> Replace `acct` with whatever you set in `PROXY_AUTH_USERNAME`. If your base
+> username is `myuser`, the strings become `myuser-region-us`, etc. The base
+> prefix is fixed by config; the suffixes are chosen per request.
 
-- Region is a two-letter country/region code and is normalized to lowercase.
-- Session may contain ASCII letters, digits, `_`, and `-`, up to 64 characters.
-- If `DEFAULT_REGION` is set, requests without a region suffix use that default region.
+### The region code
+
+- `region` is a two-letter code (ISO alpha-2, e.g. `us`, `jp`, `hk`), normalized
+  to lowercase. It must match the `region` stored on a node.
+- If no node exists in the requested region, the request fails explicitly
+  (`no available node for region: X`) — it does **not** silently fall back to
+  another region.
+- If `DEFAULT_REGION` is set, requests without a `-region-` suffix use that
+  default region. Otherwise a request without a region uses any available node.
+
+### The session key
+
+- The `session` value is an **arbitrary identifier that you invent**. There is
+  no preset list and no registration step — the server does not check the value
+  against anything, only its format.
+- Allowed characters: ASCII letters, digits, `_`, and `-`; maximum 64
+  characters; it may not be empty.
+- Examples are all valid: `browser`, `chrome1`, `edge02`, `task-a`,
+  `user_42`, `bot-us-01`.
+- **What it does:** each distinct session key is bound to a single exit node for
+  the session TTL (`SESSION_TTL_MINUTES`, default 10). Reusing the same key keeps
+  the same exit IP; using a different key is an independent binding that may land
+  on a different node. Omitting `-session-` gives no stickiness — each request is
+  routed fresh by lowest latency.
+- Practical use: give each client/task its own key. `...-session-chrome1` and
+  `...-session-edge02` in the same region each lock onto (potentially different)
+  exit IPs and do not interfere with each other. Change the key to deliberately
+  rotate the exit.
 
 ## Using The Proxy
 
