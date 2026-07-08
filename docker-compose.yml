@@ -11,6 +11,8 @@ services:
       - "${HTTP_PORT:-7802}:7802"     # HTTP proxy
     volumes:
       - goproxy-data:/app/data
+    networks:
+      - goproxy-net
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - DATA_DIR=/app/data
@@ -33,3 +35,8 @@ services:
 
 volumes:
   goproxy-data:
+
+networks:
+  goproxy-net:
+    name: goproxy-net
+    driver: bridge
