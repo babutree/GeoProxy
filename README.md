@@ -78,19 +78,46 @@ Rules:
 
 ## Using The Proxy
 
-HTTP:
+The examples below assume proxy authentication is enabled (`PROXY_AUTH_ENABLED=true`) with username `acct` and password `change-me`. When authentication is disabled, drop the `user:pass@` part.
+
+### HTTP proxy (plain HTTP target)
+
+```bash
+curl -x http://acct-region-us:change-me@localhost:7802 http://httpbin.org/ip
+```
+
+### HTTP proxy (HTTPS target, via CONNECT tunnel)
+
+An HTTPS target goes through the proxy as a `CONNECT` tunnel. The proxy credentials are sent in the `Proxy-Authorization` header; the DSL suffix stays in the username.
 
 ```bash
 curl -x http://acct-region-us:change-me@localhost:7802 https://httpbin.org/ip
 ```
 
-SOCKS5:
+### SOCKS5 proxy (works for both HTTP and HTTPS targets)
+
+SOCKS5 tunnels raw TCP, so the same command works whether the target is HTTP or HTTPS. Credentials can be embedded in the URL or passed with `-U`:
 
 ```bash
+# Credentials embedded in the proxy string
 curl --socks5 acct-region-jp-session-browser:change-me@localhost:7801 https://httpbin.org/ip
+
+# Equivalent, using -x with the socks5:// scheme
+curl -x socks5://acct-region-jp-session-browser:change-me@localhost:7801 https://httpbin.org/ip
+
+# Equivalent, passing credentials separately
+curl --socks5 localhost:7801 -U acct-region-jp-session-browser:change-me https://httpbin.org/ip
 ```
 
-Environment variables:
+To resolve the target hostname at the exit node instead of locally, use the `socks5h` scheme:
+
+```bash
+curl -x socks5h://acct-region-us:change-me@localhost:7801 https://httpbin.org/ip
+```
+
+> When authentication is enabled, a client that offers no credentials is rejected during the SOCKS5 handshake (no acceptable method), and HTTP requests receive `407 Proxy Authentication Required`.
+
+### Environment variables
 
 ```bash
 export http_proxy=http://acct:change-me@localhost:7802
