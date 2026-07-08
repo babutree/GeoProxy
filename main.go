@@ -55,7 +55,8 @@ func main() {
 	}
 
 	sessionStore := proxy.SessionStore(cfg)
-	sessionStore.StartGC(time.Duration(cfg.SessionTTLMinutes) * time.Minute)
+	// 每分钟扫描一次过期会话绑定；TTL 本身由 SessionTTLMinutes 决定（见 affinity.New）。
+	sessionStore.StartGC(1 * time.Minute)
 	defer sessionStore.Stop()
 
 	httpServer := proxy.New(store, cfg, cfg.HTTPPort)

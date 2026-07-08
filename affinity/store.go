@@ -166,6 +166,21 @@ func (s *Store) List() []SessionBinding {
 	return result
 }
 
+// Count returns the number of active (non-expired) bindings. It is read-only:
+// it does not refresh LastActive and does not delete expired entries.
+func (s *Store) Count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	count := 0
+	for _, binding := range s.bindings {
+		if !s.expired(binding) {
+			count++
+		}
+	}
+	return count
+}
+
 // TTL returns the configured session time-to-live. The UI can combine this
 // with SessionBinding.LastActive to compute a countdown.
 func (s *Store) TTL() time.Duration {

@@ -24,11 +24,16 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	httpCount, _ := s.storage.CountAvailableByProtocol("http")
 	socks5Count, _ := s.storage.CountAvailableByProtocol("socks5")
 	subscriptionCount, _ := s.storage.CountBySource(storage.SourceSubscription)
+	activeSessions := 0
+	if s.affinity != nil {
+		activeSessions = s.affinity.Count()
+	}
 	jsonOK(w, map[string]interface{}{
 		"total":              total,
 		"http":               httpCount,
 		"socks5":             socks5Count,
 		"subscription_count": subscriptionCount,
+		"active_sessions":    activeSessions,
 		"http_port":          s.cfg.HTTPPort,
 		"socks5_port":        s.cfg.SOCKS5Port,
 		"webui_port":         s.cfg.WebUIPort,
