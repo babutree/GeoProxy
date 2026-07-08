@@ -61,10 +61,11 @@ func New(s *storage.Storage, cfg *config.Config, affinityStore *affinity.Store, 
 func (s *Server) Start() {
 	mux := s.routes()
 
-	// 添加日志中间件
+	// 添加日志中间件；跳过前端高频轮询端点，避免访问日志自我膨胀刷屏。
 	loggedMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[webui] %s %s | Host: %s | RemoteAddr: %s",
-			r.Method, r.URL.Path, r.Host, r.RemoteAddr)
+		if !isPolledEndpoint(r.URL.Path) {
+			log.Printf("[webui] %s %s | RemoteAddr: %s", r.Method, r.URL.Path, r.RemoteAddr)
+		}
 		mux.ServeHTTP(w, r)
 	})
 
@@ -74,6 +75,16 @@ func (s *Server) Start() {
 			log.Fatalf("webui: %v", err)
 		}
 	}()
+}
+
+// isPolledEndpoint 判断路径是否为前端定时轮询端点，这些请求不写访问日志。
+func isPolledEndpoint(path string) bool {
+	switch path {
+	case "/api/logs", "/api/stats", "/api/sessions":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) routes() *http.ServeMux {
