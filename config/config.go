@@ -103,7 +103,7 @@ func DefaultConfig() *Config {
 		ProxyAuthUsername:      "acct",
 		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 10),
 		DefaultRegion:          strings.ToLower(strings.TrimSpace(os.Getenv("DEFAULT_REGION"))),
-		BlockedCountries:       envCountries("BLOCKED_COUNTRIES"),
+		BlockedCountries:       envCountriesDefault("BLOCKED_COUNTRIES", []string{"CN"}),
 		AllowedCountries:       envCountries("ALLOWED_COUNTRIES"),
 		DBPath:                 dataDir() + "proxy.db",
 		ValidateConcurrency:    300,
@@ -319,4 +319,18 @@ func envCountries(key string) []string {
 		}
 	}
 	return countries
+}
+
+// envCountriesDefault 与 envCountries 类似，但在环境变量“未设置”时返回给定默认值。
+// 用 LookupEnv 区分“未设置”和“显式设为空”：显式设为空表示用户主动清空该名单，
+// 此时返回空而非默认，保证用户可以关闭默认屏蔽。
+func envCountriesDefault(key string, defaultValue []string) []string {
+	raw, present := os.LookupEnv(key)
+	if !present {
+		return defaultValue
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	return envCountries(key)
 }
