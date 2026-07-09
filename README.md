@@ -240,6 +240,38 @@ from the environment on first boot and then persisted to `config.json`, which is
 the source of truth on subsequent starts. To reset everything, delete
 `config.json` from the data volume.
 
+### Lost the WebUI password?
+
+The first-boot credentials are printed to the log only once. If you missed them,
+you cannot recover the WebUI password (only its hash is stored), but you can
+reset it without losing subscriptions or other settings.
+
+Reset only the WebUI password (keeps username, filters, and all subscription
+nodes). This removes the stored hash so the next start regenerates and prints a
+new WebUI password:
+
+```bash
+docker compose exec goproxy sh -c "sed -i '/webui_password_hash/d' /app/data/config.json"
+docker compose restart goproxy
+docker compose logs goproxy | grep -A6 首次启动
+```
+
+The proxy password (used by SOCKS5/HTTP clients) is stored in clear text and can
+be read directly without a reset:
+
+```bash
+docker compose exec goproxy cat /app/data/config.json
+```
+
+To reset **all** credentials and settings (subscription nodes in `proxy.db` are
+kept), delete the whole config file and restart:
+
+```bash
+docker compose exec goproxy rm /app/data/config.json
+docker compose restart goproxy
+docker compose logs goproxy | grep -A6 首次启动
+```
+
 ## Data Model
 
 Runtime state is stored in SQLite:
