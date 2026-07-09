@@ -12,6 +12,24 @@ const dashboardHTML = `<!DOCTYPE html>
   --soft:#eef3ff; --accent:#2557d6; --accent-2:#0f9f7a; --danger:#c2413a;
   --warn:#b8860b; --shadow:0 10px 34px rgba(28,42,71,.08); --radius:18px;
 }
+[data-theme="dark"]{
+  --bg:#0f1626; --panel:#161f31; --ink:#e6ecf6; --muted:#8a96ab; --line:#26314a;
+  --soft:#1b2740; --accent:#5b8cff; --accent-2:#2bc39a; --danger:#f0685f;
+  --warn:#e0a93b; --shadow:0 10px 34px rgba(0,0,0,.35);
+}
+[data-theme="dark"] .logs{background:#080d17}
+[data-theme="dark"] tbody tr:hover{background:#1b2740}
+[data-theme="dark"] .mini{background:#1b2740}
+[data-theme="dark"] .mini:hover{background:#22304c;border-color:#3a4a6b}
+
+[data-theme="dark"] .bar{background:#26314a}
+[data-theme="dark"] .badge{background:#22304c;color:#c3cee2}
+[data-theme="dark"] .badge.green{background:#12352a;color:#4fcfa2}
+[data-theme="dark"] .badge.blue{background:#1a2a4d;color:#7ea6ff}
+[data-theme="dark"] .badge.gray{background:#22304c;color:#9aa6bd}
+[data-theme="dark"] .badge.warn{background:#3a2f14;color:#e0a93b}
+[data-theme="dark"] input,[data-theme="dark"] select,[data-theme="dark"] textarea{background:#0f1626;color:var(--ink)}
+[data-theme="dark"] .dialog{background:#161f31}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
   font-family:"Segoe UI","PingFang SC","Microsoft YaHei",Verdana,sans-serif;
@@ -20,7 +38,7 @@ button,input,select,textarea{font:inherit}
 .shell{min-height:100vh;display:flex;flex-direction:column}
 
 /* Top bar */
-.topbar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.9);
+.topbar{position:sticky;top:0;z-index:20;background:var(--panel);
   backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
 .topbar-inner{max-width:1360px;margin:0 auto;padding:14px 24px;display:flex;
   align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
@@ -107,6 +125,17 @@ td.mono,.mono{font-family:"Consolas",monospace}
 .bar span{display:block;height:100%;background:var(--accent);border-radius:999px}
 .region-row .cnt{width:36px;text-align:right;color:var(--muted);font-size:13px}
 
+/* Status key-value rows */
+.kv{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-weight:700}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;
+  vertical-align:middle}
+.dot.on{background:var(--accent-2)}
+.dot.off{background:var(--danger)}
+
 /* Subscription list */
 .sub-item{display:flex;align-items:center;justify-content:space-between;gap:12px;
   padding:12px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -166,6 +195,7 @@ td.mono,.mono{font-family:"Consolas",monospace}
         <div><div class="eyebrow">Authenticated Admin</div><h1>GeoProxy Gateway</h1></div>
       </div>
       <div class="actions">
+        <button class="btn" id="theme-toggle" onclick="toggleTheme()" title="切换深色/浅色主题">🌙 深色</button>
         <button class="btn" onclick="refreshAll()">刷新数据</button>
         <button class="btn primary" onclick="openSubModal()">添加订阅</button>
         <button class="btn" onclick="openSettings()">系统设置</button>
@@ -216,6 +246,11 @@ td.mono,.mono{font-family:"Consolas",monospace}
 
       <div class="col">
         <div class="card">
+          <div class="card-head"><h3>sing-box 引擎</h3><div class="tools"><button class="mini" onclick="loadCustomStatus()">刷新</button></div></div>
+          <div class="card-body"><div id="singbox-status"><div class="empty">加载中</div></div></div>
+        </div>
+
+        <div class="card">
           <div class="card-head"><h3>用户名 DSL</h3></div>
           <div class="card-body">
             <div id="dsl-examples">
@@ -259,7 +294,11 @@ function maskAddress(address){if(!address)return '--';const parts=String(address
 function addressArg(address){return encodeURIComponent(String(address||''))}
 function regionOf(proxy){return (proxy.region||'unknown').toLowerCase()}
 function stripColon(port){return String(port||'').replace(/^:/,'')}
-async function refreshAll(){await Promise.all([loadStats(),loadProxies(),loadSubscriptions(),loadConfig(),loadSessions(),loadLogs()]);showToast('数据已刷新')}
+async function refreshAll(){await Promise.all([loadStats(),loadProxies(),loadSubscriptions(),loadConfig(),loadSessions(),loadLogs(),loadCustomStatus()]);showToast('数据已刷新')}
+async function loadCustomStatus(){const st=await api('/api/custom/status');if(!st)return;const box=document.getElementById('singbox-status');if(!box)return;const running=st.singbox_running;const dot='<span class="dot '+(running?'on':'off')+'"></span>';box.innerHTML='<div class="kv">'+dot+'<span>sing-box '+(running?'运行中':'未运行')+'</span></div>'+'<div class="kv"><span class="k">转换节点</span><span class="v">'+safe(st.singbox_nodes)+'</span></div>'+'<div class="kv"><span class="k">订阅可用</span><span class="v">'+safe(st.subscription_count)+'</span></div>'+'<div class="kv"><span class="k">禁用节点</span><span class="v">'+safe(st.disabled_count)+'</span></div>'+'<div class="kv"><span class="k">订阅总数</span><span class="v">'+safe(st.subscription_total)+'</span></div>'}
+function applyTheme(theme){document.documentElement.setAttribute('data-theme',theme);try{localStorage.setItem('gg-theme',theme)}catch(e){}const btn=document.getElementById('theme-toggle');if(btn)btn.textContent=theme==='dark'?'☀ 浅色':'🌙 深色'}
+function toggleTheme(){const cur=document.documentElement.getAttribute('data-theme')==='dark'?'dark':'light';applyTheme(cur==='dark'?'light':'dark')}
+(function(){let t='light';try{t=localStorage.getItem('gg-theme')||'light'}catch(e){}applyTheme(t)})();
 async function loadStats(){const stats=await api('/api/stats');if(!stats)return;document.getElementById('stat-total').textContent=safe(stats.total);document.getElementById('stat-http').textContent=safe(stats.http);document.getElementById('stat-socks5').textContent=safe(stats.socks5);document.getElementById('stat-subscription').textContent=safe(stats.subscription_count);document.getElementById('stat-sessions').textContent=safe(stats.active_sessions)}
 async function loadProxies(){const data=await api('/api/proxies');if(!data)return;allProxies=Array.isArray(data)?data:[];allRegions=Array.from(new Set(allProxies.map(regionOf))).sort();renderRegionFilter();renderProxies();renderRegions()}
 function renderRegionFilter(){const select=document.getElementById('region-filter');const current=select.value;select.innerHTML='<option value="">全部地域</option>'+allRegions.map(r=>'<option value="'+r+'">'+r.toUpperCase()+'</option>').join('');select.value=current}
