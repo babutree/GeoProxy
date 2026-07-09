@@ -165,13 +165,48 @@ func (s *Storage) GetStaleSubscriptions(staleDays int) ([]Subscription, error) {
 	return subs, nil
 }
 
-// ToggleSubscription 切换订阅状态
-func (s *Storage) ToggleSubscription(id int64) error {
-	_, err := s.db.Exec(
-		`UPDATE subscriptions SET status = CASE WHEN status = 'active' THEN 'paused' ELSE 'active' END WHERE id = ?`,
-		id,
-	)
-	return err
+// ToggleSubscription 切换订阅状态，并联动该订阅下所有节点的启用/禁用。
+// 返回切换后的订阅状态（"active" 或 "paused"）。
+// 暂停订阅时禁用其节点（不参与选路），启用订阅时恢复其节点。
+func (s *Storage) ToggleSubscription(id int64) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var current string
+	if err := tx.QueryRow(`SELECT status FROM subscriptions WHERE id = ?`, id).Scan(&current); err != nil {
+		return "", err
+	}
+
+	newStatus := "paused"
+	if current != "active" {
+		newStatus = "active"
+	}
+
+	if _, err := tx.Exec(`UPDATE subscriptions SET status = ? WHERE id = ?`, newStatus, id); err != nil {
+		return "", err
+	}
+
+	// 联动节点：暂停→禁用；启用→恢复为 active 并重置失败计数。
+	if newStatus == "paused" {
+		if _, err := tx.Exec(`UPDATE proxies SET status = 'disabled' WHERE subscription_id = ?`, id); err != nil {
+			return "", err
+		}
+	} else {
+		if _, err := tx.Exec(
+			`UPDATE proxies SET status = 'active', fail_count = 0 WHERE subscription_id = ? AND status = 'disabled'`,
+			id,
+		); err != nil {
+			return "", err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return newStatus, nil
 }
 
 // PauseSubscription 暂停订阅但保留订阅和节点记录。

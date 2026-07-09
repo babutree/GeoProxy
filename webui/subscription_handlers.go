@@ -223,10 +223,11 @@ func (s *Server) apiSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.storage.ToggleSubscription(req.ID); err != nil {
+	status, err := s.storage.ToggleSubscription(req.ID)
+	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	jsonOK(w, map[string]string{"status": "toggled"})
+	jsonOK(w, map[string]string{"status": status})
 }
