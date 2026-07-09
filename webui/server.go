@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -61,9 +62,9 @@ func New(s *storage.Storage, cfg *config.Config, affinityStore *affinity.Store, 
 func (s *Server) Start() {
 	mux := s.routes()
 
-	// 添加日志中间件；跳过前端高频轮询端点，避免访问日志自我膨胀刷屏。
+	// 添加日志中间件；跳过前端高频轮询端点与容器健康探活，避免访问日志自我膨胀刷屏。
 	loggedMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isPolledEndpoint(r.URL.Path) {
+		if !isNoiseRequest(r) {
 			log.Printf("[webui] %s %s | RemoteAddr: %s", r.Method, r.URL.Path, r.RemoteAddr)
 		}
 		mux.ServeHTTP(w, r)
@@ -77,14 +78,29 @@ func (s *Server) Start() {
 	}()
 }
 
-// isPolledEndpoint 判断路径是否为前端定时轮询端点，这些请求不写访问日志。
-func isPolledEndpoint(path string) bool {
-	switch path {
+// isNoiseRequest 判断请求是否为不值得记录的噪音：
+//   - 前端定时轮询端点（/api/logs、/api/stats、/api/sessions）
+//   - 来自本机回环地址的健康探活（docker healthcheck 每 30s 请求 GET /）
+func isNoiseRequest(r *http.Request) bool {
+	switch r.URL.Path {
 	case "/api/logs", "/api/stats", "/api/sessions":
 		return true
-	default:
-		return false
 	}
+	// docker healthcheck: GET / from loopback。真人从其它地址访问 / 仍会记录。
+	if r.URL.Path == "/" && r.Method == http.MethodGet && isLoopbackRemote(r.RemoteAddr) {
+		return true
+	}
+	return false
+}
+
+// isLoopbackRemote 判断 RemoteAddr 是否来自回环地址（127.0.0.1 / ::1）。
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) routes() *http.ServeMux {
@@ -104,6 +120,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/config", s.authMiddleware(s.apiConfig))
 	mux.HandleFunc("/api/sessions", s.authMiddleware(s.apiSessions))
 	mux.HandleFunc("/api/proxy/delete", s.authMiddleware(s.apiDeleteProxy))
+	mux.HandleFunc("/api/proxy/toggle", s.authMiddleware(s.apiToggleProxy))
 	mux.HandleFunc("/api/proxy/refresh", s.authMiddleware(s.apiRefreshProxy))
 	mux.HandleFunc("/api/refresh-latency", s.authMiddleware(s.apiRefreshLatency))
 	mux.HandleFunc("/api/config/save", s.authMiddleware(s.apiConfigSave))

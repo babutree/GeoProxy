@@ -155,6 +155,9 @@ func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) 
 	out := map[string]interface{}{
 		"tag":    fmt.Sprintf("out-%s", tag),
 		"server": node.Server,
+		// 优先用 IPv4 解析节点服务器域名：多数容器/宿主无 IPv6 出网，
+		// 若服务器域名解析到 IPv6 会导致 "network is unreachable" 而误判节点不可用。
+		"domain_strategy": "prefer_ipv4",
 	}
 
 	// sing-box 使用 server_port 而不是 port
