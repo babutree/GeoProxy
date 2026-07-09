@@ -2,6 +2,7 @@ services:
   goproxy:
     build: .
     image: goproxy-geo:local
+    pull_policy: build
 
     container_name: ${CONTAINER_NAME:-goproxy}
     restart: unless-stopped
