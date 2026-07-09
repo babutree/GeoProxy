@@ -3,7 +3,9 @@ package selector
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math/rand"
+	"sort"
 	"strings"
 
 	"goproxy/affinity"
@@ -12,6 +14,11 @@ import (
 )
 
 const unknownLatencyRank = 1 << 30
+
+// sessionSpreadTopK 限定 session 首次绑定时的候选节点数：
+// 在该地域延迟最低的前 K 个节点中按 session 哈希分散，
+// 兼顾出口质量（只用最快的几个）与分散性（不同 session 落到不同节点）。
+const sessionSpreadTopK = 5
 
 var ErrNoNode = errors.New("no available node")
 
@@ -41,12 +48,55 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 	if proxy != nil {
 		return proxy, nil
 	}
-	proxy, err := Pick(store, rebindRegion, excludes)
+	proxy, err := pickForSession(store, rebindRegion, route.Session, excludes)
 	if err != nil {
 		return nil, err
 	}
 	sessions.Set(route.Session, proxy.Address, proxy.Region)
 	return proxy, nil
+}
+
+// pickForSession 为一个 session 首次绑定选节点：在该地域延迟最低的前 K 个候选中，
+// 按 session 名哈希稳定地选择一个。同一 session 恒定映射同一节点（配合黏连），
+// 不同 session 分散到不同节点，同时把候选限制在最快的 K 个以保证出口质量。
+func pickForSession(store Store, region, session string, excludes []string) (*storage.Proxy, error) {
+	region = normalizeRegion(region)
+	proxies, err := store.GetByRegion(region, excludes)
+	if err != nil {
+		return nil, err
+	}
+	available := availableProxies(proxies)
+	if len(available) == 0 {
+		return nil, noNodeError(region)
+	}
+	candidates := topKByLatency(available, sessionSpreadTopK)
+	idx := hashString(session) % uint32(len(candidates))
+	picked := candidates[idx]
+	return &picked, nil
+}
+
+// topKByLatency 返回按延迟升序排列的前 k 个节点（不足 k 个则全返回）。
+// 地址作为次级排序键，保证结果稳定、与输入顺序无关。
+func topKByLatency(proxies []storage.Proxy, k int) []storage.Proxy {
+	sorted := make([]storage.Proxy, len(proxies))
+	copy(sorted, proxies)
+	sort.Slice(sorted, func(i, j int) bool {
+		ri, rj := latencyRank(sorted[i].Latency), latencyRank(sorted[j].Latency)
+		if ri != rj {
+			return ri < rj
+		}
+		return sorted[i].Address < sorted[j].Address
+	})
+	if len(sorted) > k {
+		sorted = sorted[:k]
+	}
+	return sorted
+}
+
+func hashString(s string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return h.Sum32()
 }
 
 func resolveBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []string) (*storage.Proxy, string) {

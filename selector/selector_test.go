@@ -107,3 +107,48 @@ func TestResolveSessionOnlyRebindUsesBoundRegion(t *testing.T) {
 		t.Fatalf("Resolve() = %s, want us-new:8080", proxy.Address)
 	}
 }
+
+// 同一 session 首次绑定应稳定映射到同一节点（可重复、与顺序无关）。
+func TestResolveSameSessionStableFirstBind(t *testing.T) {
+	proxies := []storage.Proxy{
+		{Address: "jp1:8080", Region: "jp", Latency: 10, Status: "active"},
+		{Address: "jp2:8080", Region: "jp", Latency: 20, Status: "active"},
+		{Address: "jp3:8080", Region: "jp", Latency: 30, Status: "active"},
+	}
+	var first string
+	for i := 0; i < 5; i++ {
+		store := fakeStore{proxies: proxies}
+		sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+		proxy, err := Resolve(store, sessions, auth.ParsedUsername{Region: "jp", Session: "cc01"}, nil)
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if first == "" {
+			first = proxy.Address
+		} else if proxy.Address != first {
+			t.Fatalf("same session mapped to different nodes: %s vs %s", first, proxy.Address)
+		}
+	}
+}
+
+// 不同 session 应能分散到 top-K 内的不同节点，而非全部收敛到延迟最低的那个。
+func TestResolveDifferentSessionsSpread(t *testing.T) {
+	proxies := []storage.Proxy{
+		{Address: "jp1:8080", Region: "jp", Latency: 10, Status: "active"},
+		{Address: "jp2:8080", Region: "jp", Latency: 20, Status: "active"},
+		{Address: "jp3:8080", Region: "jp", Latency: 30, Status: "active"},
+	}
+	seen := map[string]bool{}
+	for _, sess := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		store := fakeStore{proxies: proxies}
+		sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+		proxy, err := Resolve(store, sessions, auth.ParsedUsername{Region: "jp", Session: sess}, nil)
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		seen[proxy.Address] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("sessions did not spread across nodes, only saw: %v", seen)
+	}
+}
