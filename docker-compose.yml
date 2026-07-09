@@ -21,10 +21,9 @@ services:
       - SESSION_TTL_MINUTES=${SESSION_TTL_MINUTES:-10}
       - DEFAULT_REGION=${DEFAULT_REGION}
       - ALLOWED_COUNTRIES=${ALLOWED_COUNTRIES}
-      - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES}
+      - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES-CN}
       - HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-5}
       - MAX_RETRY=${MAX_RETRY:-3}
-      - SINGBOX_PATH=${SINGBOX_PATH:-sing-box}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:7800/ || exit 1"]
       interval: 30s
