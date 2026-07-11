@@ -322,7 +322,7 @@ type Binding struct {
 ## 8. 部署形态 (不变)
 - Docker 单容器 + docker-compose, 镜像内置 sing-box。
 - 数据持久化: bind mount `./data` (SQLite + config.json + sing-box 配置)。
-- 发布镜像命名空间: GHCR `ghcr.io/babutree/goproxy`, Docker Hub `docker.io/babutree/goproxy`。
+- 部署方式: 从本地源码树构建 (`docker compose up -d --build`), 不依赖已发布的远程镜像。
 - 目标运行环境: 国外服务器 (AlmaLinux + Podman, 已验证)。
 
 ---

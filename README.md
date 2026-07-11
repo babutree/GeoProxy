@@ -287,14 +287,7 @@ Existing legacy rows using old source values are migrated into the current `manu
 
 ## Deployment Notes
 
-This fork must be deployed from the local source tree. Do not deploy the upstream `isboyjc/goproxy` container image for this geo-gateway build.
-
-Published image names for this fork are:
-
-| Registry | Image |
-|----------|-------|
-| GHCR | `ghcr.io/babutree/goproxy` |
-| Docker Hub | `docker.io/babutree/goproxy` |
+This fork must be deployed from the local source tree. Do not deploy the upstream `isboyjc/goproxy` container image for this geo-gateway build. No prebuilt image is published for this fork; build it locally from this repository.
 
 Docker Compose builds the local `Dockerfile` by default:
 
