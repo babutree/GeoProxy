@@ -103,6 +103,58 @@ func TestQueryIPAPIIsAcceptsValidScore(t *testing.T) {
 	}
 }
 
+// TestProbeCloudflareBlocked 覆盖 Cloudflare 拦截探测：403 / cf-mitigated 头 / 干净 200 / body 含 "Just a moment"。
+// 用 rewriteIPAPITransport 把 client 请求打到测试服务器（复用同文件既有模式）。
+func TestProbeCloudflareBlocked(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    int
+	}{
+		{
+			name: "403 forbidden",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			},
+			want: 1,
+		},
+		{
+			name: "cf-mitigated header",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("cf-mitigated", "challenge")
+				w.WriteHeader(http.StatusOK)
+			},
+			want: 1,
+		},
+		{
+			name: "clean 200",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("ip=203.0.113.1\nloc=US\n"))
+			},
+			want: 0,
+		},
+		{
+			name: "body just a moment",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("<title>Just a moment...</title>"))
+			},
+			want: 1,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(c.handler)
+			defer server.Close()
+
+			client := server.Client()
+			client.Transport = rewriteIPAPITransport{base: client.Transport, target: server.URL}
+			if got := probeCloudflareBlocked(client); got != c.want {
+				t.Fatalf("probeCloudflareBlocked() = %d, want %d for %s", got, c.want, c.name)
+			}
+		})
+	}
+}
+
 type rewriteIPAPITransport struct {
 	base   http.RoundTripper
 	target string

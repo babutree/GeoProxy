@@ -557,6 +557,43 @@ func TestRemovedContributionAPIRouteIsNotPublic(t *testing.T) {
 	assertNoBusinessTerms(t, rec.Body.String())
 }
 
+// TestStarProxySetsStarredFlag 覆盖 apiStarProxy：POST 置星标成功，SetProxyStarred 生效并被读回。
+func TestStarProxySetsStarredFlag(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.storage.AddManualProxy("203.0.113.40:8080", "http", "us", ""); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	proxy, err := server.storage.GetProxyByAddress("203.0.113.40:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	if proxy.Starred {
+		t.Fatal("new manual proxy unexpectedly starred by default")
+	}
+
+	body := fmt.Sprintf(`{"id":%d,"starred":true}`, proxy.ID)
+	serveAuthenticated(t, server, "/api/proxy/star", body, http.StatusOK)
+
+	starred, err := server.storage.GetProxyByAddress("203.0.113.40:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() after star error = %v", err)
+	}
+	if !starred.Starred {
+		t.Fatalf("proxy.Starred = false after star, want true")
+	}
+
+	// 清位同样应成功并被读回。
+	unbody := fmt.Sprintf(`{"id":%d,"starred":false}`, proxy.ID)
+	serveAuthenticated(t, server, "/api/proxy/star", unbody, http.StatusOK)
+	unstarred, err := server.storage.GetProxyByAddress("203.0.113.40:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() after unstar error = %v", err)
+	}
+	if unstarred.Starred {
+		t.Fatalf("proxy.Starred = true after unstar, want false")
+	}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	resetWebUISecurityState()

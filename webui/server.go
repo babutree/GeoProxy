@@ -237,6 +237,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/proxy/delete", s.authMiddleware(s.apiDeleteProxy))
 	mux.HandleFunc("/api/proxy/toggle", s.authMiddleware(s.apiToggleProxy))
 	mux.HandleFunc("/api/proxy/refresh", s.authMiddleware(s.apiRefreshProxy))
+	mux.HandleFunc("/api/proxy/star", s.authMiddleware(s.apiStarProxy))
 	mux.HandleFunc("/api/refresh-latency", s.authMiddleware(s.apiRefreshLatency))
 	mux.HandleFunc("/api/config/save", s.authMiddleware(s.apiConfigSave))
 

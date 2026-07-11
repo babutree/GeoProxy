@@ -15,11 +15,12 @@ const IPAPIIsUnknown = -1.0
 type RiskInfo struct {
 	IPAPIIsScore float64
 	Flags        string
+	CFBlocked    int // Cloudflare 拦截：-1未探测 0未拦截 1被拦截
 }
 
 // UnknownRisk 是两源都未取得有效信号时的零信息风险信息。
 func UnknownRisk() RiskInfo {
-	return RiskInfo{IPAPIIsScore: IPAPIIsUnknown, Flags: ""}
+	return RiskInfo{IPAPIIsScore: IPAPIIsUnknown, Flags: "", CFBlocked: -1}
 }
 
 // parseAbuserScore 解析 ipapi.is 的 abuser_score 字段。

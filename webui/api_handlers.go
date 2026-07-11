@@ -142,6 +142,38 @@ func (s *Server) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "toggled"})
 }
 
+// apiStarProxy 切换节点星标。加星直接生效；取消星标由前端 confirm 保护。
+func (s *Server) apiStarProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID      int64  `json:"id"`
+		Address string `json:"address"`
+		Starred bool   `json:"starred"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	id := req.ID
+	if id <= 0 {
+		proxy, err := s.storage.GetProxyByAddress(req.Address)
+		if err != nil {
+			jsonError(w, "proxy not found", http.StatusNotFound)
+			return
+		}
+		id = proxy.ID
+	}
+	if err := s.storage.SetProxyStarred(id, req.Starred); err != nil {
+		log.Printf("[webui] star proxy failed: id=%d address=%q err=%v", req.ID, req.Address, err)
+		jsonError(w, "failed to star proxy", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "starred"})
+}
+
 func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -196,7 +228,7 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 					log.Printf("[webui] re-enable proxy %s after successful test failed: %v", targetProxy.Address, err)
 				}
 			}
-			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs, risk.IPAPIIsScore, risk.Flags)
+			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs, risk.IPAPIIsScore, risk.Flags, risk.CFBlocked)
 			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", targetProxy.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
 		} else {
 			s.storage.DisableProxyByID(targetProxy.ID)
@@ -232,7 +264,7 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 		for r := range validate.ValidateStream(proxies) {
 			if r.Valid {
 				latencyMs := int(r.Latency.Milliseconds())
-				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags)
+				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags, r.Risk.CFBlocked)
 				updated++
 			} else {
 				s.storage.DisableProxyByID(r.Proxy.ID)

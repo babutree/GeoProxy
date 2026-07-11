@@ -58,9 +58,9 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 		// 表头两列（ipapi.is 分数 + ip-api 标记）。
 		"ipapi.is 滥用分",
 		"<th>ip-api 标记</th>",
-		// 两处 colspan 为 10（加载中 + 无匹配节点）。
-		"<td colspan=\"10\" class=\"empty\">加载中</td>",
-		"<td colspan=\"10\" class=\"empty\">没有匹配节点</td>",
+		// 两处 colspan 为 12（加载中 + 无匹配节点）：星标列 + CF 列共新增两列。
+		"<td colspan=\"12\" class=\"empty\">加载中</td>",
+		"<td colspan=\"12\" class=\"empty\">没有匹配节点</td>",
 		// abuserBadge：<0 显示 "--"，否则两位小数 + 三色阈值(0.1/0.5)。
 		"function abuserBadge(score){const n=Number(score);if(!Number.isFinite(n)||n<0)return '<span class=\"muted\">--</span>';const cls=n<0.1?'ok':(n<=0.5?'warn':'danger');return '<span class=\"badge '+cls+'\">'+html(n.toFixed(2))+'</span>'}",
 		// ipapiFlagsBadges：空+seen 显"干净"、空+未探测显"--"、命中按类型着色。
@@ -88,6 +88,44 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 		t.Run("reject "+unsafe, func(t *testing.T) {
 			if strings.Contains(dashboardHTML, unsafe) {
 				t.Fatalf("dashboardHTML still has stale aggregated risk model %q", unsafe)
+			}
+		})
+	}
+}
+
+// TestDashboardStarCopyAndCFColumns 验证新增：星标列/CF 列（12 列）、cfBadge/copyProxyCred/
+// toggleStar/starBtn/randSession 函数、星标可用置顶 sort 片段、/api/proxy/star 路由调用。
+func TestDashboardStarCopyAndCFColumns(t *testing.T) {
+	checks := []string{
+		// 表头新增星标列与 CF 列。
+		"<th>★</th>",
+		"<th>CF 拦截</th>",
+		// 两处 colspan 改为 12。
+		"<td colspan=\"12\" class=\"empty\">加载中</td>",
+		"<td colspan=\"12\" class=\"empty\">没有匹配节点</td>",
+		// 新增 JS 函数。
+		"function cfBadge(",
+		"function copyProxyCred(",
+		"function toggleStar(",
+		"function starBtn(",
+		"function randSession(",
+		// 星标可用置顶 sort 片段：fa/fb 先于原有 order 比较。
+		"const fa=(nodeState(a)==='ok'&&(a.starred===true||Number(a.starred)===1))?1:0",
+		"const fb=(nodeState(b)==='ok'&&(b.starred===true||Number(b.starred)===1))?1:0",
+		"if(fa!==fb)return fb-fa;",
+		// 星标 API 路由。
+		"/api/proxy/star",
+		// 行渲染引用星标/CF/复制。
+		"'<tr><td>'+starBtn(p)+'</td>",
+		"cfBadge(p.cf_blocked)",
+		"copyProxyCred('+id+')",
+		// 取消星标须 confirm 确认。
+		"if(!confirm('取消该节点星标？'))return",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing star/copy/cf invariant %q", check)
 			}
 		})
 	}

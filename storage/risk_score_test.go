@@ -89,7 +89,7 @@ func TestUpdateProxyExitInfoWritesRiskSignals(t *testing.T) {
 		t.Fatalf("GetProxyByAddress() error = %v", err)
 	}
 
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.20", "US Ashburn", 42, 0.65, "proxy,hosting"); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.20", "US Ashburn", 42, 0.65, "proxy,hosting", -1); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-write:8080")
@@ -119,11 +119,11 @@ func TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite(t *testing.T) {
 	}
 
 	// 先写入有效分 0.80 + flags。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 42, 0.80, "proxy"); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 42, 0.80, "proxy", -1); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(0.80) error = %v", err)
 	}
 	// 再以 -1（ipapi.is 探测降级/失败）更新：ipapiis_score 应保持 0.80 不被覆盖。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, "", -1); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(-1) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-keep:8080")
@@ -139,10 +139,10 @@ func TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite(t *testing.T) {
 	}
 
 	// 从 0 分再写 -1 也不得覆盖（0 是有效低分）。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, 0, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, 0, "", -1); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(0) error = %v", err)
 	}
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, "", -1); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(-1 after 0) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-keep:8080")
@@ -163,7 +163,7 @@ func TestUpdateProxyExitInfoClearsFailCountAndMarksSeenButKeepsStatus(t *testing
 		t.Fatalf("GetProxyByAddress() error = %v", err)
 	}
 
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.22", "US Ashburn", 35, -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.22", "US Ashburn", 35, -1, "", -1); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-reactivate:8080")
@@ -194,7 +194,7 @@ func TestUpdateProxyExitInfoClearsFailCountAndMarksSeenButKeepsStatus(t *testing
 func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	store := newTestStorage(t)
 	insertProxy(t, store, "cols-sync:8080", "http", "us", SourceManual, 123, "active", 0)
-	if err := store.UpdateProxyExitInfo(mustProxyID(t, store, "cols-sync:8080"), "203.0.113.30", "US Ashburn", 123, 0.55, "hosting"); err != nil {
+	if err := store.UpdateProxyExitInfo(mustProxyID(t, store, "cols-sync:8080"), "203.0.113.30", "US Ashburn", 123, 0.55, "hosting", -1); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 
@@ -209,13 +209,13 @@ func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rows.Columns(): %v", err)
 	}
-	// 当前模型：id..note(20) + ipapiis_score + ipapi_flags + ipapi_flags_seen = 23 列。硬编码断言，防止任一侧漏改。
-	if len(cols) != 23 {
-		t.Fatalf("proxyColumns yields %d columns, want 23 (id..note + risk columns)", len(cols))
+	// 当前模型：id..note(20) + ipapiis_score + ipapi_flags + ipapi_flags_seen + starred + cf_blocked = 25 列。硬编码断言，防止任一侧漏改。
+	if len(cols) != 25 {
+		t.Fatalf("proxyColumns yields %d columns, want 25 (id..note + risk columns + starred + cf_blocked)", len(cols))
 	}
-	// 最后三列必须与 scanProxy 末尾风险字段对齐。
-	if cols[len(cols)-3] != "ipapiis_score" || cols[len(cols)-2] != "ipapi_flags" || cols[len(cols)-1] != "ipapi_flags_seen" {
-		t.Fatalf("last three SELECT columns = %q,%q,%q, want risk columns", cols[len(cols)-3], cols[len(cols)-2], cols[len(cols)-1])
+	// 最后两列必须与 scanProxy 末尾新增字段对齐。
+	if cols[len(cols)-2] != "starred" || cols[len(cols)-1] != "cf_blocked" {
+		t.Fatalf("last two SELECT columns = %q,%q, want starred,cf_blocked", cols[len(cols)-2], cols[len(cols)-1])
 	}
 
 	if !rows.Next() {
@@ -254,5 +254,126 @@ func TestProxyColumnsIncludesRiskColumns(t *testing.T) {
 	}
 	if !strings.Contains(proxyColumns, "ipapi_flags_seen") {
 		t.Fatal("proxyColumns constant missing ipapi_flags_seen")
+	}
+}
+
+// TestStarredAndCFBlockedDefaults 新节点默认 starred=false、cf_blocked=-1（未探测）。
+func TestStarredAndCFBlockedDefaults(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "star-default:8080", "http", "us", SourceManual, 100, "active", 0)
+	p, err := store.GetProxyByAddress("star-default:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	if p.Starred {
+		t.Fatalf("default starred = true, want false")
+	}
+	if p.CFBlocked != -1 {
+		t.Fatalf("default cf_blocked = %d, want -1", p.CFBlocked)
+	}
+}
+
+// TestSetProxyStarredTogglesFlag 置位/清位 starred 并被 scanProxy 读回。
+func TestSetProxyStarredTogglesFlag(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "star-toggle:8080", "http", "us", SourceManual, 100, "active", 0)
+	p, err := store.GetProxyByAddress("star-toggle:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+
+	if err := store.SetProxyStarred(p.ID, true); err != nil {
+		t.Fatalf("SetProxyStarred(true) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("star-toggle:8080")
+	if !p.Starred {
+		t.Fatalf("starred after set true = false, want true")
+	}
+
+	if err := store.SetProxyStarred(p.ID, false); err != nil {
+		t.Fatalf("SetProxyStarred(false) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("star-toggle:8080")
+	if p.Starred {
+		t.Fatalf("starred after set false = true, want false")
+	}
+}
+
+// TestUpdateProxyExitInfoWritesCFBlocked cf_blocked 仅在有效值(0/1)时写入并被读回；
+// -1（本次未能探测/未知）不得覆盖已有有效值。
+func TestUpdateProxyExitInfoWritesCFBlocked(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "cf-write:8080", "http", "us", SourceManual, 100, "active", 0)
+	p, err := store.GetProxyByAddress("cf-write:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", 1); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(cf=1) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("cf-write:8080")
+	if p.CFBlocked != 1 {
+		t.Fatalf("cf_blocked after write 1 = %d, want 1", p.CFBlocked)
+	}
+
+	// -1 保护：本次未能探测(-1)不得覆盖之前的有效值 1。
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", -1); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(cf=-1) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("cf-write:8080")
+	if p.CFBlocked != 1 {
+		t.Fatalf("cf_blocked after write -1 = %d, want 1 (-1 must not overwrite)", p.CFBlocked)
+	}
+
+	// 有效值覆盖为 0（未拦截）。
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", 0); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(cf=0) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("cf-write:8080")
+	if p.CFBlocked != 0 {
+		t.Fatalf("cf_blocked after write 0 = %d, want 0", p.CFBlocked)
+	}
+}
+
+// TestUpdateProxyExitInfoNegativeCFBlockedDoesNotOverwrite 负向回归：cf_blocked 的 -1 保护生效。
+// -1 代表本次未能探测(未知)，必须保留数据库已有的有效值(0/1)，不得覆盖；有效值(0/1)则正常写入。
+func TestUpdateProxyExitInfoNegativeCFBlockedDoesNotOverwrite(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "cf-keep:8080", "http", "us", SourceManual, 100, "active", 0)
+	p, err := store.GetProxyByAddress("cf-keep:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+
+	// 1) 先写入有效值 1（被拦截）。
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 42, -1, "", 1); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(cf=1) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("cf-keep:8080")
+	if p.CFBlocked != 1 {
+		t.Fatalf("cf_blocked after write 1 = %d, want 1", p.CFBlocked)
+	}
+
+	// 2) 以 -1（本次未能探测）更新：cf_blocked 应保持 1 不被覆盖。
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 50, -1, "", -1); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(cf=-1) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("cf-keep:8080")
+	if p.CFBlocked != 1 {
+		t.Fatalf("cf_blocked after -1 update = %d, want 1 (-1 must not overwrite)", p.CFBlocked)
+	}
+	// 其它字段（如延迟）仍应正常更新，证明只有 cf_blocked 被条件保护。
+	if p.Latency != 50 {
+		t.Fatalf("latency after -1 update = %d, want 50", p.Latency)
+	}
+
+	// 3) 再以有效值 0（未拦截）更新：cf_blocked 应正常覆盖为 0。
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 50, -1, "", 0); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(cf=0) error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("cf-keep:8080")
+	if p.CFBlocked != 0 {
+		t.Fatalf("cf_blocked after write 0 = %d, want 0 (valid value must overwrite)", p.CFBlocked)
 	}
 }

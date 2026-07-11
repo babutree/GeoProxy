@@ -80,19 +80,19 @@ func (s *Storage) UpdateLatencyByID(id int64, latencyMs int) error {
 }
 
 // UpdateExitInfo 更新出口信息；自动地域可由验证结果回写，手动地域受保护。
-func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
+func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int) error {
 	if err := s.requireUnambiguousAddress(address); err != nil {
 		return err
 	}
-	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags)
+	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, cfBlocked)
 }
 
-func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
-	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags)
+func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int) error {
+	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, cfBlocked)
 }
 
-func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
-	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags)
+func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int) error {
+	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, cfBlocked)
 }
 
 // updateExitInfoWhere 写回出口信息与两源风险信号。
@@ -100,25 +100,40 @@ func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID
 // ipapi_flags 随每次成功探测覆盖写入（含空串——空表示本次探测无命中，语义有效）。
 // ipapi_flags_seen=1 区分“已探测且无命中”和“旧数据/未探测”。
 // 注意：本函数不改 status——订阅流程依赖 Disable/Enable 分离，恢复启用由调用点显式处理。
-func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
+func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int) error {
 	grade := CalculateQualityGrade(latencyMs)
 	region := regionFromExitLocation(exitLocation)
-	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region, ipapiisScore, ipapiisScore, ipapiFlags}
+	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region, ipapiisScore, ipapiisScore, ipapiFlags, cfBlocked, cfBlocked}
 	queryArgs = append(queryArgs, args...)
 	// 健康检查/验证成功时同样清零 fail_count（BUG-53）：只有到达此处才代表
 	// 探测通过，之前累积的失败应清除，节点方能重新参与选路/后续检查。
 	// 健康检查失败路径仍会累加 fail_count 至阈值并 disable，故持续坏的节点
 	// 不会来回横跳——只有真正探测成功才归零。
+	// cf_blocked 仅在 cfBlocked >= 0 时更新：-1 代表本次未能探测(未知)，不得覆盖已有有效值(0/1)。
 	res, err := s.db.Exec(
 		`UPDATE proxies
 		 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
 		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END,
 		     ipapiis_score = CASE WHEN ? >= 0 THEN ? ELSE ipapiis_score END,
 		     ipapi_flags = ?,
-		     ipapi_flags_seen = 1
+		     ipapi_flags_seen = 1,
+		     cf_blocked = CASE WHEN ? >= 0 THEN ? ELSE cf_blocked END
 		 WHERE `+where,
 		queryArgs...,
 	)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
+// SetProxyStarred 置位/清位节点星标。starred 转 0/1 写入 starred 列。
+func (s *Storage) SetProxyStarred(id int64, starred bool) error {
+	starredInt := 0
+	if starred {
+		starredInt = 1
+	}
+	res, err := s.db.Exec(`UPDATE proxies SET starred = ? WHERE id = ?`, starredInt, id)
 	if err != nil {
 		return err
 	}

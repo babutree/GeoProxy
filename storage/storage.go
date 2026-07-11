@@ -34,6 +34,8 @@ type Proxy struct {
 	IPAPIIsScore   float64 `json:"ipapiis_score"`    // ipapi.is abuser_score（0-1，越高越危险）；-1 表示未探测/查询失败
 	IPAPIFlags     string  `json:"ipapi_flags"`      // ip-api 命中标记逗号拼接（proxy/hosting/mobile）；空=本次探测无命中或未知
 	IPAPIFlagsSeen bool    `json:"ipapi_flags_seen"` // ip-api proxy/hosting/mobile 是否已完成探测；false 时前端显示未知
+	Starred        bool    `json:"starred"`
+	CFBlocked      int     `json:"cf_blocked"` // -1未探测 0未拦截 1被拦截
 }
 
 // Subscription 订阅信息
@@ -103,7 +105,9 @@ func (s *Storage) initSchema() error {
 			subscription_id INTEGER NOT NULL DEFAULT 0,
 			ipapiis_score  REAL NOT NULL DEFAULT -1,
 			ipapi_flags    TEXT NOT NULL DEFAULT '',
-			ipapi_flags_seen INTEGER NOT NULL DEFAULT 0
+			ipapi_flags_seen INTEGER NOT NULL DEFAULT 0,
+			starred        INTEGER NOT NULL DEFAULT 0,
+			cf_blocked     INTEGER NOT NULL DEFAULT -1
 		)
 	`)
 	if err != nil {

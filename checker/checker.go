@@ -54,7 +54,7 @@ func (c *Checker) run() {
 			valid++
 			latencyMs := int(r.Latency.Milliseconds())
 			if r.ExitIP != "" && r.ExitLocation != "" {
-				if err := c.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags); err != nil {
+				if err := c.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags, r.Risk.CFBlocked); err != nil {
 					log.Printf("[checker] update exit info error: %v", err)
 				}
 			} else if r.Latency > 0 {

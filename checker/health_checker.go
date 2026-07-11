@@ -70,7 +70,7 @@ func (hc *HealthChecker) RunOnce() {
 			validCount++
 			// 更新延迟和质量等级
 			latencyMs := int(result.Latency.Milliseconds())
-			if err := hc.storage.UpdateProxyExitInfo(result.Proxy.ID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags); err == nil {
+			if err := hc.storage.UpdateProxyExitInfo(result.Proxy.ID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.CFBlocked); err == nil {
 				updateCount++
 			}
 		} else {

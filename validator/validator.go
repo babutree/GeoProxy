@@ -176,9 +176,46 @@ func queryIPAPIIs(client *http.Client, exitIP string) ipapiIsInfo {
 	}
 }
 
+// cloudflareProbeURL 作为 Cloudflare 可达性/拦截信号的基准探测目标。
+const cloudflareProbeURL = "https://www.cloudflare.com/cdn-cgi/trace"
+
+// probeCloudflareBlocked 经传入的 *http.Client（即走该代理）探测 Cloudflare 是否拦截，
+// 返回 -1/0/1：
+//   - 请求失败/超时 → -1（未知，不武断判为拦截）。
+//   - 命中拦截信号 → 1。信号判定（命中任一）：HTTP 状态 403；或响应头存在 "cf-mitigated"；
+//     或响应体含 "Just a moment"/"cf-chl"/"Attention Required"/"error code: 1020"。
+//   - 否则（如 200）→ 0。
+func probeCloudflareBlocked(client *http.Client) int {
+	resp, err := client.Get(cloudflareProbeURL)
+	if err != nil {
+		return -1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		return 1
+	}
+	if resp.Header.Get("cf-mitigated") != "" {
+		return 1
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return -1
+	}
+	text := string(body)
+	for _, sig := range []string{"Just a moment", "cf-chl", "Attention Required", "error code: 1020"} {
+		if strings.Contains(text, sig) {
+			return 1
+		}
+	}
+	return 0
+}
+
 // assessRisk 收集两源风险信号，分开返回（不聚合）：
 //   - ip-api 的 proxy/hosting/mobile 命中标记（来自已取得的 ipInfo）
 //   - ipapi.is 的 abuser_score（经同一 client 走节点代理请求；失败则记 IPAPIIsUnknown）
+//   - Cloudflare 拦截探测（经同一 client 走节点代理请求）
 func assessRisk(client *http.Client, ipInfo ipAPIInfo) RiskInfo {
 	risk := RiskInfo{IPAPIIsScore: IPAPIIsUnknown}
 	if ipInfo.OK {
@@ -189,6 +226,7 @@ func assessRisk(client *http.Client, ipInfo ipAPIInfo) RiskInfo {
 			risk.IPAPIIsScore = is.AbuserScore
 		}
 	}
+	risk.CFBlocked = probeCloudflareBlocked(client)
 	return risk
 }
 
