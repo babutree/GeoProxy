@@ -20,7 +20,7 @@ import (
 type Manager struct {
 	storage   *storage.Storage
 	validator *validator.Validator
-	singbox   *SingBoxProcess
+	singbox   singBoxShard
 	stopCh    chan struct{}
 	refreshMu sync.Mutex // 防止并发刷新
 }
@@ -35,7 +35,7 @@ func NewManager(store *storage.Storage, v *validator.Validator, cfg *config.Conf
 	return &Manager{
 		storage:   store,
 		validator: v,
-		singbox:   NewSingBoxProcess(cfg.SingBoxPath, dataDir, cfg.SingBoxBasePort),
+		singbox:   NewShardedSingBox(cfg.SingBoxPath, dataDir, cfg.SingBoxBasePort, cfg.SingBoxShardCount),
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -243,7 +243,8 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 
 	// 收集所有入池的代理（带正确的协议信息）
 	var allProxies []storage.Proxy
-	// 方案 B：每个 tunnel 节点暴露 SOCKS5 + HTTP 两个本地入站，各自作为独立代理入库。
+	// 端口合并：每个 tunnel 节点只暴露一个 mixed 本地入站（单端口同时服务 SOCKS5 与 HTTP），
+	// 作为单条代理入库。协议登记为 socks5（mixed 端口接受 SOCKS5 连接，代理拨号路径按 socks5 处理）。
 	type tunnelProxy struct {
 		addr  string
 		proto string
@@ -274,16 +275,11 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 			return fmt.Errorf("sing-box 重载失败: %w", err)
 		} else {
 			portMap := m.singbox.GetPortMap()
-			httpPortMap := m.singbox.GetHTTPPortMap()
 			for _, node := range tunnelNodes {
 				key := node.NodeKey()
 				if port, ok := portMap[key]; ok {
 					addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 					tunnelProxies = append(tunnelProxies, tunnelProxy{addr: addr, proto: "socks5"})
-				}
-				if port, ok := httpPortMap[key]; ok {
-					addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-					tunnelProxies = append(tunnelProxies, tunnelProxy{addr: addr, proto: "http"})
 				}
 			}
 		}
@@ -315,7 +311,7 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 		}
 	}
 	if len(tunnelProxies) > 0 {
-		log.Printf("[custom] 📥 %d 个加密节点入站（SOCKS5+HTTP）通过 sing-box 转换入池", len(tunnelProxies))
+		log.Printf("[custom] 📥 %d 个加密节点入站（单 mixed 端口，SOCKS5/HTTP 共用）通过 sing-box 转换入池", len(tunnelProxies))
 	}
 
 	// 验证新入池的代理
@@ -566,8 +562,8 @@ func isGeoBlocked(exitLocation string, cfg *config.Config) bool {
 	return false
 }
 
-// GetSingBox 获取 sing-box 进程管理器
-func (m *Manager) GetSingBox() *SingBoxProcess {
+// GetSingBox 获取 sing-box 编排器（singBoxShard 接口）。
+func (m *Manager) GetSingBox() singBoxShard {
 	return m.singbox
 }
 
@@ -607,15 +603,10 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 		return fmt.Errorf("sing-box 未为节点 %s 分配本地端口", key)
 	}
 
-	// 方案 B：手动加密节点同样暴露 SOCKS5 + HTTP 两个本地入站，各自入库。
-	// 两条记录必须原子写入，避免前端提示失败但只落库 SOCKS5 的半成功状态。
-	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
-	manualProxies := []storage.Proxy{{Address: socksAddr, Protocol: "socks5"}}
-	if httpPort, ok := m.singbox.GetHTTPPortMap()[key]; ok {
-		httpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
-		manualProxies = append(manualProxies, storage.Proxy{Address: httpAddr, Protocol: "http"})
-	}
-	if err := m.storage.AddManualProxies(manualProxies, region, note); err != nil {
+	// 端口合并：手动加密节点只暴露一个 mixed 本地入站（单端口同时服务 SOCKS5 与 HTTP），
+	// 入库为单条 socks5 记录。前端复制时可按需以 socks5:// 或 http:// scheme 呈现同一 IP:port。
+	mixedAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
+	if err := m.storage.AddManualProxy(mixedAddr, "socks5", region, note); err != nil {
 		return fmt.Errorf("存储人工节点入站失败: %w", err)
 	}
 	return nil

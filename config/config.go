@@ -65,6 +65,7 @@ type Config struct {
 	CustomRefreshInterval  int
 	SingBoxPath            string
 	SingBoxBasePort        int
+	SingBoxShardCount      int
 	MaxRetry               int
 }
 
@@ -117,6 +118,7 @@ func DefaultConfig() *Config {
 		CustomRefreshInterval:  60,
 		SingBoxPath:            singBoxPath,
 		SingBoxBasePort:        20000,
+		SingBoxShardCount:      envInt("SINGBOX_SHARD_COUNT", 4),
 		MaxRetry:               envInt("MAX_RETRY", 3),
 	}
 }
@@ -185,6 +187,7 @@ type savedConfig struct {
 	HealthIntervalMinutes int      `json:"health_check_interval,omitempty"`
 	MaxRetry              *int     `json:"max_retry,omitempty"`
 	SingBoxPath           string   `json:"singbox_path,omitempty"`
+	SingBoxShardCount     int      `json:"singbox_shard_count,omitempty"`
 	BlockedCountries      []string `json:"blocked_countries,omitempty"`
 	AllowedCountries      []string `json:"allowed_countries,omitempty"`
 }
@@ -205,6 +208,7 @@ func Save(cfg *Config) error {
 		HealthIntervalMinutes: cfg.HealthIntervalMinutes,
 		MaxRetry:              &maxRetry,
 		SingBoxPath:           cfg.SingBoxPath,
+		SingBoxShardCount:     cfg.SingBoxShardCount,
 		BlockedCountries:      NormalizeCountryCodes(cfg.BlockedCountries),
 		AllowedCountries:      NormalizeCountryCodes(cfg.AllowedCountries),
 	}, "", "  ")
@@ -268,6 +272,9 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 	}
 	if saved.SingBoxPath != "" {
 		cfg.SingBoxPath = saved.SingBoxPath
+	}
+	if saved.SingBoxShardCount > 0 {
+		cfg.SingBoxShardCount = saved.SingBoxShardCount
 	}
 	if saved.BlockedCountries != nil {
 		cfg.BlockedCountries = NormalizeCountryCodes(saved.BlockedCountries)
