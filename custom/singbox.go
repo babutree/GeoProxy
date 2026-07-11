@@ -611,6 +611,15 @@ func (s *SingBoxProcess) startLocked() error {
 		return fmt.Errorf("sing-box 配置无效: %s", string(checkOutput))
 	}
 
+	// 启动前确认本次配置要监听的端口已释放：Reload 重启时端口被稳定复用，
+	// 旧进程被 stopLocked 终止后其 listen socket 可能尚未被内核回收，
+	// 若立即 bind 同一端口会触发 "address already in use" 而启动失败。
+	// 轮询等待旧端口释放（带上限超时）后再启动，消除重启竞态窗口。
+	if busy := s.waitPortsFreeLocked(portReleaseTimeout); busy > 0 {
+		log.Printf("[custom] ⚠️ 启动前仍有 %d 个端口被占用（超时 %s），可能与旧进程残留监听冲突，仍尝试启动",
+			busy, portReleaseTimeout)
+	}
+
 	s.cmd = exec.Command(binPath, "run", "-c", s.configFile, "-D", s.configDir)
 
 	// 捕获 stderr 用于错误诊断
@@ -697,6 +706,54 @@ func (s *SingBoxProcess) setStatusLocked(status, reason string, readyPorts int) 
 	s.status = status
 	s.reason = reason
 	s.readyPorts = readyPorts
+}
+
+// portReleaseTimeout 是启动新进程前等待旧端口释放的上限。
+// 取值权衡：足够覆盖内核回收 listen socket 的常见延迟，又不至于让重启长时间挂起。
+const portReleaseTimeout = 5 * time.Second
+
+// waitPortsFreeLocked 在启动新 sing-box 进程前，轮询确认本次配置要监听的端口
+// （s.portMap + s.httpPortMap，因端口稳定复用，正是新进程将 bind 的端口）已释放。
+// 返回超时后仍被占用的端口数量（0 表示全部已释放）。
+// 说明：这是"确认旧监听已消失"的探测——能连上说明旧进程仍在监听该端口，需继续等待；
+// 连不上（连接被拒）说明端口已释放，可安全 bind。带上限超时，避免无限等待。
+func (s *SingBoxProcess) waitPortsFreeLocked(timeout time.Duration) int {
+	ports := make([]int, 0, len(s.portMap)+len(s.httpPortMap))
+	for _, port := range s.portMap {
+		ports = append(ports, port)
+	}
+	for _, port := range s.httpPortMap {
+		ports = append(ports, port)
+	}
+	if len(ports) == 0 {
+		return 0
+	}
+
+	portBusy := func(port int) bool {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if err != nil {
+			return false // 连接失败 = 端口已释放
+		}
+		conn.Close()
+		return true // 能连上 = 旧监听仍在
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		busy := 0
+		for _, port := range ports {
+			if portBusy(port) {
+				busy++
+			}
+		}
+		if busy == 0 {
+			return 0
+		}
+		if time.Now().After(deadline) {
+			return busy
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 }
 
 func (s *SingBoxProcess) countReadyPortsLocked(timeout time.Duration) int {
