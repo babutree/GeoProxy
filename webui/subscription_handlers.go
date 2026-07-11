@@ -87,6 +87,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		URL         string `json:"url"`
 		FileContent string `json:"file_content"` // 粘贴的原始订阅内容；解析器会自动识别 YAML、协议链接、Base64 或纯文本。
 		RefreshMin  int    `json:"refresh_min"`
+		Headers     string `json:"headers"` // 自定义请求头 JSON 对象字符串，如 {"User-Agent":"clash.meta"}；空则用默认 UA。
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxBytesErr *http.MaxBytesError
@@ -132,7 +133,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 
 	// 先验证：拉取并解析，确认能解析出节点后再入库
 	if s.customMgr != nil {
-		nodeCount, err := s.customMgr.ValidateSubscription(req.URL, filePath)
+		nodeCount, err := s.customMgr.ValidateSubscription(req.URL, filePath, req.Headers)
 		if err != nil {
 			// 清理已保存的文件
 			if filePath != "" {
@@ -145,7 +146,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[webui] 订阅验证通过: %s (%d 个节点)", req.Name, nodeCount)
 	}
 
-	id, err := s.storage.AddSubscription(req.Name, req.URL, filePath, "auto", req.RefreshMin)
+	id, err := s.storage.AddSubscription(req.Name, req.URL, filePath, "auto", req.RefreshMin, req.Headers)
 	if err != nil {
 		log.Printf("[webui] add subscription failed: %v", err)
 		jsonError(w, "failed to add subscription", http.StatusInternalServerError)

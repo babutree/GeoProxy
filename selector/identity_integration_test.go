@@ -18,7 +18,7 @@ func TestSessionBindingRestoresProxyIdentityWithSharedAddress(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	subID, err := store.AddSubscription("sub", "https://example.test/selector.yaml", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.test/selector.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}

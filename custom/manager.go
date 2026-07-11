@@ -1,6 +1,7 @@
 package custom
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -426,7 +427,7 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 		return nil, fmt.Errorf("订阅未配置 URL 或文件路径")
 	}
 
-	data, err := m.fetchSubscriptionURL(sub.URL)
+	data, err := m.fetchSubscriptionURL(sub.URL, sub.Headers)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +435,10 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 }
 
 // fetchSubscriptionURL 直连拉取订阅 URL；失败时显式返回错误，不通过上游节点兜底。
-func (m *Manager) fetchSubscriptionURL(urlStr string) ([]byte, error) {
+// headersJSON 为订阅自定义请求头的 JSON 对象字符串（如 {"User-Agent":"clash.meta"}）。
+// 向后兼容：先设默认 User-Agent: v2rayN，再逐个应用自定义头——自定义头覆盖默认，
+// 未指定 User-Agent 时保留默认 v2rayN，不破坏现有订阅拉取。
+func (m *Manager) fetchSubscriptionURL(urlStr, headersJSON string) ([]byte, error) {
 	transport := &http.Transport{}
 
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
@@ -442,8 +446,22 @@ func (m *Manager) fetchSubscriptionURL(urlStr string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 用 v2rayN UA，大部分机场都会返回完整的节点信息
+	// 默认用 v2rayN UA，大部分机场都会返回完整的节点信息。
 	req.Header.Set("User-Agent", "v2rayN")
+	// 应用订阅自定义请求头：解析成功则逐个 Set（覆盖同名默认头）；
+	// 空或非法 JSON 时静默保留默认头，保证向后兼容。
+	if headersJSON != "" {
+		var custom map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &custom); err == nil {
+			for k, v := range custom {
+				if k != "" {
+					req.Header.Set(k, v)
+				}
+			}
+		} else {
+			log.Printf("[custom] ⚠️ 订阅自定义请求头解析失败，回退默认 UA: %v", err)
+		}
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -516,8 +534,10 @@ func (m *Manager) GetStatus() map[string]interface{} {
 	}
 }
 
-// ValidateSubscription 验证订阅能否解析出节点（不入库，仅检查）
-func (m *Manager) ValidateSubscription(url, filePath string) (int, error) {
+// ValidateSubscription 验证订阅能否解析出节点（不入库，仅检查）。
+// headersJSON 为订阅自定义请求头 JSON，用于 URL 拉取——保证对默认 UA 返回 401 的机场
+// 在添加校验阶段也能带上自定义头，与后续刷新拉取行为一致。
+func (m *Manager) ValidateSubscription(url, filePath, headersJSON string) (int, error) {
 	var data []byte
 	var err error
 
@@ -527,7 +547,7 @@ func (m *Manager) ValidateSubscription(url, filePath string) (int, error) {
 			return 0, fmt.Errorf("读取文件失败: %w", err)
 		}
 	} else if url != "" {
-		data, err = m.fetchSubscriptionURL(url)
+		data, err = m.fetchSubscriptionURL(url, headersJSON)
 		if err != nil {
 			return 0, err
 		}

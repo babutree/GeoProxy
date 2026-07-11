@@ -115,10 +115,10 @@ func TestCollectAllTunnelNodesKeepsLoadedNodesWhenOtherSubscriptionFetchFails(t 
 	store := newTestStorage(t)
 	goodFile := writeSubscriptionFile(t, "trojan://password-new@new.example.com:443?sni=new.example.com#new")
 	badFile := filepath.Join(t.TempDir(), "missing.txt")
-	if _, err := store.AddSubscription("bad", "", badFile, "auto", 60); err != nil {
+	if _, err := store.AddSubscription("bad", "", badFile, "auto", 60, ""); err != nil {
 		t.Fatalf("AddSubscription(bad) error = %v", err)
 	}
-	if _, err := store.AddSubscription("good", "", goodFile, "auto", 60); err != nil {
+	if _, err := store.AddSubscription("good", "", goodFile, "auto", 60, ""); err != nil {
 		t.Fatalf("AddSubscription(good) error = %v", err)
 	}
 	oldNode := tunnelNode("old", "old.example.com", "password-old")
@@ -149,7 +149,7 @@ func TestCollectAllTunnelNodesKeepsLoadedNodesWhenOtherSubscriptionFetchFails(t 
 func TestRefreshSubscriptionFailureKeepsOldUsableProxy(t *testing.T) {
 	store := newTestStorage(t)
 	file := writeSubscriptionFile(t, "trojan://password@new.example.com:443?sni=new.example.com#new")
-	subID, err := store.AddSubscription("sub", "", file, "auto", 60)
+	subID, err := store.AddSubscription("sub", "", file, "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -183,7 +183,7 @@ func TestRefreshSubscriptionAddsNewDirectNodesDisabledUntilValidated(t *testing.
 		t.Fatalf("SplitHostPort() error = %v", err)
 	}
 	file := writeSubscriptionFile(t, "proxies:\n  - name: pending-http\n    type: http\n    server: "+host+"\n    port: "+port+"\n")
-	subID, err := store.AddSubscription("sub", "", file, "auto", 60)
+	subID, err := store.AddSubscription("sub", "", file, "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}

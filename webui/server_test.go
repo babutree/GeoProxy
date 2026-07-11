@@ -251,7 +251,7 @@ func TestManualNodeMutationRequiresAuthentication(t *testing.T) {
 
 func TestManualNodeRejectsSubscriptionSourceMutations(t *testing.T) {
 	server := newTestServer(t)
-	subID, err := server.storage.AddSubscription("test", "https://example.test/webui.yaml", "", "auto", 60)
+	subID, err := server.storage.AddSubscription("test", "https://example.test/webui.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -709,7 +709,7 @@ func setTestGlobalConfig(t *testing.T, cfg *config.Config) {
 func TestSubscriptionsAPIReportsPausedCount(t *testing.T) {
 	server := newTestServer(t)
 
-	subID, err := server.storage.AddSubscription("sub-a", "https://example.test/a", "", "auto", 60)
+	subID, err := server.storage.AddSubscription("sub-a", "https://example.test/a", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}

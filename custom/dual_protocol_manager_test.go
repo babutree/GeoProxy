@@ -12,7 +12,7 @@ import (
 // 这是方案Y（存储层显式标记）取代前端猜地址的核心置位点。
 func TestAddPendingSubscriptionProxyMarksDualProtocol(t *testing.T) {
 	store := newTestStorage(t)
-	subID, err := store.AddSubscription("sub", "https://example.invalid/x", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.invalid/x", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}

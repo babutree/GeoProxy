@@ -450,3 +450,23 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 		t.Fatal("dashboardHTML copyProxyCred still copies bare username DSL instead of full proxy URL")
 	}
 }
+
+// TestDashboardSubscriptionCustomHeaders 验证订阅弹窗含自定义请求头输入框，
+// 且 addSubscription() 读取该输入框并随 payload 以 headers 字段发送（解决 issue#34）。
+func TestDashboardSubscriptionCustomHeaders(t *testing.T) {
+	checks := []string{
+		// 弹窗新增 headers 输入框（textarea），带 JSON 示例 placeholder。
+		`<textarea id="sub-headers" placeholder="{&#34;User-Agent&#34;:&#34;clash&#34;}"></textarea>`,
+		// addSubscription 读取输入框值。
+		"headers:document.getElementById('sub-headers').value.trim()",
+		// 提交后清空该输入框。
+		"document.getElementById('sub-headers').value=''",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing subscription custom-headers invariant %q", check)
+			}
+		})
+	}
+}

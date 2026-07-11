@@ -6,10 +6,10 @@ import (
 )
 
 // AddSubscription 添加订阅（自动去重：相同 URL 或 file_path 不重复添加）
-func (s *Storage) AddSubscription(name, url, filePath, format string, refreshMin int) (int64, error) {
+func (s *Storage) AddSubscription(name, url, filePath, format string, refreshMin int, headers string) (int64, error) {
 	res, err := s.db.Exec(
-		`INSERT INTO subscriptions (name, url, file_path, format, refresh_min) VALUES (?, ?, ?, ?, ?)`,
-		name, url, filePath, format, refreshMin,
+		`INSERT INTO subscriptions (name, url, file_path, format, refresh_min, headers) VALUES (?, ?, ?, ?, ?, ?)`,
+		name, url, filePath, format, refreshMin, headers,
 	)
 	if err != nil {
 		if isUniqueConstraintError(err) {
@@ -78,10 +78,10 @@ func (s *Storage) AddContributedSubscription(name, url string, refreshMin int) (
 }
 
 // UpdateSubscription 更新订阅
-func (s *Storage) UpdateSubscription(id int64, name, url, filePath, format string, refreshMin int) error {
+func (s *Storage) UpdateSubscription(id int64, name, url, filePath, format string, refreshMin int, headers string) error {
 	res, err := s.db.Exec(
-		`UPDATE subscriptions SET name = ?, url = ?, file_path = ?, format = ?, refresh_min = ? WHERE id = ?`,
-		name, url, filePath, format, refreshMin, id,
+		`UPDATE subscriptions SET name = ?, url = ?, file_path = ?, format = ?, refresh_min = ?, headers = ? WHERE id = ?`,
+		name, url, filePath, format, refreshMin, headers, id,
 	)
 	if isUniqueConstraintError(err) {
 		return fmt.Errorf("订阅 URL 或文件已存在")
@@ -235,14 +235,14 @@ func (s *Storage) PauseSubscription(id int64) error {
 
 // scanSubscription 扫描订阅行数据
 // subColumns 订阅表查询列
-const subColumns = `id, name, url, file_path, format, refresh_min, last_fetch, last_success, status, proxy_count, created_at, contributed`
+const subColumns = `id, name, url, file_path, format, refresh_min, last_fetch, last_success, status, proxy_count, created_at, contributed, headers`
 
 func scanSubscription(rows *sql.Rows) (*Subscription, error) {
 	sub := &Subscription{}
 	var lastFetch, lastSuccess sql.NullTime
 	var contributed int
 	if err := rows.Scan(&sub.ID, &sub.Name, &sub.URL, &sub.FilePath, &sub.Format,
-		&sub.RefreshMin, &lastFetch, &lastSuccess, &sub.Status, &sub.ProxyCount, &sub.CreatedAt, &contributed); err != nil {
+		&sub.RefreshMin, &lastFetch, &lastSuccess, &sub.Status, &sub.ProxyCount, &sub.CreatedAt, &contributed, &sub.Headers); err != nil {
 		return nil, err
 	}
 	if lastFetch.Valid {

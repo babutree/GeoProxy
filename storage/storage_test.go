@@ -157,7 +157,7 @@ func TestUpdateExitInfoIgnoresInvalidRegionCode(t *testing.T) {
 
 func TestManualAndSubscriptionSameAddressDoNotOverwriteIdentity(t *testing.T) {
 	store := newTestStorage(t)
-	subID, err := store.AddSubscription("sub", "https://example.test/sub.yaml", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.test/sub.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -199,7 +199,7 @@ func TestLegacyAddressUniqueMigrationAllowsManualAndSubscriptionSameAddress(t *t
 	}
 	defer store.Close()
 
-	subID, err := store.AddSubscription("sub", "https://example.test/sub.yaml", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.test/sub.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -223,7 +223,7 @@ func TestSubscriptionURLAndFilePathUniqueForConcurrentAddsAndUpdates(t *testing.
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := store.AddSubscription(fmt.Sprintf("sub-%d", i), "https://example.test/dup.yaml", "", "auto", 60)
+			_, err := store.AddSubscription(fmt.Sprintf("sub-%d", i), "https://example.test/dup.yaml", "", "auto", 60, "")
 			errCh <- err
 		}(i)
 	}
@@ -247,18 +247,18 @@ func TestSubscriptionURLAndFilePathUniqueForConcurrentAddsAndUpdates(t *testing.
 		t.Fatalf("concurrent add results: successes=%d duplicateErrors=%d", successes, duplicateErrors)
 	}
 
-	secondID, err := store.AddSubscription("file", "", filepath.Join(t.TempDir(), "sub.yaml"), "auto", 60)
+	secondID, err := store.AddSubscription("file", "", filepath.Join(t.TempDir(), "sub.yaml"), "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription(file) error = %v", err)
 	}
-	if err := store.UpdateSubscription(secondID, "file", "https://example.test/dup.yaml", "", "auto", 60); err == nil || !strings.Contains(err.Error(), "已存在") {
+	if err := store.UpdateSubscription(secondID, "file", "https://example.test/dup.yaml", "", "auto", 60, ""); err == nil || !strings.Contains(err.Error(), "已存在") {
 		t.Fatalf("UpdateSubscription duplicate URL error = %v, want duplicate error", err)
 	}
 }
 
 func TestDeleteSubscriptionDeletesProxiesAtomically(t *testing.T) {
 	store := newTestStorage(t)
-	subID, err := store.AddSubscription("sub", "https://example.test/delete.yaml", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.test/delete.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -278,7 +278,7 @@ func TestDeleteSubscriptionDeletesProxiesAtomically(t *testing.T) {
 
 func TestUserPausedAndSubscriptionPausedStateMachine(t *testing.T) {
 	store := newTestStorage(t)
-	subID, err := store.AddSubscription("sub", "https://example.test/state.yaml", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.test/state.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -317,7 +317,7 @@ func TestUserPausedAndSubscriptionPausedStateMachine(t *testing.T) {
 
 func TestParentSubscriptionPausedNotBypassedByEnableProxy(t *testing.T) {
 	store := newTestStorage(t)
-	subID, err := store.AddSubscription("sub", "https://example.test/enable.yaml", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.test/enable.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -357,7 +357,7 @@ func TestCountBySubscriptionIDReturnsScanError(t *testing.T) {
 
 func TestProxyIdentityConsistencyForUsagePauseAndDelete(t *testing.T) {
 	store := newTestStorage(t)
-	subID, err := store.AddSubscription("sub", "https://example.test/identity.yaml", "", "auto", 60)
+	subID, err := store.AddSubscription("sub", "https://example.test/identity.yaml", "", "auto", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
