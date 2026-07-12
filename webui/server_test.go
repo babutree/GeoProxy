@@ -728,6 +728,55 @@ func TestConfigSaveCountryFilterFailureRollsBackWhenServerConfigAliasesGlobal(t 
 	}
 }
 
+func TestConfigSaveKeepsRuntimeAlignedWhenRollbackSaveFails(t *testing.T) {
+	server := newTestServer(t)
+	oldCfg := *server.cfg
+	oldCfg.ProxyAuthUsername = "old"
+	oldCfg.SessionTTLMinutes = 10
+	oldCfg.HealthIntervalMinutes = 5
+	oldCfg.SingBoxPath = "sing-box"
+	setTestGlobalConfig(t, &oldCfg)
+	server.cfg = config.Get()
+	if err := server.storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	origSave := configSave
+	t.Cleanup(func() { configSave = origSave })
+	calls := 0
+	configSave = func(cfg *config.Config) error {
+		calls++
+		if calls == 1 {
+			return origSave(cfg)
+		}
+		return fmt.Errorf("forced rollback save failure")
+	}
+
+	payload := `{"proxy_auth_username":"new","session_ttl_minutes":25,"health_check_interval":5,"max_retry":0,"singbox_path":"sing-box","blocked_countries":["CN"]}`
+	serveAuthenticated(t, server, "/api/config/save", payload, http.StatusInternalServerError)
+
+	if calls < 2 {
+		t.Fatalf("configSave calls = %d, want at least 2 (forward + rollback)", calls)
+	}
+	// 当磁盘/全局无法回滚时，运行态不得单独回滚成旧值，否则会与 config.Get()/磁盘分裂。
+	if server.cfg.ProxyAuthUsername != "new" || server.cfg.SessionTTLMinutes != 25 {
+		t.Fatalf("server runtime rolled back despite failed disk rollback: %#v", server.cfg)
+	}
+	if got := config.Get(); got.ProxyAuthUsername != "new" || got.SessionTTLMinutes != 25 {
+		t.Fatalf("global config = %#v, want new values kept after failed rollback save", got)
+	}
+	if server.affinity.TTL() != 25*time.Minute {
+		t.Fatalf("affinity TTL = %v, want 25m aligned with persisted new config", server.affinity.TTL())
+	}
+	data, err := os.ReadFile(filepath.Clean(config.ConfigFile()))
+	if err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	if !strings.Contains(string(data), `"proxy_auth_username": "new"`) {
+		t.Fatalf("disk config missing new username after failed rollback: %s", data)
+	}
+}
+
 func TestSecurityStateActivityPrunesExpiredEntries(t *testing.T) {
 	resetWebUISecurityState()
 	now := time.Now()

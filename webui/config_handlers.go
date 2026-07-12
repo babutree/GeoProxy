@@ -11,6 +11,10 @@ import (
 	"goproxy/config"
 )
 
+// configSave is the persistence seam used by config handlers.
+// Production defaults to config.Save; tests may override it to inject failures.
+var configSave = config.Save
+
 // apiConfig 获取配置
 func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
@@ -93,7 +97,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	newCfg.BlockedCountries = config.NormalizeCountryCodes(req.BlockedCountries)
 	newCfg.AllowedCountries = config.NormalizeCountryCodes(req.AllowedCountries)
 
-	if err := config.Save(&newCfg); err != nil {
+	if err := configSave(&newCfg); err != nil {
 		log.Printf("[webui] save config failed: %v", err)
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
@@ -102,11 +106,13 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	s.affinity.SetTTL(time.Duration(newCfg.SessionTTLMinutes) * time.Minute)
 	if err := s.applyCountryFilters(&newCfg); err != nil {
 		log.Printf("[webui] apply country filters failed: %v", err)
-		if rollbackErr := config.Save(&oldCfg); rollbackErr != nil {
+		if rollbackErr := configSave(&oldCfg); rollbackErr != nil {
+			// 磁盘/全局无法回滚时，保留已成功落盘的新配置运行态，避免 s.cfg/affinity 与 config.Get()/磁盘分裂。
 			log.Printf("[webui] rollback config after country filter failure failed: %v", rollbackErr)
+		} else {
+			*s.cfg = oldCfg
+			s.affinity.SetTTL(time.Duration(oldCfg.SessionTTLMinutes) * time.Minute)
 		}
-		*s.cfg = oldCfg
-		s.affinity.SetTTL(time.Duration(oldCfg.SessionTTLMinutes) * time.Minute)
 		jsonError(w, "failed to apply country filters", http.StatusInternalServerError)
 		return
 	}

@@ -31,7 +31,10 @@ func (w *writer) Write(p []byte) (n int, err error) {
 	mu.Lock()
 	lines = append(lines, formatted)
 	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
+		// 重新分配并拷贝，断开对已丢弃前缀的底层数组引用，避免旧日志字符串长期滞留。
+		kept := make([]string, maxLines)
+		copy(kept, lines[len(lines)-maxLines:])
+		lines = kept
 	}
 	mu.Unlock()
 

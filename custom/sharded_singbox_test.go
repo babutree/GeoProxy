@@ -336,6 +336,73 @@ func TestRecoverFailedShardsDoesNothingAfterStop(t *testing.T) {
 	}
 }
 
+// TestReloadDoesNothingAfterStop 生命周期竞态：Manager.Stop / 编排器 Stop 之后，
+// 仍在途的订阅刷新不得再调用 shard.Reload 复活已停止进程（端口复用竞态与资源泄漏）。
+// 故意换节点集，确保若未检查 stopping 会命中真实 Reload 路径（而非 key 集相等跳过）。
+func TestReloadDoesNothingAfterStop(t *testing.T) {
+	sb, spies := newSpyOrchestrator(10000, 2)
+	nodeA := tunnelNode("post-stop-a", "post-stop-a.example.com", "pw-a")
+	if err := sb.Reload([]ParsedNode{nodeA}); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+	before := make([]int, len(spies))
+	for i, s := range spies {
+		before[i] = s.calls()
+	}
+	sb.Stop()
+
+	// 节点集变化 → 正常路径必会 shard.Reload；停止后必须被拦截。
+	nodeB := tunnelNode("post-stop-b", "post-stop-b.example.com", "pw-b")
+	if err := sb.Reload([]ParsedNode{nodeB}); err == nil {
+		t.Fatal("停止后 Reload error = nil, want already-stopped error")
+	}
+	for i, s := range spies {
+		if got := s.calls(); got != before[i] {
+			t.Fatalf("停止后分片 %d 被 Reload 复活：次数=%d，期望 %d", i, got, before[i])
+		}
+	}
+}
+
+// TestConcurrentReloadAndStopDoesNotReviveShards 加压：Stop 与 Reload 并发时，
+// 最终状态必须是已停止且不再接受后续 Reload 复活（-race 下可暴露锁/标志遗漏）。
+func TestConcurrentReloadAndStopDoesNotReviveShards(t *testing.T) {
+	sb, spies := newSpyOrchestrator(10000, 2)
+	nodeA := tunnelNode("race-a", "race-a.example.com", "pw-a")
+	if err := sb.Reload([]ParsedNode{nodeA}); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			n := tunnelNode(fmt.Sprintf("race-%d", i), fmt.Sprintf("race-%d.example.com", i), "pw")
+			_ = sb.Reload([]ParsedNode{n})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		sb.Stop()
+	}()
+	wg.Wait()
+
+	afterStop := make([]int, len(spies))
+	for i, s := range spies {
+		afterStop[i] = s.calls()
+	}
+	// Stop 完成后，换节点集的 Reload 仍不得复活任何分片。
+	nodeFinal := tunnelNode("race-final", "race-final.example.com", "pw-final")
+	if err := sb.Reload([]ParsedNode{nodeFinal}); err == nil {
+		t.Fatal("停止后 Reload error = nil, want already-stopped error")
+	}
+	for i, s := range spies {
+		if got := s.calls(); got != afterStop[i] {
+			t.Fatalf("Stop 竞态后分片 %d 仍被复活：次数=%d，期望 %d", i, got, afterStop[i])
+		}
+	}
+}
+
 // TestReloadTargetsOnlyChangedShard 验证新增一个节点只重载其所属分片。
 func TestReloadTargetsOnlyChangedShard(t *testing.T) {
 	const n = 4

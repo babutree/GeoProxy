@@ -25,7 +25,8 @@ type Manager struct {
 	validator *validator.Validator
 	singbox   singBoxShard
 	stopCh    chan struct{}
-	refreshMu sync.Mutex // 防止并发刷新
+	stopOnce  sync.Once
+	refreshMu sync.Mutex // 防止并发刷新；Stop 也持有，避免停机与刷新/Reload 交错
 }
 
 // NewManager 创建订阅管理器
@@ -57,9 +58,16 @@ func (m *Manager) Start() {
 	go m.probeLoop()
 }
 
-// Stop 停止管理器
+// Stop 停止管理器。
+// 先关闭 stopCh 通知后台循环退出，再持 refreshMu 等待在途 Refresh/AddManual 结束，
+// 最后停止 sing-box，避免 Stop 与 Reload 并发造成端口复用竞态或停机后复活进程。
+// stopOnce 保证重复 Stop 不会 close 已关闭的 channel。
 func (m *Manager) Stop() {
-	close(m.stopCh)
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
 	m.singbox.Stop()
 	log.Println("[custom] 订阅管理器已停止")
 }

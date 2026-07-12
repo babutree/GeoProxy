@@ -107,6 +107,13 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
+	// 已停止：拒绝复活分片。Stop 后仍可能有在途 RefreshSubscription/addManualTunnel
+	// 持 refreshMu 后调用 Reload；若不拦截会重新拉起进程并与端口释放竞态。
+	// 返回错误（而非 nil）以便上层刷新路径保留旧代理，避免“假成功重载后删旧入库”。
+	if sb.stopping {
+		return errors.New("sing-box already stopped")
+	}
+
 	// 1. 过滤 tunnel 节点。
 	var tunnelNodes []ParsedNode
 	for _, n := range nodes {

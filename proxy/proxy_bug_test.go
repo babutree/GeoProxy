@@ -630,6 +630,43 @@ func TestHTTPConnectDialWithZeroTimeoutDoesNotExpireImmediately(t *testing.T) {
 	conn.Close()
 }
 
+func TestHTTPInboundPartialHeaderTimesOut(t *testing.T) {
+	cfg := proxyTestConfig(0)
+	cfg.ValidateTimeout = 1
+	server := New(nil, cfg, "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := server.httpServer()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// 半请求头：故意不发送最终 \r\n\r\n，模拟 HTTP/CONNECT Slowloris。
+	if _, err := conn.Write([]byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n")); err != nil {
+		t.Fatalf("write partial headers: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	buf := make([]byte, 1)
+	_, readErr := conn.Read(buf)
+	if readErr == nil {
+		t.Fatal("partial HTTP CONNECT headers stayed open past ValidateTimeout")
+	}
+	if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("client read timed out waiting for server to close partial headers: %v", readErr)
+	}
+}
+
 func TestSOCKS5InboundPartialGreetingTimesOut(t *testing.T) {
 	cfg := proxyTestConfig(0)
 	cfg.ValidateTimeout = 1

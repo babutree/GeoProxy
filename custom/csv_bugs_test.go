@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"goproxy/storage"
 	"goproxy/validator"
@@ -225,6 +227,104 @@ func TestSingBoxRuntimeStatusExplainsNoTunnelNodesAndFailures(t *testing.T) {
 	if status.Status != SingBoxStatusFailed || status.Reason != "binary_not_found" || status.Running {
 		t.Fatalf("failed status = %+v, want failed/binary_not_found and not running", status)
 	}
+}
+
+// TestManagerStopIdempotent 覆盖 Manager.Stop 生命周期：重复 Stop 不得 panic
+//（旧实现 close(stopCh) 无 once，第二次 close 直接崩溃）。
+func TestManagerStopIdempotent(t *testing.T) {
+	store := newTestStorage(t)
+	sb, spies := newSpyOrchestrator(10000, 1)
+	m := &Manager{
+		storage: store,
+		singbox: sb,
+		stopCh:  make(chan struct{}),
+	}
+	m.Stop()
+	m.Stop() // 不得 panic
+	if spies[0].stops() < 1 {
+		t.Fatal("Stop 未下传到 sing-box 编排器")
+	}
+}
+
+// TestManagerStopSerializesWithRefresh 验证 Stop 与 Refresh 串行：
+// 持 refreshMu 的刷新在途时，Stop 必须等刷新退出后再 stop sing-box，
+// 避免 stop 后刷新仍调用 Reload 造成端口复用竞态。
+func TestManagerStopSerializesWithRefresh(t *testing.T) {
+	store := newTestStorage(t)
+	// 故意使用会失败的 tunnel 订阅：Refresh 在 Reload 前已持 refreshMu。
+	file := writeSubscriptionFile(t, "trojan://password@new.example.com:443?sni=new.example.com#new")
+	subID, err := store.AddSubscription("sub", "", file, "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+
+	sb, spies := newSpyOrchestrator(10000, 1)
+	// Reload 阻塞，模拟长时间重载窗口，便于观察 Stop 是否与 refreshMu 串行。
+	block := make(chan struct{})
+	release := make(chan struct{})
+	spies[0].mu.Lock()
+	// 通过自定义 Reload：用 reloadErr 路径不够；改为包装 wait 逻辑
+	spies[0].mu.Unlock()
+	// 使用 blockingShard 覆盖 Reload
+	bs := &blockingShard{spyShard: spies[0], enter: block, release: release}
+	sb.shards[0] = bs
+
+	m := &Manager{
+		storage:   store,
+		validator: validator.New(1, 1, "http://127.0.0.1/validate"),
+		singbox:   sb,
+		stopCh:    make(chan struct{}),
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- m.RefreshSubscription(subID)
+	}()
+
+	select {
+	case <-block:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Refresh 未进入 Reload，无法验证与 Stop 的串行")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		m.Stop()
+		close(stopDone)
+	}()
+
+	// 刷新仍持锁时 Stop 不得完成（否则说明未与 refreshMu 串行）。
+	select {
+	case <-stopDone:
+		t.Fatal("Stop 在 Refresh 持锁期间已返回，说明未与 refreshMu 串行")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-refreshDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Refresh 在 release 后未结束")
+	}
+	select {
+	case <-stopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop 在 Refresh 结束后仍未返回")
+	}
+}
+
+// blockingShard 在 Reload 入口发信号并阻塞，直到 release 关闭。
+type blockingShard struct {
+	*spyShard
+	enter   chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingShard) Reload(nodes []ParsedNode) error {
+	b.once.Do(func() { close(b.enter) })
+	<-b.release
+	return b.spyShard.Reload(nodes)
 }
 
 func TestManagerStatusIncludesExplainedSingBoxFields(t *testing.T) {

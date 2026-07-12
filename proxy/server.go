@@ -71,7 +71,17 @@ func (s *Server) Start() error {
 		authStatus = fmt.Sprintf("需认证 (用户: %s)", s.cfg.ProxyAuthUsername)
 	}
 	log.Printf("http proxy server listening on %s [lowest latency] [%s]", s.port, authStatus)
-	return http.ListenAndServe(s.port, s)
+	return s.httpServer().ListenAndServe()
+}
+
+// httpServer 构造入站 HTTP/CONNECT 服务。正的 ValidateTimeout 映射为
+// ReadHeaderTimeout，防止半请求头 Slowloris 无限占用连接；0 保持不设超时。
+func (s *Server) httpServer() *http.Server {
+	srv := &http.Server{Addr: s.port, Handler: s}
+	if timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second; timeout > 0 {
+		srv.ReadHeaderTimeout = timeout
+	}
+	return srv
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
