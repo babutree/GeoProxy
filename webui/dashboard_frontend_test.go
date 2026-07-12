@@ -58,9 +58,9 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 		// 表头两列（ipapi.is 分数 + ip-api 标记）。
 		"ipapi.is 滥用分",
 		"<th>ip-api 标记</th>",
-		// 两处 colspan 为 12（加载中 + 无匹配节点）：星标列 + CF 列共新增两列。
-		"<td colspan=\"12\" class=\"empty\">加载中</td>",
-		"<td colspan=\"12\" class=\"empty\">没有匹配节点</td>",
+		// 两处 colspan 为 13（加载中 + 无匹配节点）：星标列 + CF 列 + AI 列共新增三列。
+		"<td colspan=\"13\" class=\"empty\">加载中</td>",
+		"<td colspan=\"13\" class=\"empty\">没有匹配节点</td>",
 		// abuserBadge：<0 显示 "--"，否则两位小数 + 三色阈值(0.1/0.5)。
 		"function abuserBadge(score){const n=Number(score);if(!Number.isFinite(n)||n<0)return '<span class=\"muted\">--</span>';const cls=n<0.1?'ok':(n<=0.5?'warn':'danger');return '<span class=\"badge '+cls+'\">'+html(n.toFixed(2))+'</span>'}",
 		// ipapiFlagsBadges：空+seen 显"干净"、空+未探测显"--"、命中按类型着色。
@@ -100,9 +100,9 @@ func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 		// 表头新增星标列与 CF 列。
 		"<th>★</th>",
 		"<th>CF 拦截</th>",
-		// 两处 colspan 改为 12。
-		"<td colspan=\"12\" class=\"empty\">加载中</td>",
-		"<td colspan=\"12\" class=\"empty\">没有匹配节点</td>",
+		// 两处 colspan 改为 13。
+		"<td colspan=\"13\" class=\"empty\">加载中</td>",
+		"<td colspan=\"13\" class=\"empty\">没有匹配节点</td>",
 		// 新增 JS 函数。
 		"function cfBadge(",
 		"function copyProxyCred(",
@@ -448,6 +448,43 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 	// 回归防护：不得再只复制用户名 DSL（旧实现 writeText(cred)）。
 	if strings.Contains(dashboardHTML, "navigator.clipboard.writeText(cred)") {
 		t.Fatal("dashboardHTML copyProxyCred still copies bare username DSL instead of full proxy URL")
+	}
+}
+
+// TestDashboardAIReachabilityColumnAndBadges 验证新增 AI 可达性列（openai/claude/grok/gemini）：
+// 表头新增 <th>AI</th>；因新增此列，节点表格从 12 列变 13 列，两处 colspan 须为 13；
+// aiBadges(json) 函数存在、解析 ai_reachability JSON 渲染 4 个 AI 小徽章（可达绿/不可达红/未探测灰"--"）；
+// 行渲染调用 aiBadges(p.ai_reachability)。
+func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
+	checks := []string{
+		// 表头新增 AI 可达性列。
+		"<th>AI</th>",
+		// 两处 colspan 从 12 改为 13（加载中 + 无匹配节点）。
+		"<td colspan=\"13\" class=\"empty\">加载中</td>",
+		"<td colspan=\"13\" class=\"empty\">没有匹配节点</td>",
+		// 新增 aiBadges 函数。
+		"function aiBadges(",
+		// 行渲染引用 ai_reachability 字段。
+		"aiBadges(p.ai_reachability)",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing ai-reachability invariant %q", check)
+			}
+		})
+	}
+
+	// 回归防护：旧的 12 列 colspan 不应再残留（已随 AI 列改为 13）。
+	for _, unsafe := range []string{
+		"<td colspan=\"12\" class=\"empty\">加载中</td>",
+		"<td colspan=\"12\" class=\"empty\">没有匹配节点</td>",
+	} {
+		t.Run("reject "+unsafe, func(t *testing.T) {
+			if strings.Contains(dashboardHTML, unsafe) {
+				t.Fatalf("dashboardHTML still has stale 12-col colspan %q (should be 13 after AI column)", unsafe)
+			}
+		})
 	}
 }
 

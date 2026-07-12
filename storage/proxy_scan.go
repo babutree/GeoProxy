@@ -5,7 +5,7 @@ import "database/sql"
 // proxyColumns 代理表查询的标准列列表
 const proxyColumns = `id, address, protocol, exit_ip, exit_location, latency, quality_grade,
 	use_count, success_count, fail_count, last_used, last_check, created_at, status, user_paused, source, subscription_id,
-	region, region_source, note, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol`
+	region, region_source, note, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability`
 
 type proxyScanner interface {
 	Scan(dest ...interface{}) error
@@ -22,7 +22,7 @@ func scanProxy(rows proxyScanner) (*Proxy, error) {
 		&p.Latency, &p.QualityGrade, &p.UseCount, &p.SuccessCount, &p.FailCount,
 		&lastUsed, &lastCheck, &p.CreatedAt, &p.Status, &userPaused, &source, &subID,
 		&region, &regionSource, &note, &p.IPAPIIsScore, &p.IPAPIFlags, &ipapiFlagsSeen,
-		&starred, &p.CFBlocked, &dualProtocol); err != nil {
+		&starred, &p.CFBlocked, &dualProtocol, &p.AIReachability); err != nil {
 		return nil, err
 	}
 	p.UserPaused = userPaused == 1

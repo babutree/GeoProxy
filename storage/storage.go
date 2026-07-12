@@ -40,6 +40,10 @@ type Proxy struct {
 	// 拨号/验证/存储 protocol 仍为 socks5（mixed 端口对 socks5 客户端即标准 socks5）；
 	// 该字段仅供前端可靠渲染双协议标签，避免靠地址长相猜测而误判本机 direct socks5 节点。
 	DualProtocol bool `json:"dual_protocol"`
+	// AIReachability 存 4 个 AI 服务可达性的 JSON 对象字符串，如
+	// {"openai":0,"claude":1,"grok":-1,"gemini":0}。值语义：-1未探测 0可达 1不可达。
+	// 空字符串表示整体未探测。
+	AIReachability string `json:"ai_reachability"`
 }
 
 // Subscription 订阅信息
@@ -113,7 +117,8 @@ func (s *Storage) initSchema() error {
 			ipapi_flags_seen INTEGER NOT NULL DEFAULT 0,
 			starred        INTEGER NOT NULL DEFAULT 0,
 			cf_blocked     INTEGER NOT NULL DEFAULT -1,
-			dual_protocol  INTEGER NOT NULL DEFAULT 0
+			dual_protocol  INTEGER NOT NULL DEFAULT 0,
+			ai_reachability TEXT NOT NULL DEFAULT ''
 		)
 	`)
 	if err != nil {

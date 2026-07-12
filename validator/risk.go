@@ -16,11 +16,15 @@ type RiskInfo struct {
 	IPAPIIsScore float64
 	Flags        string
 	CFBlocked    int // Cloudflare 拦截：-1未探测 0未拦截 1被拦截
+	// AIReachability 是 4 个 AI 服务可达性的 JSON 对象字符串，形如
+	// {"openai":0,"claude":1,"grok":-1,"gemini":0}。值语义：-1未探测 0可达 1不可达。
+	// 空字符串表示整体未探测（存储层据此不覆盖已有值）。
+	AIReachability string
 }
 
 // UnknownRisk 是两源都未取得有效信号时的零信息风险信息。
 func UnknownRisk() RiskInfo {
-	return RiskInfo{IPAPIIsScore: IPAPIIsUnknown, Flags: "", CFBlocked: -1}
+	return RiskInfo{IPAPIIsScore: IPAPIIsUnknown, Flags: "", CFBlocked: -1, AIReachability: ""}
 }
 
 // parseAbuserScore 解析 ipapi.is 的 abuser_score 字段。

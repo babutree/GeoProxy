@@ -113,10 +113,10 @@ func TestUpdateExitInfoWritesAutoRegionAndPreservesManualRegion(t *testing.T) {
 	insertProxyWithRegionSource(t, store, "auto:8080", "", "auto")
 	insertProxyWithRegionSource(t, store, "manual:8080", "jp", "manual")
 
-	if err := store.UpdateExitInfo("auto:8080", "8.8.8.8", "US Mountain View", 120, -1, "", -1); err != nil {
+	if err := store.UpdateExitInfo("auto:8080", "8.8.8.8", "US Mountain View", 120, -1, "", -1, ""); err != nil {
 		t.Fatalf("UpdateExitInfo(auto) error = %v", err)
 	}
-	if err := store.UpdateExitInfo("manual:8080", "1.1.1.1", "US Los Angeles", 80, -1, "", -1); err != nil {
+	if err := store.UpdateExitInfo("manual:8080", "1.1.1.1", "US Los Angeles", 80, -1, "", -1, ""); err != nil {
 		t.Fatalf("UpdateExitInfo(manual) error = %v", err)
 	}
 
@@ -142,7 +142,7 @@ func TestUpdateExitInfoIgnoresInvalidRegionCode(t *testing.T) {
 	insertTestSubscription(t, store, 1, "active")
 	insertProxyWithRegionSource(t, store, "unknown:8080", "hk", "auto")
 
-	if err := store.UpdateExitInfo("unknown:8080", "9.9.9.9", "USA Miami", 150, -1, "", -1); err != nil {
+	if err := store.UpdateExitInfo("unknown:8080", "9.9.9.9", "USA Miami", 150, -1, "", -1, ""); err != nil {
 		t.Fatalf("UpdateExitInfo() error = %v", err)
 	}
 
@@ -378,7 +378,7 @@ func TestProxyIdentityConsistencyForUsagePauseAndDelete(t *testing.T) {
 	if err := store.DisableSubscriptionProxy(sub.Address, sub.SubscriptionID); err != nil {
 		t.Fatalf("DisableSubscriptionProxy() error = %v", err)
 	}
-	if err := store.UpdateSubscriptionProxyExitInfo(sub.Address, sub.SubscriptionID, "203.0.113.9", "US Ashburn", 42, -1, "", -1); err != nil {
+	if err := store.UpdateSubscriptionProxyExitInfo(sub.Address, sub.SubscriptionID, "203.0.113.9", "US Ashburn", 42, -1, "", -1, ""); err != nil {
 		t.Fatalf("UpdateSubscriptionProxyExitInfo() error = %v", err)
 	}
 	if err := store.EnableSubscriptionProxy(sub.Address, sub.SubscriptionID); err != nil {
@@ -564,7 +564,7 @@ func TestHealthCheckSuccessResetsFailCount(t *testing.T) {
 		t.Fatalf("seed fail_count = %d, want 2", p.FailCount)
 	}
 
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.10", "US Ashburn", 42, -1, "", -1); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.10", "US Ashburn", 42, -1, "", -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("10.0.0.2:8080")

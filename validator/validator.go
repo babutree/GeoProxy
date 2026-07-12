@@ -212,10 +212,57 @@ func probeCloudflareBlocked(client *http.Client) int {
 	return 0
 }
 
+// aiProbeTargets 是 4 个 AI 服务可达性探测目标。选用各家公开的、无需鉴权即可返回
+// 响应（通常 401 缺 key）的端点：能连通即说明地区不封，连不通才是不可达。
+// 抽成包级变量以便测试用 httptest URL 覆盖（真实 http 往返，不 mock）。
+var aiProbeTargets = map[string]string{
+	"openai": "https://api.openai.com/v1/models",
+	"claude": "https://api.anthropic.com/v1/messages",
+	"grok":   "https://api.x.ai/v1/models",
+	"gemini": "https://generativelanguage.googleapis.com/v1beta/models",
+}
+
+// probeAIReachability 经传入的 *http.Client（即走该代理）逐个探测 4 个 AI 服务是否可达，
+// 返回 JSON 对象字符串，如 {"openai":0,"claude":1,"grok":-1,"gemini":0}。
+//
+// 语义注意：这里探测的是「能否连通该 AI 服务」，与 probeCloudflareBlocked 的
+// 「是否被拦截」语义不同。判定规则（每个 AI）：
+//   - 请求成功拿到任何 HTTP 响应（含 401/403/404，只是没 key/无权限）→ 0（可达）：
+//     能连通说明该地区不封锁该 AI。
+//   - 请求失败/超时/连接错误（连不通）→ 1（不可达）。
+//
+// 每个探测复用 client 已有的 Timeout（不无限等）。4 个探测串行执行，简单可靠；
+// 任一探测异常均不 panic，如实记为 1（不可达）。
+func probeAIReachability(client *http.Client) string {
+	results := make(map[string]int, len(aiProbeTargets))
+	for name, target := range aiProbeTargets {
+		results[name] = probeOneAI(client, target)
+	}
+	data, err := json.Marshal(results)
+	if err != nil {
+		// map[string]int 序列化不会失败；兜底返回空串（整体未探测），不 panic。
+		return ""
+	}
+	return string(data)
+}
+
+// probeOneAI 探测单个 AI 端点是否可达：拿到任何 HTTP 响应→0（可达），连不通/超时→1（不可达）。
+func probeOneAI(client *http.Client, target string) int {
+	resp, err := client.Get(target)
+	if err != nil {
+		return 1
+	}
+	// 只关心能否连通，主动读干净并关闭 body 以复用连接；不解析内容。
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	resp.Body.Close()
+	return 0
+}
+
 // assessRisk 收集两源风险信号，分开返回（不聚合）：
 //   - ip-api 的 proxy/hosting/mobile 命中标记（来自已取得的 ipInfo）
 //   - ipapi.is 的 abuser_score（经同一 client 走节点代理请求；失败则记 IPAPIIsUnknown）
 //   - Cloudflare 拦截探测（经同一 client 走节点代理请求）
+//   - AI 服务可达性探测（经同一 client 走节点代理请求）
 func assessRisk(client *http.Client, ipInfo ipAPIInfo) RiskInfo {
 	risk := RiskInfo{IPAPIIsScore: IPAPIIsUnknown}
 	if ipInfo.OK {
@@ -227,6 +274,7 @@ func assessRisk(client *http.Client, ipInfo ipAPIInfo) RiskInfo {
 		}
 	}
 	risk.CFBlocked = probeCloudflareBlocked(client)
+	risk.AIReachability = probeAIReachability(client)
 	return risk
 }
 
