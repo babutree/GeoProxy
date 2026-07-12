@@ -423,7 +423,8 @@ func TestDashboardWorldMap(t *testing.T) {
 
 // TestDashboardCopyProxyCredBuildsFullURL 验证需求2：copyProxyCred 复制完整代理 URL
 // 协议://用户名DSL:密码@IP:端口。密码取 configCache.proxy_auth_password（为空时留空并提示）；
-// mixed 节点用 confirm 选择 socks5/http，单协议节点直接用 p.protocol；成功 toast 显示完整 URL。
+// mixed 节点用 confirm 选择 socks5/http，单协议节点直接用 p.protocol；
+// 剪贴板仍写完整 URL，成功 toast 仅「已复制」不回显含密码完整 URL。
 func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 	checks := []string{
 		// 密码取自 config 下发缓存，为空容错。
@@ -434,8 +435,8 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 		"const url=scheme+'://'+user+':'+pass+'@'+addr",
 		// 密码未配置时提示。
 		"if(!pass)showToast('代理密码未配置')",
-		// 复制完整 URL 并成功提示。
-		"navigator.clipboard.writeText(url).then(()=>showToast('已复制: '+url))",
+		// 剪贴板写完整 URL；成功 toast 仅「已复制」，不回显含密码 URL。
+		"navigator.clipboard.writeText(url).then(()=>showToast('已复制'))",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -448,6 +449,10 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 	// 回归防护：不得再只复制用户名 DSL（旧实现 writeText(cred)）。
 	if strings.Contains(dashboardHTML, "navigator.clipboard.writeText(cred)") {
 		t.Fatal("dashboardHTML copyProxyCred still copies bare username DSL instead of full proxy URL")
+	}
+	// 安全：成功 toast 不得拼接完整 URL（会把密码显示在屏幕上）。
+	if strings.Contains(dashboardHTML, "showToast('已复制: '+url)") {
+		t.Fatal("dashboardHTML copyProxyCred success toast must not echo full proxy URL with password")
 	}
 }
 

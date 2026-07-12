@@ -196,13 +196,23 @@ func shardReloadCommitError(target []ParsedNode, shard singBoxShard) error {
 
 // shardNeedsReloadForRuntime 判断 key 集未变化时是否仍需因运行态异常而强制重载。
 // 仅对目标非空的分片生效；空分片由 key 集变化路径负责停止/清理。
+// Partial / ports_not_ready / 目标 key 无端口 均视为未健康，避免 assignedKeys 相等导致永久跳过。
 func shardNeedsReloadForRuntime(target []ParsedNode, shard singBoxShard) bool {
 	if len(target) == 0 {
 		return false
 	}
 	rs := shard.GetRuntimeStatus()
 	switch rs.Status {
-	case SingBoxStatusFailed, SingBoxStatusStopped:
+	case SingBoxStatusFailed, SingBoxStatusStopped, SingBoxStatusPartial:
+		return true
+	}
+	if rs.Reason == "ports_not_ready" {
+		return true
+	}
+	if rs.TotalPorts > 0 && rs.ReadyPorts != rs.TotalPorts {
+		return true
+	}
+	if incompletePortAllocationError(target, shard.GetPortMap()) != nil {
 		return true
 	}
 	return false

@@ -227,6 +227,41 @@ func TestAddressManualEditsRejectAmbiguousProxyIdentity(t *testing.T) {
 	}
 }
 
+func TestGetProxyByAddressRejectsAmbiguousProxyIdentity(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("sub", "https://example.test/get-by-address.yaml", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	const addr = "ambiguous-get:8080"
+	if err := store.AddManualProxy(addr, "http", "jp", "manual-note"); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	if err := store.AddProxyWithSource(addr, "socks5", SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+
+	proxy, err := store.GetProxyByAddress(addr)
+	if err == nil {
+		t.Fatalf("GetProxyByAddress() = %#v, want ambiguous identity error", proxy)
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("GetProxyByAddress() error = %v, want ambiguous identity error", err)
+	}
+
+	// Unique address still resolves.
+	if err := store.AddManualProxy("unique-get:8080", "http", "us", ""); err != nil {
+		t.Fatalf("AddManualProxy(unique) error = %v", err)
+	}
+	unique, err := store.GetProxyByAddress("unique-get:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(unique) error = %v", err)
+	}
+	if unique.Address != "unique-get:8080" || unique.Source != SourceManual {
+		t.Fatalf("unique proxy = %#v", unique)
+	}
+}
+
 func TestLegacyAddressUniqueMigrationAllowsManualAndSubscriptionSameAddress(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "proxy.db")
 	seedLegacyDB(t, dbPath)

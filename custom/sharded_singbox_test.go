@@ -354,6 +354,152 @@ func TestRecoverFailedShardsRestartsOnlyFailedShard(t *testing.T) {
 	}
 }
 
+// TestReloadRetriesUnchangedPartialShard：key 集未变但 Status=Partial 时不得永久跳过。
+func TestReloadRetriesUnchangedPartialShard(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	node := tunnelNode("partial-retry", "partial-retry.example.com", "pw")
+	idx := shardIndexForKey(node.NodeKey(), n)
+
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+	before := spies[idx].calls()
+	spies[idx].status = SingBoxRuntimeStatus{
+		Running:    true,
+		Status:     SingBoxStatusPartial,
+		Reason:     "ports_not_ready",
+		Nodes:      1,
+		ReadyPorts: 0,
+		TotalPorts: 1,
+	}
+
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("Partial 后 Reload 出错: %v", err)
+	}
+	if got := spies[idx].calls(); got != before+1 {
+		t.Fatalf("Partial 分片 key 集未变也必须重载，Reload 次数=%d，期望 %d", got, before+1)
+	}
+}
+
+// TestRecoverFailedShardsRestartsPartialShard：健康检查须把 Partial 当分片异常并重载。
+func TestRecoverFailedShardsRestartsPartialShard(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	nodes := nodesOnDistinctShards(t, n, 2)
+	if err := sb.Reload(nodes); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+
+	partialIdx := shardIndexForKey(nodes[0].NodeKey(), n)
+	before := make([]int, len(spies))
+	for i, shard := range spies {
+		before[i] = shard.calls()
+	}
+	spies[partialIdx].status = SingBoxRuntimeStatus{
+		Running:    true,
+		Status:     SingBoxStatusPartial,
+		Reason:     "ports_not_ready",
+		Nodes:      1,
+		ReadyPorts: 0,
+		TotalPorts: 1,
+	}
+
+	if err := sb.recoverFailedShards(); err != nil {
+		t.Fatalf("recoverFailedShards() error = %v", err)
+	}
+	for i, shard := range spies {
+		want := before[i]
+		if i == partialIdx {
+			want++
+		}
+		if got := shard.calls(); got != want {
+			t.Fatalf("分片 %d Reload 次数=%d，期望 %d", i, got, want)
+		}
+	}
+}
+
+// TestReloadRetriesUnchangedIncompletePortMap：已提交 assignedKeys 后若 portMap 丢 key，
+// 不得因 key 集相等永久跳过（段满/无端口不得视为已成功分配）。
+func TestReloadRetriesUnchangedIncompletePortMap(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	node := tunnelNode("no-port-retry", "no-port-retry.example.com", "pw")
+	idx := shardIndexForKey(node.NodeKey(), n)
+
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+	if !sb.assignedKeys[idx][node.NodeKey()] {
+		t.Fatalf("首次成功后应提交 assignedKeys")
+	}
+	before := spies[idx].calls()
+
+	// 运行态退化为无端口，且后续 Reload 仍 incomplete，确保不会跳过也不会“假成功提交”。
+	spies[idx].mu.Lock()
+	spies[idx].incompletePorts = true
+	spies[idx].portMap = map[string]int{}
+	spies[idx].status = SingBoxRuntimeStatus{
+		Running:    true,
+		Status:     SingBoxStatusRunning,
+		Nodes:      1,
+		ReadyPorts: 0,
+		TotalPorts: 0,
+	}
+	spies[idx].mu.Unlock()
+
+	err := sb.Reload([]ParsedNode{node})
+	if err == nil {
+		t.Fatal("无端口 incomplete 时 Reload 应返回 error")
+	}
+	if got := spies[idx].calls(); got != before+1 {
+		t.Fatalf("无端口 key 不得因 assignedKeys 永久跳过，Reload 次数=%d，期望 %d", got, before+1)
+	}
+	// 提交失败时保留旧 assignedKeys 以便下次仍走 needsReload；不得清空为“未分配”后静默成功。
+	if !sb.assignedKeys[idx][node.NodeKey()] {
+		t.Fatalf("incomplete 重试失败后应保留旧 assignedKeys 以便继续重试，得到 %v", sb.assignedKeys[idx])
+	}
+}
+
+// TestRecoverFailedShardsRestartsIncompletePortShard：portMap 缺目标 key 时健康检查应重载。
+func TestRecoverFailedShardsRestartsIncompletePortShard(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	nodes := nodesOnDistinctShards(t, n, 2)
+	if err := sb.Reload(nodes); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+
+	badIdx := shardIndexForKey(nodes[0].NodeKey(), n)
+	before := make([]int, len(spies))
+	for i, shard := range spies {
+		before[i] = shard.calls()
+	}
+	spies[badIdx].mu.Lock()
+	spies[badIdx].portMap = map[string]int{}
+	spies[badIdx].status = SingBoxRuntimeStatus{
+		Running:    true,
+		Status:     SingBoxStatusRunning,
+		Nodes:      1,
+		ReadyPorts: 0,
+		TotalPorts: 0,
+	}
+	spies[badIdx].mu.Unlock()
+
+	if err := sb.recoverFailedShards(); err != nil {
+		t.Fatalf("recoverFailedShards() error = %v", err)
+	}
+	for i, shard := range spies {
+		want := before[i]
+		if i == badIdx {
+			want++
+		}
+		if got := shard.calls(); got != want {
+			t.Fatalf("分片 %d Reload 次数=%d，期望 %d", i, got, want)
+		}
+	}
+}
+
 func TestRecoverFailedShardsDoesNothingAfterStop(t *testing.T) {
 	sb, spies := newSpyOrchestrator(10000, 1)
 	node := tunnelNode("stopped", "stopped.example.com", "pw")

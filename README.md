@@ -70,8 +70,8 @@ password is stored in `config.json`. Change them in the WebUI **Settings** page.
 > Proxy credentials must be stored in recoverable form (not just a hash) because
 > the SOCKS5 username/password auth scheme (RFC 1929) compares the plaintext the
 > client sends. `config.json` therefore holds the proxy password in clear text;
-> it lives only in the data volume, is `chmod 0644`, and is excluded from git.
-> The WebUI login password is stored as a hash, not clear text.
+> it lives only in the data volume, is written with mode `0600`, and is excluded
+> from git. The WebUI login password is stored as a hash, not clear text.
 
 ### How routing is passed
 
@@ -198,9 +198,10 @@ The WebUI is a password-only authenticated admin surface. Unauthenticated users 
 
 Panels currently include:
 
-- Overview and node list with status, latency, source, region, and exit IP.
-- Manual node add/edit/delete for manual nodes only.
-- Subscription management for adding, refreshing, pausing, enabling, and deleting subscription nodes.
+- Overview and node list with status, latency, source, region, exit IP, risk scores, Cloudflare intercept, and AI reachability badges (OpenAI / Claude / Grok / Gemini).
+- Global node map (land outline, region dots, session arcs, gateway marker).
+- Manual node add/edit/delete for manual nodes only; star, test, and copy full proxy URL.
+- Subscription management for adding, refreshing, pausing, enabling, and deleting subscription nodes, including optional custom request headers (JSON, e.g. `User-Agent`) for sources that reject the default client UA.
 - Active session monitor for username DSL session bindings.
 - Settings for authentication, default region, country filters, session TTL, health interval, retry count, and `sing-box` path.
 - Logs.
@@ -212,8 +213,20 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 - Manual direct nodes use direct HTTP or SOCKS5 links.
 - Manual encrypted single-link nodes use `sing-box` conversion and require `SINGBOX_PATH` to point to a usable `sing-box` binary.
 - Subscription nodes may come from URL, uploaded/pasted content, Clash/V2ray/Base64/plain text formats, and supported encrypted protocols through `sing-box`.
+- Encrypted tunnel nodes are exposed as a single local **mixed** inbound per node (one port serves both SOCKS5 and HTTP). They are stored with `dual_protocol` and shown as dual protocol badges in the WebUI.
+- Tunnel nodes are sharded across multiple independent `sing-box` processes (`SINGBOX_SHARD_COUNT`, default `4`). Only shards whose node set changed are reloaded.
+- Subscription URL fetch supports custom headers so operators can set `User-Agent` or other required headers when the provider returns 401 for the default client.
+- Subscription URL fetch rejects private, link-local, and non-global unicast targets (SSRF guard).
 - Tests that exercise encrypted single-link conversion may skip when `sing-box` is not installed.
 - Public/free proxy scraping is not part of the current runtime model.
+
+## Local Bypass And Inbound Hardening
+
+- HTTP, CONNECT, and SOCKS5 clients that target loopback, `localhost` / `.local`, RFC1918 private ranges, or IPv6 ULA are **bypassed** to the gateway host (direct dial, not via an upstream node).
+- Link-local addresses (including cloud metadata such as `169.254.169.254`) are **not** bypassed; they stay on the upstream path so the gateway does not dial host credential endpoints.
+- HTTP inbound applies `ReadHeaderTimeout` (from the validation timeout, default 10s) to limit half-header stall risk.
+- SOCKS5 inbound bounds handshake/auth/request framing and clears the protocol deadline after the request so long-lived tunnels are not cut short.
+- Upstream SOCKS5 handshakes are deadline-bounded so a silent peer cannot hang a dial forever.
 
 ## Configuration
 
@@ -229,6 +242,7 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `HEALTH_CHECK_INTERVAL` | `5` | Health-check interval in minutes. |
 | `MAX_RETRY` | `3` | Retry count for failed upstream attempts. |
 | `SINGBOX_PATH` | `sing-box` | `sing-box` binary path. |
+| `SINGBOX_SHARD_COUNT` | `4` | Number of independent `sing-box` processes for encrypted tunnel nodes. |
 | `DATA_DIR` | empty | Optional directory for SQLite DB and generated subscription files. |
 | `TZ` | `Asia/Shanghai` | Container timezone. |
 
@@ -322,8 +336,11 @@ Security recommendations:
   credentials **once** to the container log (`docker compose logs`). Save them,
   then log in and change them in Settings.
 - Proxy authentication is enabled by default with the generated credentials.
+- `config.json` is persisted with mode `0600` (owner read/write only).
 - Restrict inbound firewall rules to trusted clients when possible.
 - Treat upstream node credentials and subscription URLs as secrets.
+- Prefer subscription custom headers over embedding secrets in the subscription
+  name or public logs when a provider requires a special `User-Agent`.
 
 ## Verification
 

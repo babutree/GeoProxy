@@ -119,7 +119,13 @@ func makeExcludeMap(excludes []int64) map[int64]bool {
 }
 
 func (s *Storage) GetProxyByAddress(address string) (*Proxy, error) {
-	row := s.db.QueryRow(`SELECT `+proxyColumns+` FROM proxies WHERE address = ? ORDER BY source = ? DESC, subscription_id ASC LIMIT 1`, address, SourceManual)
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("proxy %s not found", address)
+		}
+		return nil, err
+	}
+	row := s.db.QueryRow(`SELECT `+proxyColumns+` FROM proxies WHERE address = ?`, address)
 	proxy, err := scanProxy(row)
 	if err == nil {
 		return proxy, nil
