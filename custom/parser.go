@@ -473,32 +473,11 @@ func parsePlain(data []byte) ([]ParsedNode, error) {
 			continue
 		}
 
-		protocol := "http"
-		addr := line
-
-		// 解析协议前缀
-		if strings.HasPrefix(line, "socks5://") {
-			protocol = "socks5"
-			addr = strings.TrimPrefix(line, "socks5://")
-		} else if strings.HasPrefix(line, "socks4://") {
-			protocol = "socks5" // socks4 当 socks5 处理
-			addr = strings.TrimPrefix(line, "socks4://")
-		} else if strings.HasPrefix(line, "http://") {
-			protocol = "http"
-			addr = strings.TrimPrefix(line, "http://")
-		} else if strings.HasPrefix(line, "https://") {
-			protocol = "http"
-			addr = strings.TrimPrefix(line, "https://")
-		}
-
-		host, portStr, err := net.SplitHostPort(addr)
+		protocol, host, port, err := parseDirectPlainLine(line)
 		if err != nil {
 			continue
 		}
-		port, err := strconv.Atoi(portStr)
-		if err != nil {
-			continue
-		}
+		addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 		nodes = append(nodes, ParsedNode{
 			Name:   addr,
@@ -511,6 +490,48 @@ func parsePlain(data []byte) ([]ParsedNode, error) {
 
 	log.Printf("[custom] 纯文本解析完成，共 %d 个节点", len(nodes))
 	return nodes, nil
+}
+
+func parseDirectPlainLine(line string) (string, string, int, error) {
+	protocol := "http"
+	addr := line
+	lower := strings.ToLower(line)
+
+	switch {
+	case strings.HasPrefix(lower, "socks5://"):
+		protocol = "socks5"
+	case strings.HasPrefix(lower, "socks4://"):
+		protocol = "socks5" // socks4 当 socks5 处理
+	case strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "https://"):
+		protocol = "http"
+	default:
+		return splitDirectHostPort(protocol, addr)
+	}
+
+	u, err := url.Parse(line)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if u.Hostname() == "" || u.Port() == "" {
+		return "", "", 0, fmt.Errorf("missing host or port")
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		return "", "", 0, err
+	}
+	return protocol, u.Hostname(), port, nil
+}
+
+func splitDirectHostPort(protocol, addr string) (string, string, int, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", "", 0, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", "", 0, err
+	}
+	return protocol, host, port, nil
 }
 
 // parseProxyLinks 解析协议链接格式（vmess://, trojan://, ss://, vless:// 等）
@@ -533,6 +554,16 @@ func parseProxyLinks(content string) ([]ParsedNode, error) {
 
 	log.Printf("[custom] 协议链接解析完成，共 %d 个节点", len(nodes))
 	return nodes, nil
+}
+
+func redactedProxyLinkForError(link string) string {
+	trimmed := strings.TrimSpace(link)
+	u, err := url.Parse(trimmed)
+	if err != nil || u.User == nil {
+		return trimmed
+	}
+	u.User = url.User("***")
+	return u.String()
 }
 
 // parseProxyLink 解析单个协议链接

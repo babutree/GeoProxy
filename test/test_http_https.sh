@@ -2,13 +2,44 @@
 
 # GoProxy HTTP 协议代理 HTTPS 访问测试脚本
 # 随机访问多个 HTTPS 网站，验证 HTTP 代理的 CONNECT 隧道能力
-# 用法: ./test_http_https.sh [端口号，默认7802] [测试次数，默认持续运行]
+# 用法: GOPROXY_AUTH_USERNAME=acct GOPROXY_AUTH_PASSWORD=... ./test_http_https.sh [端口号，默认7802] [测试次数，默认持续运行]
+# 可选: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser
 # 按 Ctrl+C 停止测试
 
-PROXY_HOST="127.0.0.1"
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${1:-7802}"
 MAX_COUNT="${2:-0}"  # 0 = 持续运行
 DELAY=2
+
+require_proxy_auth() {
+    if [ -z "${GOPROXY_AUTH_USERNAME:-}" ] || [ -z "${GOPROXY_AUTH_PASSWORD:-}" ]; then
+        echo "Missing proxy credentials." >&2
+        echo "Set GOPROXY_AUTH_USERNAME and GOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings." >&2
+        echo "Optional: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser" >&2
+        exit 2
+    fi
+}
+
+proxy_auth_username() {
+    local username="$GOPROXY_AUTH_USERNAME"
+    if [ -n "${GOPROXY_AUTH_REGION:-}" ]; then
+        username="${username}-region-${GOPROXY_AUTH_REGION}"
+    fi
+    if [ -n "${GOPROXY_AUTH_SESSION:-}" ]; then
+        username="${username}-session-${GOPROXY_AUTH_SESSION}"
+    fi
+    echo "$username"
+}
+
+setup_curl_auth_config() {
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    CURL_AUTH_CONFIG=$(mktemp "${TMPDIR:-/tmp}/goproxy-curl-auth.XXXXXX")
+    umask "$old_umask"
+    printf 'proxy-user = "%s:%s"\n' "$(proxy_auth_username)" "$GOPROXY_AUTH_PASSWORD" > "$CURL_AUTH_CONFIG"
+    trap 'rm -f "$CURL_AUTH_CONFIG"' EXIT INT TERM
+}
 
 # 测试目标（HTTPS 网站）
 TARGETS=(
@@ -46,6 +77,9 @@ echo "HTTP PROXY HTTPS TEST — $PROXY_HOST:$PROXY_PORT"
 echo "targets: ${#TARGETS[@]} HTTPS sites"
 echo ""
 
+require_proxy_auth
+setup_curl_auth_config
+
 while true; do
     # 随机选择目标
     idx=$((RANDOM % ${#TARGETS[@]}))
@@ -55,6 +89,7 @@ while true; do
 
     start_time=$(get_ms_time)
     response=$(curl -x "http://${PROXY_HOST}:${PROXY_PORT}" \
+					--config "$CURL_AUTH_CONFIG" \
                    -s -k \
                    -o /dev/null \
                    -w "%{http_code}" \

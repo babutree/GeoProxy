@@ -151,12 +151,22 @@ func (s *Storage) GetSubscription(id int64) (*Subscription, error) {
 	return nil, fmt.Errorf("subscription %d not found", id)
 }
 
-// UpdateSubscriptionFetch 更新订阅的最后拉取时间和代理数
+// UpdateSubscriptionFetch 更新订阅的最后拉取时间和代理数。
 func (s *Storage) UpdateSubscriptionFetch(id int64, proxyCount int) error {
 	res, err := s.db.Exec(
 		`UPDATE subscriptions SET last_fetch = CURRENT_TIMESTAMP, proxy_count = ? WHERE id = ?`,
 		proxyCount, id,
 	)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
+// UpdateSubscriptionAttempt 记录订阅最近一次刷新尝试时间。
+// 刷新失败也必须更新该字段，避免调度循环在每个 tick 重复请求同一失败订阅。
+func (s *Storage) UpdateSubscriptionAttempt(id int64) error {
+	res, err := s.db.Exec(`UPDATE subscriptions SET last_fetch = CURRENT_TIMESTAMP WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -200,9 +210,9 @@ func (s *Storage) GetStaleSubscriptions(staleDays int) ([]Subscription, error) {
 	return subs, nil
 }
 
-// ToggleSubscription 切换订阅状态，并联动该订阅下所有节点的启用/禁用。
+// ToggleSubscription 只切换 subscriptions.status，不直接修改该订阅下 proxies 的状态。
 // 返回切换后的订阅状态（"active" 或 "paused"）。
-// 暂停订阅时禁用其节点（不参与选路），启用订阅时恢复其节点。
+// 订阅暂停后的不可用性由查询侧结合父订阅状态过滤，节点自身 status/user_paused 保持不变。
 func (s *Storage) ToggleSubscription(id int64) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {

@@ -140,12 +140,12 @@ func TestHTTPConnectBypassDialsLocalTargetDirectly(t *testing.T) {
 	}
 }
 
-// TestHTTPBypassFollowsRedirect 锁定 HTTP bypass 直连的重定向策略：
-// httpDirect 使用默认 http.Client（未设 CheckRedirect），会跟随 3xx 至最终响应。
-func TestHTTPBypassFollowsRedirect(t *testing.T) {
+// TestHTTPBypassReturnsRedirectWithoutFollowing verifies HTTP bypass returns the
+// target's redirect to the client instead of following it inside the gateway.
+func TestHTTPBypassReturnsRedirectWithoutFollowing(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("redirect-final"))
+		t.Fatal("gateway followed relative redirect during bypass")
 	})
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/final", http.StatusFound)
@@ -159,11 +159,34 @@ func TestHTTPBypassFollowsRedirect(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, target.URL+"/start", nil)
 	gateway.handleHTTP(rec, req, emptyRoute())
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bypass redirect status = %d, want 200 (default client follows redirect)", rec.Code)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("bypass redirect status = %d, want 302 returned to client", rec.Code)
 	}
-	if body := rec.Body.String(); body != "redirect-final" {
-		t.Fatalf("bypass redirect body = %q, want redirect-final", body)
+	if got := rec.Header().Get("Location"); got != "/final" {
+		t.Fatalf("bypass redirect Location = %q, want /final", got)
+	}
+}
+
+// TestHTTPBypassDoesNotFollowDangerousAbsoluteRedirect covers the metadata SSRF
+// case: a bypassed local service must not make the gateway follow an absolute
+// redirect to link-local metadata addresses.
+func TestHTTPBypassDoesNotFollowDangerousAbsoluteRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
+	}))
+	t.Cleanup(target.Close)
+
+	store := newProxyTestStore()
+	gateway := newProxyTestServer(store, proxyTestConfig(0))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, target.URL, nil)
+	gateway.handleHTTP(rec, req, emptyRoute())
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("bypass redirect status = %d, want 302 returned to client", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "http://169.254.169.254/latest/meta-data/" {
+		t.Fatalf("bypass redirect Location = %q, want metadata URL returned unchanged", got)
 	}
 }
 

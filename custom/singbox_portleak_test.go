@@ -184,9 +184,8 @@ func TestReloadSegmentFullReturnsIncompleteError(t *testing.T) {
 	// 必须是端口不完整类错误，而非仅 binary_not_found（否则段满在缺二进制时被掩盖，
 	// 有二进制时仍会假成功）。
 	msg := err.Error()
-	if !strings.Contains(msg, "不完整") && !strings.Contains(msg, "incomplete") &&
-		!strings.Contains(msg, "未分配") && !strings.Contains(msg, "段") {
-		t.Fatalf("段满应在启动前以 incomplete/未分配失败，实际: %v", err)
+	if !strings.Contains(msg, "端口段已满") || !strings.Contains(msg, "new") || !strings.Contains(msg, "trojan") {
+		t.Fatalf("段满应在启动前明确报告端口段满及节点，实际: %v", err)
 	}
 	// 失败后不得把未分配节点伪装进 portMap（restore 后可能仍是旧映射）。
 	if _, ok := s.GetPortMap()[newNode.NodeKey()]; ok {

@@ -45,6 +45,62 @@ func TestSchemaMigrationPreservesRowsAndAddsGeoFields(t *testing.T) {
 	assertSourceStatusDropped(t, store)
 }
 
+func TestSchemaMigrationReturnsLocationCopyError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "proxy.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE proxies (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		address TEXT NOT NULL UNIQUE,
+		protocol TEXT NOT NULL,
+		location TEXT NOT NULL DEFAULT '',
+		source TEXT NOT NULL DEFAULT 'manual'
+	)`)
+	if err != nil {
+		t.Fatalf("create legacy proxies: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO proxies (address, protocol, location) VALUES ('legacy-location:8080', 'http', 'Legacy City')`)
+	if err != nil {
+		t.Fatalf("insert legacy proxy: %v", err)
+	}
+	_, err = db.Exec(`CREATE TRIGGER fail_location_copy
+		BEFORE UPDATE OF exit_location ON proxies
+		WHEN NEW.exit_location != OLD.exit_location
+		BEGIN
+			SELECT RAISE(ABORT, 'forced location copy failure');
+		END`)
+	if err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seed db: %v", err)
+	}
+
+	store, err := New(dbPath)
+	if err == nil {
+		store.Close()
+		t.Fatal("New() expected location migration error, got nil")
+	}
+	if !strings.Contains(err.Error(), "migrate location values") || !strings.Contains(err.Error(), "forced location copy failure") {
+		t.Fatalf("New() error = %v, want location copy failure", err)
+	}
+
+	db, err = sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("reopen database: %v", err)
+	}
+	defer db.Close()
+	var exitLocationColumns int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('proxies') WHERE name = 'exit_location'`).Scan(&exitLocationColumns); err != nil {
+		t.Fatalf("check exit_location column: %v", err)
+	}
+	if exitLocationColumns != 0 {
+		t.Fatal("location migration left exit_location column after copy failure")
+	}
+}
+
 func TestRegionQueriesFilterCountAndExclude(t *testing.T) {
 	store := newTestStorage(t)
 	insertTestSubscription(t, store, 1, "active")
@@ -693,6 +749,28 @@ func TestSuccessResetsFailCountEnablesSelfHeal(t *testing.T) {
 	}
 	if batch, err := store.GetBatchForHealthCheck(10, false); err != nil || len(batch) != 1 {
 		t.Fatalf("GetBatchForHealthCheck after heal = %d nodes err=%v, want 1", len(batch), err)
+	}
+}
+
+func TestRecordProxyFailureByIDDisablesAtThreshold(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "failure-threshold:8080", "http", "us", SourceManual, 100, "active", 0)
+	proxy, err := store.GetProxyByAddress("failure-threshold:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := store.RecordProxyFailureByID(proxy.ID, 3); err != nil {
+			t.Fatalf("RecordProxyFailureByID(%d) error = %v", i+1, err)
+		}
+	}
+	proxy, err = store.GetProxyByID(proxy.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID() error = %v", err)
+	}
+	if proxy.FailCount != 3 || proxy.Status != "disabled" {
+		t.Fatalf("proxy after failures = fail_count %d status %q, want 3/disabled", proxy.FailCount, proxy.Status)
 	}
 }
 

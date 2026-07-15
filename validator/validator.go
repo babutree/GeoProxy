@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -218,31 +219,119 @@ func probeCloudflareBlocked(client *http.Client) int {
 	return 0
 }
 
-// aiProbeTargets 是 4 个 AI 服务可达性探测目标。选用各家公开的、无需鉴权即可返回
-// 响应（通常 401 缺 key）的端点：401 说明服务可达但缺少凭据；403 表示请求被明确拒绝。
-// 抽成包级变量以便测试用 httptest URL 覆盖（真实 http 往返，不 mock）。
+// aiProbeTargets 是 4 个 AI 服务可达性探测目标（主信号：稳定 API）。
+// 匿名请求通常返回 401/缺 key，表示“出口能连上服务 API”；
+// 明确地域拒绝/CF 挑战/连接失败才记不可达。
+// 抽成包级变量以便测试用 httptest URL 覆盖。
 var aiProbeTargets = map[string]string{
 	"openai": "https://api.openai.com/v1/models",
-	"claude": "https://api.anthropic.com/v1/messages",
+	"claude": "https://api.anthropic.com/v1/models",
 	"grok":   "https://api.x.ai/v1/models",
 	"gemini": "https://generativelanguage.googleapis.com/v1beta/models",
 }
 
-// probeAIReachability 经传入的 *http.Client（即走该代理）逐个探测 4 个 AI 服务是否可达，
+// aiProductProbeTargets 是产品层辅信号（只覆盖 AI，不含流媒体）。
+// 吸收社区解锁脚本中已验证的明确地区拒绝/放行指纹，用于纠正“API 401 可达
+// 但产品层实际地区锁”或“API 未知但产品层明确可用”的情况。
+// 空切片表示该服务仅依赖 API 主信号（如 grok）。
+var aiProductProbeTargets = map[string][]string{
+	// OpenAI 合规端点：unsupported_country 为明确地区锁（缝合怪 ChatGPT 检测同源）。
+	"openai": {"https://api.openai.com/compliance/cookie_requirements"},
+	// Claude：最终落到 app-unavailable-in-region 为明确地区锁。
+	"claude": {"https://claude.ai/"},
+	// Gemini：页面含 45631641,null,true 为社区常用解锁指纹。
+	"gemini": {"https://gemini.google.com/"},
+}
+
+type aiProbeRule struct {
+	headers            map[string]string
+	unlockedBodyGroups [][]string
+}
+
+var aiProbeRules = map[string]aiProbeRule{
+	"openai": {
+		headers: map[string]string{
+			"Accept":     "application/json",
+			"User-Agent": "goproxy-ai-probe/1.0",
+		},
+		// 401 已在 classify 中直接记可达；body 组用于偶发 200 列表响应。
+		unlockedBodyGroups: [][]string{
+			{"object", "list", "data"},
+			{"authentication", "api key"},
+		},
+	},
+	"claude": {
+		headers: map[string]string{
+			"Accept":            "application/json",
+			"anthropic-version": "2023-06-01",
+			"User-Agent":        "goproxy-ai-probe/1.0",
+		},
+		unlockedBodyGroups: [][]string{
+			{"authentication_error"},
+			{"x-api-key", "required"},
+			{"api key", "required"},
+		},
+	},
+	"grok": {
+		headers: map[string]string{
+			"Accept":     "application/json",
+			"User-Agent": "goproxy-ai-probe/1.0",
+		},
+		unlockedBodyGroups: [][]string{
+			{"object", "list", "data"},
+			{"incorrect api key"},
+			{"api key", "required"},
+		},
+	},
+	"gemini": {
+		headers: map[string]string{
+			"Accept":     "application/json",
+			"User-Agent": "goproxy-ai-probe/1.0",
+		},
+		unlockedBodyGroups: [][]string{
+			{"unregistered caller", "api key"},
+			{"api key not valid"},
+			{"api keys", "expected"},
+		},
+	},
+}
+
+var defaultAIProbeRule = aiProbeRule{
+	unlockedBodyGroups: [][]string{
+		{"object", "list", "data", "model"},
+	},
+}
+
+const aiProbeBodyLimit = 64 << 10
+
+var aiCFBlockSignals = []string{"cf-chl", "error code: 1020"}
+
+var aiRegionalBlockCodes = map[string]struct{}{
+	"unsupported_country":                  {},
+	"unsupported_country_region_territory": {},
+	"country_not_supported":                {},
+	"region_not_supported":                 {},
+}
+
+var aiRegionalRejectionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b(?:your\s+)?(?:country|region|territory)(?:\s+or\s+(?:your\s+)?(?:country|region|territory))?\s+(?:is\s+)?(?:not\s+(?:supported|available)|unavailable|restricted)\b`),
+	regexp.MustCompile(`(?i)\b(?:not\s+(?:supported|available)|unavailable|restricted)\s+(?:in|for)\s+(?:your\s+)?(?:country|region|territory)(?:\s+or\s+(?:your\s+)?(?:country|region|territory))?\b`),
+}
+
+// probeAIReachability 经传入的 *http.Client（即走该代理）逐个探测 4 个 AI 服务，
 // 返回 JSON 对象字符串，如 {"openai":0,"claude":1,"grok":-1,"gemini":0}。
 //
-// 语义注意：这里探测的是「能否连通该 AI 服务」，与 probeCloudflareBlocked 的
-// 「是否被拦截」语义不同。判定规则（每个 AI）：
-//   - HTTP 403 → 1（不可达）：服务或边缘明确拒绝该出口。
-//   - 其它 HTTP 响应（含 401/404）→ 0（可达）：能连通服务，401 仅表示缺少凭据。
-//   - 请求失败/超时/连接错误（连不通）→ 1（不可达）。
+// 主信号 = 稳定 API（401/缺 key 等）；辅信号 = 产品层明确地区锁/放行指纹。
+// 合并规则见 mergeAIProbeResults：明确封禁优先；任一明确可达则可达。
+// 账号/密钥/配额不作为 IP 封禁依据。CF 拦截另由 probeCloudflareBlocked 单独记录。
 //
-// 每个探测复用 client 已有的 Timeout（不无限等）。4 个探测串行执行，简单可靠；
-// 任一探测异常均不 panic，如实记为 1（不可达）。
+// 每个探测复用 client 已有的 Timeout。4 个服务串行执行；任一探测异常均不 panic。
 func probeAIReachability(client *http.Client) string {
 	results := make(map[string]int, len(aiProbeTargets))
 	for name, target := range aiProbeTargets {
-		results[name] = probeOneAI(client, target)
+		api := probeOneAIForService(client, name, target)
+		product := probeAIProductLayers(client, name)
+		results[name] = mergeAIProbeResults(api, product)
 	}
 	data, err := json.Marshal(results)
 	if err != nil {
@@ -252,19 +341,281 @@ func probeAIReachability(client *http.Client) string {
 	return string(data)
 }
 
-// probeOneAI 探测单个 AI 端点是否可达：403 或连接失败/超时→1（不可达），其它 HTTP 响应→0（可达）。
+// mergeAIProbeResults 合并 API 主信号与产品层辅信号。
+// 明确不可达(1)优先；否则任一明确可达(0)则可达；都未知才 -1。
+func mergeAIProbeResults(api, product int) int {
+	if api == 1 || product == 1 {
+		return 1
+	}
+	if api == 0 || product == 0 {
+		return 0
+	}
+	return -1
+}
+
+// probeAIProductLayers 对某服务的全部产品层 URL 探测，返回最“严重”结果：
+// 任一条明确封禁 → 1；否则任一条明确可达 → 0；否则 -1。
+func probeAIProductLayers(client *http.Client, service string) int {
+	urls := aiProductProbeTargets[service]
+	if len(urls) == 0 {
+		return -1
+	}
+	best := -1
+	for _, u := range urls {
+		got := probeOneAIProductLayer(client, service, u)
+		if got == 1 {
+			return 1
+		}
+		if got == 0 {
+			best = 0
+		}
+	}
+	return best
+}
+
+// probeOneAIProductLayer 探测单条产品层 URL 的明确地区锁/放行指纹。
+// 连接失败返回 -1（不把网络抖动升级成产品封禁；API 层已对连接失败记 1）。
+func probeOneAIProductLayer(client *http.Client, service, target string) int {
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return -1
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Accept", "text/html,application/json,*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	// OpenAI 合规端点需要类浏览器/API 头，与缝合怪一致。
+	if service == "openai" {
+		req.Header.Set("Authorization", "Bearer null")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://platform.openai.com")
+		req.Header.Set("Referer", "https://platform.openai.com/")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return -1
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, aiProbeBodyLimit+1))
+	if err != nil {
+		return -1
+	}
+	if len(body) > aiProbeBodyLimit {
+		body = body[:aiProbeBodyLimit]
+	}
+	return classifyAIProductLayer(service, resp.StatusCode, resp.Header, resp.Request, string(body))
+}
+
+// classifyAIProductLayer 只识别“明确”的产品层地区锁或解锁指纹，不做模糊猜测。
+func classifyAIProductLayer(service string, statusCode int, header http.Header, req *http.Request, body string) int {
+	if header.Get("cf-mitigated") != "" {
+		return 1
+	}
+	lower := strings.ToLower(body)
+	if hasAICloudflareBlock(statusCode, lower) {
+		return 1
+	}
+	if hasRegionalBlockCode(body) || hasExplicitRegionalRejection(body) {
+		return 1
+	}
+	// Claude：最终 URL 落到官方“本地区不可用”页。
+	if service == "claude" && req != nil && req.URL != nil {
+		final := strings.ToLower(req.URL.String())
+		if strings.Contains(final, "app-unavailable-in-region") || strings.Contains(final, "unavailable-in-region") {
+			return 1
+		}
+	}
+	// OpenAI 合规：unsupported_country 文案/码。
+	if service == "openai" && strings.Contains(lower, "unsupported_country") {
+		return 1
+	}
+	// Gemini 社区指纹：页面数据含 45631641,null,true。
+	if service == "gemini" && strings.Contains(lower, "45631641,null,true") {
+		return 0
+	}
+	// 其它产品层响应保持未知，避免营销页误报。
+	return -1
+}
+
+// probeOneAI 探测单个 AI 端点是否地域解锁。判定：
+//   - 连接失败/超时（连不通）→ 1（不可达）。
+//   - 401 或明确服务语义 → 0（可达）：能连通服务，401 仅表示匿名请求需要凭据。
+//   - 403 需按响应体细分（见 classifyAIResponse）：
+//     Google 未注册调用者语义 → 0；明确地域/CF 拦截 → 1；其它 403 → -1。
+//   - 其它未知响应 → -1（未探测）。
 func probeOneAI(client *http.Client, target string) int {
-	resp, err := client.Get(target)
+	return probeOneAIForService(client, "", target)
+}
+
+func probeOneAIForService(client *http.Client, service, target string) int {
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return -1
+	}
+	if rule, ok := aiProbeRules[service]; ok {
+		for name, value := range rule.headers {
+			req.Header.Set(name, value)
+		}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return 1
 	}
-	// 只关心能否连通，主动读干净并关闭 body 以复用连接；不解析内容。
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-	resp.Body.Close()
-	if resp.StatusCode == http.StatusForbidden {
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, aiProbeBodyLimit+1))
+	if err != nil {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return 0
+		}
+		return -1
+	}
+	truncated := len(body) > aiProbeBodyLimit
+	if truncated {
+		body = body[:aiProbeBodyLimit]
+	}
+	result := classifyAIResponseForService(service, resp.StatusCode, resp.Header, string(body))
+	if truncated && result != 1 {
+		return -1
+	}
+	return result
+}
+
+// classifyAIResponse 依据集中规则把 AI 服务响应判为三态：0 解锁、1 封禁/不可达、-1 未探测。
+func classifyAIResponse(statusCode int, header http.Header, body string) int {
+	return classifyAIResponseForService("", statusCode, header, body)
+}
+
+func classifyAIResponseForService(service string, statusCode int, header http.Header, body string) int {
+	// cf-mitigated 头是明确的 CF 拦截信号，优先判不可达。
+	if header.Get("cf-mitigated") != "" {
 		return 1
 	}
-	return 0
+
+	lower := strings.ToLower(body)
+	if hasAICloudflareBlock(statusCode, lower) {
+		return 1
+	}
+	if hasRegionalBlockCode(body) || hasExplicitRegionalRejection(body) {
+		return 1
+	}
+
+	if statusCode == http.StatusUnauthorized {
+		return 0
+	}
+	if statusCode == http.StatusForbidden {
+		return classifyForbidden(body)
+	}
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return -1
+	}
+	rule, ok := aiProbeRules[service]
+	if !ok {
+		rule = defaultAIProbeRule
+	}
+	for _, group := range rule.unlockedBodyGroups {
+		if containsAll(lower, group) {
+			return 0
+		}
+	}
+	return -1
+}
+
+func hasAICloudflareBlock(statusCode int, lower string) bool {
+	for _, sig := range aiCFBlockSignals {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+	if statusCode < http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(lower, "cloudflare") && (strings.Contains(lower, "just a moment") || strings.Contains(lower, "attention required"))
+}
+
+func hasRegionalBlockCode(body string) bool {
+	var value any
+	if json.Unmarshal([]byte(body), &value) != nil {
+		return false
+	}
+	return containsRegionalBlockCode(value)
+}
+
+func containsRegionalBlockCode(value any) bool {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, nested := range current {
+			if isRegionalBlockCodeField(key, nested) {
+				return true
+			}
+			if containsRegionalBlockCode(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range current {
+			if containsRegionalBlockCode(nested) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isRegionalBlockCodeField(key string, value any) bool {
+	switch strings.ToLower(key) {
+	case "code", "error_code", "reason", "status":
+		text, ok := value.(string)
+		if !ok {
+			return false
+		}
+		_, blocked := aiRegionalBlockCodes[strings.ToLower(text)]
+		return blocked
+	default:
+		return false
+	}
+}
+
+func hasExplicitRegionalRejection(body string) bool {
+	for _, pattern := range aiRegionalRejectionPatterns {
+		if pattern.MatchString(body) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyForbidden 只识别匿名请求预期收到的无凭据响应；其它账号/权限错误不推断 IP 状态。
+func classifyForbidden(body string) int {
+	lower := strings.ToLower(body)
+	if hasAnonymousCredentialChallenge(lower) {
+		return 0
+	}
+	return -1
+}
+
+func hasAnonymousCredentialChallenge(lower string) bool {
+	for _, code := range []string{"missing_auth", "missing_api_key", "api_key_missing", "authentication_required"} {
+		if strings.Contains(lower, code) {
+			return true
+		}
+	}
+	for _, term := range []string{"api key", "api_key", "authentication", "bearer token", "credential"} {
+		if strings.Contains(lower, term) && (strings.Contains(lower, "missing") || strings.Contains(lower, "not provided") || strings.Contains(lower, "without ")) {
+			return true
+		}
+	}
+	return strings.Contains(lower, "unregistered caller") && strings.Contains(lower, "api key")
+}
+
+func containsAll(text string, signals []string) bool {
+	for _, sig := range signals {
+		if !strings.Contains(text, sig) {
+			return false
+		}
+	}
+	return true
 }
 
 // assessRisk 收集两源风险信号，分开返回（不聚合）：

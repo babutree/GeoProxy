@@ -178,23 +178,39 @@ func recordLoginSuccess(r *http.Request) {
 type Server struct {
 	storage       *storage.Storage
 	cfg           *config.Config
+	cfgMu         sync.RWMutex
 	affinity      *affinity.Store
 	customMgr     *custom.Manager
 	configChanged chan<- struct{}
+	apiKeyLimiter *apiKeyRateLimiter
+}
+
+// configSnapshot 返回已发布的不可变配置快照。
+// 所有运行态配置更新在 cfgMu 内以替换指针的方式完成，读者持有快照后无需继续持锁。
+func (s *Server) configSnapshot() *config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
 }
 
 func New(s *storage.Storage, cfg *config.Config, affinityStore *affinity.Store, cm *custom.Manager, cc chan<- struct{}) *Server {
+	rate := 60
+	if cfg != nil && cfg.ReadOnlyAPIRatePerMin > 0 {
+		rate = cfg.ReadOnlyAPIRatePerMin
+	}
 	return &Server{
 		storage:       s,
 		cfg:           cfg,
 		affinity:      affinityStore,
 		customMgr:     cm,
 		configChanged: cc,
+		apiKeyLimiter: newAPIKeyRateLimiter(rate, time.Now),
 	}
 }
 
 func (s *Server) Start() {
 	mux := s.routes()
+	cfg := s.configSnapshot()
 
 	// 添加日志中间件；跳过前端高频轮询端点与容器健康探活，避免访问日志自我膨胀刷屏。
 	loggedMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,9 +220,9 @@ func (s *Server) Start() {
 		mux.ServeHTTP(w, r)
 	})
 
-	log.Printf("WebUI listening on %s", s.cfg.WebUIPort)
+	log.Printf("WebUI listening on %s", cfg.WebUIPort)
 	go func() {
-		if err := http.ListenAndServe(s.cfg.WebUIPort, loggedMux); err != nil {
+		if err := http.ListenAndServe(cfg.WebUIPort, loggedMux); err != nil {
 			log.Fatalf("webui: %v", err)
 		}
 	}()
@@ -244,6 +260,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.authMiddleware(s.handleLogout))
 
+	// 静态资源：dashboard 的 CSS/JS 从 HTML 合规分离后由这两个路由下发。
+	// 基于内容 sha256 的 ETag，支持 If-None-Match 命中返回 304；带 Cache-Control。
+	mux.HandleFunc("/assets/dashboard.css", s.handleAssetCSS)
+	mux.HandleFunc("/assets/dashboard.js", s.handleAssetJS)
+
 	// Public API: only authentication state, with no business data.
 	mux.HandleFunc("/api/auth/check", s.apiAuthCheck)
 	mux.HandleFunc("/api/public-ip", s.authMiddleware(s.apiPublicIP))
@@ -276,6 +297,17 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/manual-node/region", s.authMiddleware(s.apiManualNodeRegion))
 	mux.HandleFunc("/api/manual-node/note", s.authMiddleware(s.apiManualNodeNote))
 	mux.HandleFunc("/api/manual-node/delete", s.authMiddleware(s.apiManualNodeDelete))
+
+	// API Key management (session + CSRF only; never accept API Key for privilege escalation).
+	mux.HandleFunc("/api/apikeys", s.authMiddleware(s.apiAPIKeysList))
+	mux.HandleFunc("/api/apikey/create", s.authMiddleware(s.apiAPIKeyCreate))
+	mux.HandleFunc("/api/apikey/revoke", s.authMiddleware(s.apiAPIKeyRevoke))
+	mux.HandleFunc("/api/apikey/delete", s.authMiddleware(s.apiAPIKeyDelete))
+
+	// Read-only external API (API Key auth).
+	mux.HandleFunc("/api/v1/ping", s.apiKeyMiddleware(s.apiV1Ping))
+	mux.HandleFunc("/api/v1/nodes", s.apiKeyMiddleware(s.apiV1Nodes))
+	mux.HandleFunc("/api/v1/occupancy", s.apiKeyMiddleware(s.apiV1Occupancy))
 
 	return mux
 }
@@ -357,6 +389,61 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, dashboardHTML)
 }
 
+// assetETag 计算内容的强 ETag（基于 sha256，包裹双引号，符合 RFC 7232）。
+func assetETag(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// serveAsset 统一下发静态文本资源：正确 Content-Type、基于内容 hash 的 ETag、
+// Cache-Control（max-age=3600 + must-revalidate，配合 ETag 保证内容变更即失效），
+// 支持 If-None-Match 命中返回 304。仅内嵌 Go 常量，无外链、无独立文件。
+func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request, contentType, content string) {
+	etag := assetETag(content)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "max-age=3600, must-revalidate")
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	fmt.Fprint(w, content)
+}
+
+// etagMatches 判断 If-None-Match 头是否命中给定 ETag（支持逗号分隔的多值与 * 通配）。
+func etagMatches(header, etag string) bool {
+	header = strings.TrimSpace(header)
+	if header == "*" {
+		return true
+	}
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		candidate = strings.TrimPrefix(candidate, "W/")
+		if candidate == etag {
+			return true
+		}
+	}
+	return false
+}
+
+// handleAssetCSS 下发 dashboard 样式表（text/css）。
+func (s *Server) handleAssetCSS(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/assets/dashboard.css" {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, "text/css; charset=utf-8", dashboardCSS)
+}
+
+// handleAssetJS 下发 dashboard 脚本（application/javascript）。
+func (s *Server) handleAssetJS(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/assets/dashboard.js" {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, "application/javascript; charset=utf-8", dashboardJS)
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -386,7 +473,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	password := r.FormValue("password")
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
-	if hash != s.cfg.WebUIPasswordHash {
+	if hash != s.configSnapshot().WebUIPasswordHash {
 		recordLoginFailure(r, now)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, loginHTMLWithError)

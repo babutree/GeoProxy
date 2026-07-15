@@ -2,14 +2,43 @@
 
 # GoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
 # 按 Ctrl+C 停止测试
-# 用法: ./test_proxy.sh [端口号，默认7802]
+# 用法: GOPROXY_AUTH_USERNAME=acct GOPROXY_AUTH_PASSWORD=... ./test_proxy.sh [端口号，默认7802]
+# 可选: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser
 
-# PROXY_HOST="192.227.184.201"
-# PROXY_HOST="proxy.amux.ai"
-PROXY_HOST="127.0.0.1"
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${1:-7802}"
 TEST_URL="http://ip-api.com/json/?fields=countryCode,query"
 DELAY=1
+
+require_proxy_auth() {
+    if [ -z "${GOPROXY_AUTH_USERNAME:-}" ] || [ -z "${GOPROXY_AUTH_PASSWORD:-}" ]; then
+        echo "Missing proxy credentials." >&2
+        echo "Set GOPROXY_AUTH_USERNAME and GOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings." >&2
+        echo "Optional: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser" >&2
+        exit 2
+    fi
+}
+
+proxy_auth_username() {
+    local username="$GOPROXY_AUTH_USERNAME"
+    if [ -n "${GOPROXY_AUTH_REGION:-}" ]; then
+        username="${username}-region-${GOPROXY_AUTH_REGION}"
+    fi
+    if [ -n "${GOPROXY_AUTH_SESSION:-}" ]; then
+        username="${username}-session-${GOPROXY_AUTH_SESSION}"
+    fi
+    echo "$username"
+}
+
+setup_curl_auth_config() {
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    CURL_AUTH_CONFIG=$(mktemp "${TMPDIR:-/tmp}/goproxy-curl-auth.XXXXXX")
+    umask "$old_umask"
+    printf 'proxy-user = "%s:%s"\n' "$(proxy_auth_username)" "$GOPROXY_AUTH_PASSWORD" > "$CURL_AUTH_CONFIG"
+    trap 'rm -f "$CURL_AUTH_CONFIG"' EXIT INT TERM
+}
 
 # 统计变量
 total=0
@@ -60,6 +89,7 @@ test_http_proxy() {
         # 使用 HTTP 代理发送请求
         start_time=$(get_ms_time)
         response=$(curl -x "http://${PROXY_HOST}:${PROXY_PORT}" \
+						--config "$CURL_AUTH_CONFIG" \
                        -s \
                        -w "\n%{http_code}" \
                        --connect-timeout 10 \
@@ -94,4 +124,6 @@ test_http_proxy() {
 }
 
 # 主函数
+require_proxy_auth
+setup_curl_auth_config
 test_http_proxy

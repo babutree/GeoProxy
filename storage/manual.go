@@ -16,14 +16,16 @@ func (s *Storage) addManualProxyExec(exec proxyExec, address, protocol, region, 
 	if region != "" {
 		regionSource = "manual"
 	}
+	// 手工节点默认 disabled：须经连通/出口/纯净度/AI/CF 验证通过后才 active 入选路。
 	_, err := exec.Exec(
-		`INSERT INTO proxies (address, protocol, source, subscription_id, region, region_source, note)
-		 VALUES (?, ?, 'manual', 0, ?, ?, ?)
+		`INSERT INTO proxies (address, protocol, source, subscription_id, region, region_source, note, status)
+		 VALUES (?, ?, 'manual', 0, ?, ?, ?, 'disabled')
 		 ON CONFLICT(address, source, subscription_id) DO UPDATE SET
 			protocol = excluded.protocol,
 			region = excluded.region,
 			region_source = excluded.region_source,
-			note = excluded.note`,
+			note = excluded.note,
+			status = 'disabled'`,
 		address, normalizeProtocol(protocol), region, regionSource, note,
 	)
 	return err

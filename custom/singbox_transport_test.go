@@ -85,3 +85,78 @@ func TestBuildOutboundSupportedTransport(t *testing.T) {
 		t.Fatalf("裸 tcp 出站不应有 transport 字段: %v", out["transport"])
 	}
 }
+
+// TestIncompletePortAllocationErrorDiagnosesBuildFailure 验证 buildOutbound
+// 失败不能被误报为端口段满或配置跳过。
+func TestIncompletePortAllocationErrorDiagnosesBuildFailure(t *testing.T) {
+	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	good := tunnelNode("good", "good.example.com", "good-password")
+	bad := unsupportedXHTTPNode()
+
+	_, portMap := s.assembleConfig([]ParsedNode{good, bad})
+	err := incompletePortAllocationError([]ParsedNode{good, bad}, portMap)
+	if err == nil {
+		t.Fatal("坏节点未分配端口时应返回错误")
+	}
+	msg := err.Error()
+	for _, want := range []string{"坏 transport 节点", "vless", "xhttp"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("buildOutbound 诊断应包含 %q，实际: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "段满") {
+		t.Fatalf("buildOutbound 失败不应被误报为段满，实际: %s", msg)
+	}
+}
+
+// TestReloadAllRejectedNodesDiagnosesBuildFailureBeforeBinaryLookup：
+// 全部节点构建失败时必须显式失败并报告构建原因，不得被缺失二进制掩盖。
+func TestReloadAllRejectedNodesDiagnosesBuildFailureBeforeBinaryLookup(t *testing.T) {
+	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	err := s.Reload([]ParsedNode{unsupportedXHTTPNode()})
+	if err == nil {
+		t.Fatal("全部坏节点应使 Reload 失败")
+	}
+	msg := err.Error()
+	for _, want := range []string{"坏 transport 节点", "vless", "xhttp"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("Reload 诊断应包含 %q，实际: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "未找到") || strings.Contains(msg, "binary") {
+		t.Fatalf("构建失败应先于二进制检查暴露，实际: %s", msg)
+	}
+}
+
+// TestReloadMixedBuildFailureDoesNotBlockGoodNodes：单坏节点不得阻断同批可构建节点。
+// 缺二进制时错误应来自 good 节点启动路径，而非把 bad 当 incomplete 阻断。
+func TestReloadMixedBuildFailureDoesNotBlockGoodNodes(t *testing.T) {
+	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	good := tunnelNode("good", "good.example.com", "good-password")
+	bad := unsupportedXHTTPNode()
+	err := s.Reload([]ParsedNode{good, bad})
+	if err == nil {
+		t.Fatal("缺二进制时 Reload 应失败")
+	}
+	// 应推进到二进制检查：说明 bad 未把整批判为端口不完整。
+	if !strings.Contains(err.Error(), "未找到") {
+		t.Fatalf("混合批应允许 good 进入启动路径，得到: %v", err)
+	}
+	if strings.Contains(err.Error(), "端口分配不完整") {
+		t.Fatalf("坏节点不应把同批 good 判为 incomplete，得到: %v", err)
+	}
+}
+
+func unsupportedXHTTPNode() ParsedNode {
+	return ParsedNode{
+		Name:   "坏 transport 节点",
+		Type:   "vless",
+		Server: "bad.example.com",
+		Port:   443,
+		Raw: map[string]interface{}{
+			"type":    "vless",
+			"uuid":    "347b77a2-dbf7-4755-adb9-64ef05f51e84",
+			"network": "xhttp",
+		},
+	}
+}

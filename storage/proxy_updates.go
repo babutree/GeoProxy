@@ -196,6 +196,28 @@ func (s *Storage) RecordProxyUseByID(id int64, success bool) error {
 	return requireRowsAffected(res.RowsAffected())
 }
 
+// RecordProxyFailureByID 原子累加失败次数，并在达到阈值时禁用节点。
+// 计数和状态更新必须在同一条语句中完成，避免并发失败时出现
+// fail_count 已达阈值但节点仍处于 active 的状态。
+func (s *Storage) RecordProxyFailureByID(id int64, threshold int) error {
+	if threshold <= 0 {
+		return fmt.Errorf("failure threshold must be positive, got %d", threshold)
+	}
+	res, err := s.db.Exec(
+		`UPDATE proxies
+		 SET use_count = use_count + 1,
+		     fail_count = fail_count + 1,
+		     status = CASE WHEN fail_count + 1 >= ? THEN 'disabled' ELSE status END,
+		     last_used = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		threshold, id,
+	)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
 // CalculateQualityGrade 根据延迟计算质量等级
 func CalculateQualityGrade(latencyMs int) string {
 	switch {

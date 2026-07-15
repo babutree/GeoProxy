@@ -840,8 +840,11 @@ func TestIndexWithoutAuthShowsOnlyNeutralLogin(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Admin Sign In") {
-		t.Fatalf("body does not contain neutral login title: %s", body)
+	// 未登录访问 / 应返回中性登录页：断言登录页的稳定契约（表单动作、密码字段）。
+	for _, want := range []string{`action="/login"`, `name="password"`, `type="password"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("login page missing stable contract %q: %s", want, body)
+		}
 	}
 	assertNoBusinessTerms(t, body)
 }
@@ -1182,7 +1185,16 @@ func insertWebUITestProxy(t *testing.T, store *storage.Storage, address string, 
 	if err := store.AddManualProxy(address, "http", region, ""); err != nil {
 		t.Fatalf("AddManualProxy(%s) error = %v", address, err)
 	}
-	if status == "disabled" {
+	// AddManualProxy 默认 disabled（待验证）；测试夹具若要 active 须显式启用。
+	if status == "active" {
+		proxy, err := store.GetProxyByAddress(address)
+		if err != nil {
+			t.Fatalf("GetProxyByAddress(%s) error = %v", address, err)
+		}
+		if err := store.EnableProxyByID(proxy.ID); err != nil {
+			t.Fatalf("EnableProxyByID(%s) error = %v", address, err)
+		}
+	} else if status == "disabled" {
 		if err := store.DisableProxy(address); err != nil {
 			t.Fatalf("DisableProxy(%s) error = %v", address, err)
 		}

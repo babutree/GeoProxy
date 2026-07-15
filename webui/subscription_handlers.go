@@ -212,16 +212,22 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DeleteSubscription 内部事务已一并删除关联代理，禁止前置 DeleteBySubscriptionID 绕过事务。
+	if s.customMgr != nil {
+		if err := s.customMgr.DeleteSubscription(req.ID); err != nil {
+			log.Printf("[webui] delete subscription #%d via manager failed: %v", req.ID, err)
+			jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("[webui] 删除订阅 #%d", req.ID)
+		jsonOK(w, map[string]string{"status": "deleted"})
+		return
+	}
+
+	// Fallback for tests/minimal servers without custom manager: DB-only deletion cannot update sing-box runtime.
 	if err := s.storage.DeleteSubscription(req.ID); err != nil {
 		log.Printf("[webui] delete subscription #%d failed: %v", req.ID, err)
 		jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
 		return
-	}
-
-	// 重建 sing-box 配置（剩余订阅的节点）
-	if s.customMgr != nil {
-		go s.customMgr.RefreshAll()
 	}
 
 	log.Printf("[webui] 删除订阅 #%d", req.ID)

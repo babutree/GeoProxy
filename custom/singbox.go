@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +35,46 @@ type SingBoxProcess struct {
 	status     string
 	reason     string
 	readyPorts int
+	assembly   assemblyDiagnostics
+}
+
+// assemblyDiagnostics records the outcome of one in-memory configuration
+// assembly. Rejections are safe to omit from a commit; allocation failures are
+// not, because they mean an otherwise buildable target did not reach runtime.
+type assemblyDiagnostics struct {
+	accepted    []ParsedNode
+	rejected    []assemblyRejectedNode
+	segmentFull []ParsedNode
+}
+
+type assemblyRejectedNode struct {
+	node ParsedNode
+	err  error
+}
+
+func (d assemblyDiagnostics) rejectedKeys() map[string]bool {
+	keys := make(map[string]bool, len(d.rejected))
+	for _, rejected := range d.rejected {
+		keys[rejected.node.NodeKey()] = true
+	}
+	return keys
+}
+
+func (d assemblyDiagnostics) acceptedKeys() map[string]bool {
+	keys := make(map[string]bool, len(d.accepted))
+	for _, node := range d.accepted {
+		keys[node.NodeKey()] = true
+	}
+	return keys
+}
+
+func (d assemblyDiagnostics) hasEvidenceForSegmentFull(key string) bool {
+	for _, node := range d.segmentFull {
+		if node.NodeKey() == key {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -96,6 +137,7 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		s.stopLocked()
 		s.nodes = nil
 		s.portMap = make(map[string]int)
+		s.assembly = assemblyDiagnostics{}
 		s.setStatusLocked(SingBoxStatusNoTunnelNodes, SingBoxStatusNoTunnelNodes, 0)
 		return nil
 	}
@@ -107,11 +149,13 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	oldPortOffset := s.portOffset
 	oldPortMap := s.portMap
 	oldNodes := s.nodes
+	oldAssembly := s.assembly
 	oldConfig, oldConfigErr := os.ReadFile(s.configFile)
 	restoreState := func() {
 		s.portOffset = oldPortOffset
 		s.portMap = oldPortMap
 		s.nodes = oldNodes
+		s.assembly = oldAssembly
 		if oldConfigErr == nil {
 			if err := os.WriteFile(s.configFile, oldConfig, 0644); err != nil {
 				log.Printf("[custom] ⚠️ 恢复旧 sing-box 配置文件失败: %v", err)
@@ -119,14 +163,26 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		}
 	}
 	s.portOffset = nextPortOffset
-	if err := s.generateConfig(tunnelNodes); err != nil {
+	diagnostics, err := s.generateConfig(tunnelNodes)
+	if err != nil {
 		restoreState()
 		s.setStatusLocked(SingBoxStatusFailed, "config_generation_failed", 0)
 		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
 	}
-	// 段满/出站构建失败导致目标 key 未进 portMap：必须在启动前失败，
-	// 否则上层 Refresh 会把 nil 当成功并 DeleteBySubscriptionID。
-	if err := incompletePortAllocationError(tunnelNodes, s.portMap); err != nil {
+	s.assembly = diagnostics
+	if len(diagnostics.accepted) == 0 {
+		restoreState()
+		s.setStatusLocked(SingBoxStatusFailed, "all_tunnel_nodes_rejected", 0)
+		return fmt.Errorf("所有隧道节点均被拒绝: %w", incompletePortAllocationErrorWithDiagnostics(tunnelNodes, s.portMap, diagnostics))
+	}
+	if len(diagnostics.segmentFull) > 0 {
+		restoreState()
+		s.setStatusLocked(SingBoxStatusFailed, "ports_incomplete", 0)
+		return incompletePortAllocationErrorWithDiagnostics(tunnelNodes, s.portMap, diagnostics)
+	}
+	// 仅端口分配器实际报告的 segmentFull 才能判为段满；构建失败节点已被
+	// 明确拒绝，不应阻断其余可构建节点启动。
+	if err := incompletePortAllocationErrorWithDiagnostics(diagnostics.accepted, s.portMap, diagnostics); err != nil {
 		restoreState()
 		s.setStatusLocked(SingBoxStatusFailed, "ports_incomplete", 0)
 		return err
@@ -139,21 +195,23 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 
 	// 健壮性：整份配置若校验失败，二分剔除坏节点，用剩余可用节点重建，
 	// 避免单个非法节点拖垮全部订阅（一坏全灭）。
-	goodNodes := s.pruneInvalidNodes(tunnelNodes)
+	goodNodes := s.pruneInvalidNodes(diagnostics.accepted)
 	if len(goodNodes) == 0 {
 		restoreState()
 		s.setStatusLocked(SingBoxStatusFailed, "all_tunnel_nodes_invalid", 0)
 		return fmt.Errorf("所有隧道节点均无法通过 sing-box 校验")
 	}
-	if len(goodNodes) != len(tunnelNodes) {
+	if len(goodNodes) != len(diagnostics.accepted) {
 		log.Printf("[custom] ⚠️ 剔除 %d 个非法节点，保留 %d 个可用节点",
-			len(tunnelNodes)-len(goodNodes), len(goodNodes))
-		if err := s.generateConfig(goodNodes); err != nil {
+			len(diagnostics.accepted)-len(goodNodes), len(goodNodes))
+		diagnostics, err = s.generateConfig(goodNodes)
+		if err != nil {
 			restoreState()
 			s.setStatusLocked(SingBoxStatusFailed, "config_rebuild_failed", 0)
 			return fmt.Errorf("重建 sing-box 配置失败: %w", err)
 		}
-		if err := incompletePortAllocationError(goodNodes, s.portMap); err != nil {
+		s.assembly = diagnostics
+		if err := incompletePortAllocationErrorWithDiagnostics(diagnostics.accepted, s.portMap, diagnostics); err != nil {
 			restoreState()
 			s.setStatusLocked(SingBoxStatusFailed, "ports_incomplete", 0)
 			return err
@@ -175,22 +233,71 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	}
 
 	s.nodes = goodNodes
+	s.assembly.accepted = append([]ParsedNode(nil), goodNodes...)
 	return nil
 }
 
-// incompletePortAllocationError 在目标 tunnel key 未全部进入 portMap 时返回明确错误。
-// 段满跳过、buildOutbound 失败等静默丢节点都不得被当作 Reload 成功。
+// incompletePortAllocationError preserves the strict fallback for callers
+// without assembler evidence: a build failure is explicit, any other missing
+// port remains unknown rather than being guessed as a full segment.
 func incompletePortAllocationError(nodes []ParsedNode, portMap map[string]int) error {
-	missing := 0
+	return incompletePortAllocationErrorWithDiagnostics(nodes, portMap, assemblyDiagnostics{})
+}
+
+// incompletePortAllocationErrorWithDiagnostics distinguishes explicit build
+// rejections, allocator-proven segment exhaustion, and unknown missing ports.
+func incompletePortAllocationErrorWithDiagnostics(nodes []ParsedNode, portMap map[string]int, diagnostics assemblyDiagnostics) error {
+	var missing []ParsedNode
 	for _, n := range nodes {
 		if _, ok := portMap[n.NodeKey()]; !ok {
-			missing++
+			missing = append(missing, n)
 		}
 	}
-	if missing == 0 {
+	if len(missing) == 0 {
 		return nil
 	}
-	return fmt.Errorf("sing-box 端口分配不完整: %d/%d 节点未分配端口（段满或配置跳过）", missing, len(nodes))
+
+	var buildFailures []string
+	var segmentFull []string
+	var unknown []string
+	rejectedErr := map[string]error{}
+	for _, r := range diagnostics.rejected {
+		rejectedErr[r.node.NodeKey()] = r.err
+	}
+	for _, node := range missing {
+		if err, ok := rejectedErr[node.NodeKey()]; ok {
+			if err != nil {
+				buildFailures = append(buildFailures,
+					fmt.Sprintf("节点 %q (%s) 构建失败: %v", node.Name, node.Type, err))
+			} else {
+				buildFailures = append(buildFailures,
+					fmt.Sprintf("节点 %q (%s) 构建失败", node.Name, node.Type))
+			}
+			continue
+		}
+		if _, err := buildOutbound(node, "diagnostic"); err != nil {
+			buildFailures = append(buildFailures,
+				fmt.Sprintf("节点 %q (%s) 构建失败: %v", node.Name, node.Type, err))
+			continue
+		}
+		if diagnostics.hasEvidenceForSegmentFull(node.NodeKey()) {
+			segmentFull = append(segmentFull, fmt.Sprintf("%q (%s)", node.Name, node.Type))
+			continue
+		}
+		unknown = append(unknown, fmt.Sprintf("%q (%s)", node.Name, node.Type))
+	}
+
+	parts := []string{fmt.Sprintf("sing-box 端口分配不完整: %d/%d 节点未分配端口", len(missing), len(nodes))}
+	if len(segmentFull) > 0 {
+		parts = append(parts, "端口段已满，未分配节点: "+strings.Join(segmentFull, ", "))
+	}
+	if len(buildFailures) > 0 {
+		parts = append(parts, "节点构建失败: "+strings.Join(buildFailures, "; "))
+	}
+	if len(unknown) > 0 {
+		parts = append(parts, "未知端口缺失: "+strings.Join(unknown, ", "))
+	}
+	return fmt.Errorf("%s", strings.Join(parts, "; "))
 }
 
 // checkNodes 生成一份仅含给定节点的临时配置并运行 sing-box check，返回是否通过。
@@ -240,14 +347,17 @@ func (s *SingBoxProcess) pruneInvalidNodes(nodes []ParsedNode) []ParsedNode {
 }
 
 // generateConfig 生成 sing-box JSON 配置并写入运行态（更新 s.portMap、写 configFile）。
-func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
-	config, portMap := s.assembleConfig(nodes)
+func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) (assemblyDiagnostics, error) {
+	config, portMap, diagnostics := s.assembleConfigWithDiagnostics(nodes)
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return err
+		return assemblyDiagnostics{}, err
 	}
 	s.portMap = portMap
-	return os.WriteFile(s.configFile, data, 0644)
+	if err := os.WriteFile(s.configFile, data, 0644); err != nil {
+		return assemblyDiagnostics{}, err
+	}
+	return diagnostics, nil
 }
 
 // buildConfigBytes 生成配置 JSON 字节，但不改动运行态；供 checkNodes 探测校验使用。
@@ -261,6 +371,13 @@ func (s *SingBoxProcess) buildConfigBytes(nodes []ParsedNode) ([]byte, error) {
 // 该单端口同时接受 SOCKS4/4a/5 与 HTTP 连接（mixed 为 sing-box 官方入站类型），路由到同一出站。
 // 返回 (config, portMap)。portMap 沿用旧映射保持稳定（不破坏既有入库地址）。
 func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interface{}, map[string]int) {
+	config, portMap, _ := s.assembleConfigWithDiagnostics(nodes)
+	return config, portMap
+}
+
+// assembleConfigWithDiagnostics produces the configuration together with the
+// exact acceptance and allocation decisions made by this assembler.
+func (s *SingBoxProcess) assembleConfigWithDiagnostics(nodes []ParsedNode) (map[string]interface{}, map[string]int, assemblyDiagnostics) {
 	oldPortMap := make(map[string]int, len(s.portMap))
 	for key, port := range s.portMap {
 		oldPortMap[key] = port
@@ -307,6 +424,7 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 	var inbounds []map[string]interface{}
 	var outbounds []map[string]interface{}
 	var rules []map[string]interface{}
+	diagnostics := assemblyDiagnostics{}
 
 	for i, node := range orderedNodes {
 		key := node.NodeKey()
@@ -316,6 +434,7 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 		outbound, err := buildOutbound(node, tag)
 		if err != nil {
 			log.Printf("[custom] 跳过节点 %s (%s): %v", node.Name, node.Type, err)
+			diagnostics.rejected = append(diagnostics.rejected, assemblyRejectedNode{node: node, err: err})
 			continue
 		}
 
@@ -323,9 +442,11 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 		if mixedPort == 0 {
 			// 分片端口段已满：跳过该节点（不生成入站/出站/路由，不占端口），与 buildOutbound 失败同一处理。
 			log.Printf("[custom] 分片端口段已满，跳过节点 %s (%s)", node.Name, node.Type)
+			diagnostics.segmentFull = append(diagnostics.segmentFull, node)
 			continue
 		}
 		portMap[key] = mixedPort
+		diagnostics.accepted = append(diagnostics.accepted, node)
 
 		// 入站：本地 mixed 监听（单端口同时服务 SOCKS5 与 HTTP），路由到该节点出站。
 		inbounds = append(inbounds, map[string]interface{}{
@@ -373,7 +494,7 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 			},
 		},
 	}
-	return config, portMap
+	return config, portMap, diagnostics
 }
 
 // buildOutbound 根据节点类型构建 sing-box 出站配置。
@@ -470,8 +591,12 @@ func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) 
 
 // forceTLS 强制应用 TLS 配置（用于 anytls 等必须 TLS 的协议）
 func forceTLS(raw map[string]interface{}, out map[string]interface{}) {
-	raw["tls"] = true
-	applyTLS(raw, out)
+	withTLS := make(map[string]interface{}, len(raw)+1)
+	for key, value := range raw {
+		withTLS[key] = value
+	}
+	withTLS["tls"] = true
+	applyTLS(withTLS, out)
 }
 
 // applyTLS 应用 TLS 配置
@@ -808,36 +933,56 @@ func classifySingBoxStartError(err error) string {
 	}
 }
 
-// stopLocked 停止 sing-box（需持有锁）
+// stopGracePeriod 是 Unix 上先发 Interrupt 后等待进程自行退出的上限。
+// Windows 上 os.Interrupt 未实现，必须直接 Kill，否则会空等并在测试超时后泄漏子进程。
+const stopGracePeriod = 2 * time.Second
+
+// stopLocked 停止 sing-box（需持有锁）。
+// 必须尽量在超时前真正回收子进程：真实集成测试的 t.Cleanup 若卡住或空等，
+// 会留下监听 mixed 端口的 sing-box，阻断本机其它 API/代理探测。
 func (s *SingBoxProcess) stopLocked() {
-	if s.cmd != nil && s.cmd.Process != nil && s.running {
-		log.Println("[custom] 停止 sing-box 进程...")
-		cmd := s.cmd
-		done := s.waitDone
-		cmd.Process.Signal(os.Interrupt)
-		if done == nil {
-			done = make(chan struct{})
-			go func() {
-				cmd.Wait()
-				close(done)
-			}()
-		}
+	if s.cmd == nil || s.cmd.Process == nil || !s.running {
+		return
+	}
+	log.Println("[custom] 停止 sing-box 进程...")
+	cmd := s.cmd
+	done := s.waitDone
+	if done == nil {
+		done = make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
+	}
+
+	// Windows: Signal(Interrupt) 固定返回 error 且不投递信号，直接 Kill。
+	// Unix: 先尝试 Interrupt，超时再 Kill。
+	if runtime.GOOS == "windows" {
+		_ = cmd.Process.Kill()
+	} else if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		_ = cmd.Process.Kill()
+	}
+
+	select {
+	case <-done:
+	case <-time.After(stopGracePeriod):
+		_ = cmd.Process.Kill()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			cmd.Process.Kill()
-			<-done
+		case <-time.After(stopGracePeriod):
+			log.Println("[custom] ⚠️ 等待 sing-box 退出超时，进程可能仍残留")
 		}
-		s.running = false
-		if s.cmd == cmd {
-			s.cmd = nil
-			s.waitDone = nil
-		}
-		if len(s.portMap) > 0 {
-			s.setStatusLocked(SingBoxStatusStopped, SingBoxStatusStopped, 0)
-		} else {
-			s.setStatusLocked(SingBoxStatusNoTunnelNodes, SingBoxStatusNoTunnelNodes, 0)
-		}
+	}
+
+	s.running = false
+	if s.cmd == cmd {
+		s.cmd = nil
+		s.waitDone = nil
+	}
+	if len(s.portMap) > 0 {
+		s.setStatusLocked(SingBoxStatusStopped, SingBoxStatusStopped, 0)
+	} else {
+		s.setStatusLocked(SingBoxStatusNoTunnelNodes, SingBoxStatusNoTunnelNodes, 0)
 	}
 }
 
@@ -904,6 +1049,20 @@ func (s *SingBoxProcess) GetPortMap() map[string]int {
 		result[k] = v
 	}
 	return result
+}
+
+// GetAssemblyDiagnostics returns a snapshot of the latest configuration
+// assembly so orchestrators can distinguish rejected nodes from incomplete
+// allocation without inferring reasons from a missing port.
+func (s *SingBoxProcess) GetAssemblyDiagnostics() assemblyDiagnostics {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	diagnostics := assemblyDiagnostics{
+		accepted:    append([]ParsedNode(nil), s.assembly.accepted...),
+		segmentFull: append([]ParsedNode(nil), s.assembly.segmentFull...),
+		rejected:    append([]assemblyRejectedNode(nil), s.assembly.rejected...),
+	}
+	return diagnostics
 }
 
 // GetNodes 返回当前已加载的 tunnel 节点快照。

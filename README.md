@@ -81,24 +81,29 @@ session. This gateway therefore encodes routing parameters **inside the proxy
 username string itself** (a "username DSL"). You put the whole string into your
 client's proxy-username field.
 
-The full username has the form:
+The full username has the form (**fixed order**):
 
 ```
-<base>[-region-<cc>][-session-<id>]
+<base>[-region-<cc>][-unlock-<token>][-session-<id>]
 ```
 
-For example, `acct-region-jp-session-browser` is parsed by the server as:
+Suffixes are optional, but when present they must appear in this order:
+`region` → `unlock` → `session`. A wrong order fails **username parsing**, so
+authentication fails even if the base password is correct.
+
+For example, `acct-region-jp-unlock-gpt-session-browser` is parsed as:
 
 | Part | Value | Role |
 |------|-------|------|
 | base | `acct` | Must equal the configured proxy username (default `acct`, editable in Settings). This is the only part checked against the credential. |
 | region | `jp` | Selects a `jp` region node. |
+| unlock | `gpt` | Require OpenAI-reachable nodes (`openai` AI probe = 0). |
 | session | `browser` | Sticky key: same key reuses the same exit node within the TTL. |
 
 Only the **base** takes part in password authentication (base must equal the
 configured proxy username, and the password must equal the configured proxy
-password). The `-region-` and `-session-` parts are routing hints, not
-credentials.
+password). The `-region-`, `-unlock-`, and `-session-` parts are routing hints,
+not credentials.
 
 ### Username forms
 
@@ -106,8 +111,11 @@ credentials.
 |----------|---------|
 | `acct` | Authenticate as `acct`; use any available node. |
 | `acct-region-us` | Use an available `us` region node. |
+| `acct-unlock-gpt` | Use a node whose OpenAI probe is reachable. |
+| `acct-unlock-cf` | Use a node with Cloudflare not blocked. |
+| `acct-unlock-all` | Require OpenAI + Claude + Grok + Gemini + CF all open. |
 | `acct-session-browser` | Bind session key `browser` to one node for the configured TTL. |
-| `acct-region-jp-session-app01` | Use `jp` nodes and keep session `app01` sticky when possible. |
+| `acct-region-jp-unlock-gpt-session-app01` | `jp` + OpenAI unlock + sticky session `app01`. |
 
 > Replace `acct` with the configured proxy username (default `acct`, editable in
 > the WebUI Settings). If your base username is `myuser`, the strings become
@@ -143,6 +151,28 @@ credentials.
   exit IPs and do not interfere with each other. Change the key to deliberately
   rotate the exit.
 
+### The unlock filter (AI / CF)
+
+- Optional suffix `-unlock-<token>` restricts routing to nodes that already have
+  matching probe results stored on the node (`ai_reachability` / `cf_blocked`).
+- Allowed tokens (aliases normalized server-side):
+
+  | Token | Requirement |
+  |-------|-------------|
+  | `gpt` / `openai` / `chatgpt` | `ai_reachability.openai == 0` |
+  | `claude` | `ai_reachability.claude == 0` |
+  | `gemini` | `ai_reachability.gemini == 0` |
+  | `grok` | `ai_reachability.grok == 0` |
+  | `cf` / `cloudflare` | `cf_blocked == 0` |
+  | `all` | all five of the above (AND) |
+
+- Combine multiple requirements in one unlock segment with `+` or `,`
+  (e.g. `-unlock-gpt+cf`). Only **one** `-unlock-` segment is allowed.
+- Unprobed (`-1`) or blocked (`1`) does **not** match. If no node satisfies the
+  filter, the request fails with no available node (no silent fallback).
+- Order is fixed: `-unlock-` must come **after** optional `-region-` and
+  **before** optional `-session-`.
+
 ## Using The Proxy
 
 The examples below use the base username `acct` and password `change-me` as placeholders. Replace them with your actual credentials (the auto-generated proxy password shown once in the logs on first boot, or whatever you later set in the WebUI). Proxy authentication is enabled by default.
@@ -151,6 +181,12 @@ The examples below use the base username `acct` and password `change-me` as plac
 
 ```bash
 curl -x http://acct-region-us:change-me@localhost:7802 http://example.com/
+```
+
+Only OpenAI-unlocked nodes:
+
+```bash
+curl -x http://acct-unlock-gpt:change-me@localhost:7802 https://www.gstatic.com/generate_204
 ```
 
 ### HTTP proxy (HTTPS target, via CONNECT tunnel)
@@ -169,8 +205,8 @@ SOCKS5 tunnels raw TCP, so the same command works whether the target is HTTP or 
 # Credentials embedded in the proxy string
 curl --socks5 acct-region-jp-session-browser:change-me@localhost:7801 https://www.gstatic.com/generate_204
 
-# Equivalent, using -x with the socks5:// scheme
-curl -x socks5://acct-region-jp-session-browser:change-me@localhost:7801 https://www.gstatic.com/generate_204
+# Region + AI unlock + sticky session
+curl -x socks5://acct-region-jp-unlock-gpt-session-browser:change-me@localhost:7801 https://www.gstatic.com/generate_204
 
 # Equivalent, passing credentials separately
 curl --socks5 localhost:7801 -U acct-region-jp-session-browser:change-me https://www.gstatic.com/generate_204
@@ -179,7 +215,7 @@ curl --socks5 localhost:7801 -U acct-region-jp-session-browser:change-me https:/
 To resolve the target hostname at the exit node instead of locally, use the `socks5h` scheme:
 
 ```bash
-curl -x socks5h://acct-region-us:change-me@localhost:7801 https://www.gstatic.com/generate_204
+curl -x socks5h://acct-region-us-unlock-cf:change-me@localhost:7801 https://www.gstatic.com/generate_204
 ```
 
 > When authentication is enabled, a client that offers no credentials is rejected during the SOCKS5 handshake (no acceptable method), and HTTP requests receive `407 Proxy Authentication Required`.
@@ -240,7 +276,7 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `PROXY_COOLDOWN_MINUTES` | `0` | After a new session first-bind, other new sessions skip that node for N minutes (`0` = off). Sticky hits ignore cooldown. |
 | `DEFAULT_REGION` | empty | Optional default region for requests without `-region-`. |
 | `ALLOWED_COUNTRIES` | empty | Comma-separated allowlist; takes priority when set. |
-| `BLOCKED_COUNTRIES` | empty | Comma-separated denylist used only when allowlist is empty. |
+| `BLOCKED_COUNTRIES` | `CN` when unset; empty when explicitly set to blank | Comma-separated denylist used only when allowlist is empty. Set `BLOCKED_COUNTRIES=` to disable the default denylist. |
 | `HEALTH_CHECK_INTERVAL` | `5` | Health-check interval in minutes. |
 | `MAX_RETRY` | `3` | Retry count for failed upstream attempts. |
 | `SINGBOX_PATH` | `sing-box` | `sing-box` binary path. |
@@ -368,6 +404,7 @@ Real end-to-end proxy verification needs actual upstream nodes or subscriptions.
 
 - [POOL_DESIGN.md](POOL_DESIGN.md): legacy architecture note for the removed pool design.
 - [GEO_FILTER.md](GEO_FILTER.md): current country filter and region-routing notes.
+- [docs/READONLY_API_DESIGN.md](docs/READONLY_API_DESIGN.md): API Key authenticated read-only node API.
 - [test/README.md](test/README.md): proxy test scripts.
 
 ## Acknowledgment / 致谢

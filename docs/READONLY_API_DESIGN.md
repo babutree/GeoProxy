@@ -1,6 +1,6 @@
 # 只读节点 API 设计（对外开放，API Key 鉴权）
 
-> 状态：设计稿，待评审后实现。
+> 状态：阶段 A 已实现（nodes / occupancy / ping / API Key 管理 / WebUI 开放 API 页）。
 > 目标：让外部程序用 API Key 拉取全部节点的 `协议 / IP / 端口 / 区域 / 纯净度 / AI 解锁 / CF 解锁` 等信息。
 > 边界：本设计只加"读"，不改选路、不改订阅转发、不改现有 WebUI 鉴权。
 
@@ -61,8 +61,20 @@
 - 传递：请求头 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。
 - 校验：常量时间比较（`crypto/subtle`），命中任一未禁用 key 即通过。
 - 生成/吊销：复用现有随机凭据逻辑；管理入口本轮先给最小实现（见 §7），首次可用环境变量 `READONLY_API_KEYS`（逗号分隔明文，仅首启导入后转存 hash）注入。
-- 只读：这些 key **只能访问 `GET /api/v1/nodes`**，不能触碰任何写接口或 WebUI 接口。
+- 只读：这些 key 只能访问 `GET /api/v1/nodes`、`GET /api/v1/occupancy` 和 `GET /api/v1/ping`，不能触碰任何写接口或 WebUI 管理接口。
 - 限流：默认 **60 req/min/key**（令牌桶，内存），配置项 `READONLY_API_RATE_PER_MIN` 可调；命中返回 429。推荐调用方轮询间隔 **5–10 分钟**（对齐健康检查 `HealthIntervalMinutes` 默认 5，数据最快 5 分钟才变一次）——推荐间隔与硬限流是两个独立概念，硬限流仅防刷爆、不干扰正常按需拉取。
+
+### 3.1 配置与限流
+
+- `PUBLIC_HOST`、`READONLY_API_KEYS` 和 `READONLY_API_RATE_PER_MIN` 只在首次启动、尚无 `config.json` 时导入。已有配置以 `config.json` 为准。
+- 限流器在进程启动后按已保存的 `ReadOnlyAPIRatePerMin` 固定速率；修改该值后需要重启服务才会生效。
+- 每个 API Key 独立维护令牌桶。空闲桶会定期清理，桶数量达到上限时拒绝创建新桶，避免未受限的内存增长。
+
+### 3.2 API Key 生命周期
+
+- 管理员可在 WebUI 设置页创建、吊销和删除 API Key；创建响应中的明文 Key 仅显示一次。
+- Key 名称不能为空。服务只持久化 Key 的 SHA-256 哈希，并使用常量时间比较验证请求。
+- 已有 Key 保持兼容；新旧 Key 都使用同一哈希格式。
 
 ## 4. 端点
 
@@ -86,12 +98,22 @@
 
 默认（不传 `status`）：仅 `active/degraded && !user_paused && fail_count<3`，与选路口径一致。
 
+稳定契约：
+
+- `limit` 不传时默认 500；显式传入时必须是 `1..2000` 的整数。
+- `offset` 不传时默认 0；显式传入时必须是非负整数。
+- `max_abuse` 显式传入时必须是 `0..1` 的数字；未探测纯净度（`ipapiis_score=-1`）不通过该过滤。
+- `cf` 只接受空值、`open`、`blocked`。
+- `status` 只接受空值或 `all`；空值表示默认可用节点过滤。
+- `connect` 只接受空值、`direct`、`gateway`。
+- 上述参数非法时返回 HTTP 400，不静默忽略。
+
 ### 响应
 
 ```jsonc
 {
-  "total": 1234,          // 过滤后总数（用于分页）
-  "count": 100,           // 本页条数
+  "total": 1234,          // 所有查询过滤条件（含 connect）命中后的分页前总数
+  "count": 100,           // 当前页条数
   "nodes": [
     {
       "id": 42,
@@ -140,7 +162,7 @@
         "host": "203.0.113.200",     // 服务器公网 IP（覆盖/探测得来；取不到则为空）
         "gateway_socks5_port": 7801,
         "gateway_http_port": 7802,
-        "username_hint": "acct-region-jp-session-<random>",
+        "username_hint": "acct-region-jp-session-api",
         "note": "需网关代理认证；密码见部署配置。host 为空时请用部署域名/请求 Host。"
       },
       "exit_ip": "203.0.113.9",
@@ -157,18 +179,50 @@
 设计要点：
 
 - `connect.mode` 是调用方唯一需要看的"怎么用"开关。
+- `total` 是所有查询过滤条件（包含 `connect`）生效后的分页前总数；`count` 是当前页实际返回节点数量。
 - 直连节点给 `host/port`，程序直接 `protocol://host:port` 用。
-- 加密节点**不暴露** `127.0.0.1:port`（对外无意义），改给网关端口 + DSL 用户名模板；密码不下发（安全）。
+- 加密节点**不暴露** `127.0.0.1:port`（对外无意义），改给网关端口 + 稳定 DSL 用户名提示；密码不下发（安全）。
 - 纯净度保持**原始多字段**，调用方自行定阈值。
 - 未探测一律用 `-1` / `seen=false` / 缺字段表达，不伪造"干净"。
 
+### `GET /api/v1/occupancy`（只读占用快照）
+
+鉴权：API Key。方法：仅 GET。返回每个有活跃绑定的代理节点的占用快照：
+
+```jsonc
+[
+  {
+    "proxy_id": 42,
+    "address": "203.0.113.90:8080",   // 私有/内网地址会被脱敏，见下
+    "active_sessions": 1,
+    "max_sessions": 2,
+    "cooldown_remaining_seconds": 0,
+    "note": ""                          // 脱敏时给出原因说明
+  }
+]
+```
+
+地址脱敏策略：
+
+- 只读端点**绝不下发私有/内网绑定地址**。命中以下任一类别的 `address` 会被替换为 `"gateway-local"`，并在 `note` 标注 `"private/internal address redacted"`：
+  - 环回：IPv4 `127.0.0.0/8`、`localhost`、IPv6 `::1`。
+  - RFC1918：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`。
+  - CGNAT 共享地址空间：`100.64.0.0/10`。
+  - 链路本地：IPv4 `169.254.0.0/16`、IPv6 `fe80::/10`。
+  - IPv6 ULA：`fc00::/7`（含 `fd00::/8`）。
+  - 未指定地址：`0.0.0.0` / `::`。
+  - 非 IP 主机名（无法证明为公网）一律按内网处理并脱敏。
+- **公网地址原样返回**，`note` 为空，方便调用方使用。
+- 脱敏仅施加于只读端点 `apiV1Occupancy`；`buildProxyOccupancyRows` 本身不改，因此**管理端 `/api/proxy-occupancy`（session+CSRF）行为不变，仍显示真实绑定地址**（运维需要看真实拓扑）。这是"读写口径不同"的显式决策，不是回退或降级。
+
 ## 5. 安全边界
 
-- API Key 只读，物理隔离于写接口：写接口继续走 `authMiddleware`（session+CSRF），API Key 不被 `authMiddleware` 接受，只读接口不接受 session-only 无 key 的程序访问（浏览器带 session 也可访问，方便调试）。
+- API Key 只读，物理隔离于写接口：写接口继续走 `authMiddleware`（session+CSRF），API Key 不被 `authMiddleware` 接受；只读接口始终要求 API Key，单独的 WebUI session 不足以访问。
 - **绝不下发**：WebUI 密码、代理认证密码、API Key 明文、订阅原始 URL/凭据。
 - tunnel 节点绝不下发 `127.0.0.1:port`（避免误导 + 轻微信息泄露）。
+- 只读 occupancy 端点绝不下发私有/内网绑定地址（环回 / RFC1918 / CGNAT 100.64/10 / 链路本地 / IPv6 ULA / 未指定），一律脱敏为 `gateway-local`；仅公网地址可见。管理端 `/api/proxy-occupancy` 不受此脱敏影响，仍显示真实地址。
 - key hash 存储，明文只在创建时返回一次。
-- 限流防拉爆；`LastUsedAt` 记录便于吊销排查。
+- 限流防拉爆；`LastUsedAt` 用于运行期的吊销排查，每次请求不会立即写入 `config.json`。
 
 ## 6. TDD 测试矩阵（实现阶段）
 
@@ -185,17 +239,21 @@ webui（api key）：
 - `TestReadOnlyAPINeverLeaksSecrets`：响应不含密码/URL/明文 key/`127.0.0.1`。
 - `TestNodesAPITunnelNodeReportsGatewayConnect`：加密节点 `connect.mode=gateway` 且无 `127.0.0.1`。
 - `TestNodesAPIDirectNodeReportsDirectConnect`：直连节点 `connect.mode=direct` 且 host=真实 IP。
+- `TestV1OccupancyHidesLoopbackAddress`：只读 occupancy 环回地址脱敏为 `gateway-local`。
+- `TestV1OccupancyHidesPrivateAndInternalAddresses`：RFC1918 / CGNAT / 链路本地 / IPv6 ULA / IPv6 环回 / IPv6 链路本地 均不下发原始地址。
+- `TestV1OccupancyShowsPublicAddress`：公网地址原样返回、无脱敏 note。
+- `TestAdminOccupancyStillExposesPrivateAddress`：管理端 `/api/proxy-occupancy` 仍显示真实私有地址（读写口径分离，管理端行为不变）。
 
 config：
 - `TestReadOnlyAPIKeyHashRoundTrip`：明文不落盘、hash 校验通过、禁用 key 失效。
 
 ## 7. 实现分期
 
-- **阶段 A（本轮实现，全套 TDD + 回归）**：
-  - config：`APIKey` 结构（ID/Name/Hash/CreatedAt/LastUsedAt/Disabled）+ hash 存取 + `READONLY_API_KEYS` 首启导入 + `PublicHost`/`PUBLIC_HOST` 覆盖 + `READONLY_API_RATE_PER_MIN`。
-  - storage：`ListNodesForAPI(filter)` 过滤 + 稳定分页。
-  - webui 只读：`apiKeyMiddleware`、`GET /api/v1/nodes`、`connect` 视图组装（direct/gateway）、限流、脱敏。
-  - webui 管理：API Key 写接口（创建返回一次性明文 / 命名 / 吊销·禁用 / 列出含 LastUsed，均走 session+CSRF）+ 前端 UI（设置页新增「API 密钥」区块）。
+- **阶段 A（已完成）**：
+  - config：`APIKey` + hash 存取 + `READONLY_API_KEYS` 首启导入 + `PublicHost`/`PUBLIC_HOST` + `READONLY_API_RATE_PER_MIN`。
+  - storage：`ListNodesForAPI(filter)`。
+  - webui 只读：`apiKeyMiddleware`、`GET /api/v1/nodes`、`GET /api/v1/occupancy`、`GET /api/v1/ping`、`connect` 组装与过滤、限流、脱敏。
+  - webui 管理：API Key CRUD（session+CSRF）+ 设置页 UI +「开放 API」tab。
 - **阶段 B（后续，可选）**：Key 过期时间、按 Key 的用量统计、IP allowlist。
 
 ## 8. 不做 / 明确排除

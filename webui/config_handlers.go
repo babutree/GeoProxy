@@ -17,7 +17,7 @@ var configSave = config.Save
 
 // apiConfig 获取配置
 func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := config.Get()
+	cfg := s.configSnapshot()
 
 	jsonOK(w, map[string]interface{}{
 		"http_port":           cfg.HTTPPort,
@@ -74,8 +74,11 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 更新配置
-	oldCfg := *config.Get()
+	// 配置保存和 API Key 操作共用同一个临界区，避免旧配置快照覆盖并发的 Key 变更。
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	oldCfg := *s.cfg
 	if portChanged(req.HTTPPort, oldCfg.HTTPPort) || portChanged(req.SOCKS5Port, oldCfg.SOCKS5Port) || portChanged(req.WebUIPort, oldCfg.WebUIPort) {
 		jsonError(w, "port fields are read-only at runtime and require restart", http.StatusBadRequest)
 		return
@@ -102,7 +105,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
-	*s.cfg = newCfg
+	s.cfg = &newCfg
 	s.affinity.SetTTL(time.Duration(newCfg.SessionTTLMinutes) * time.Minute)
 	if err := s.applyCountryFilters(&newCfg); err != nil {
 		log.Printf("[webui] apply country filters failed: %v", err)
@@ -110,7 +113,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 			// 磁盘/全局无法回滚时，保留已成功落盘的新配置运行态，避免 s.cfg/affinity 与 config.Get()/磁盘分裂。
 			log.Printf("[webui] rollback config after country filter failure failed: %v", rollbackErr)
 		} else {
-			*s.cfg = oldCfg
+			s.cfg = &oldCfg
 			s.affinity.SetTTL(time.Duration(oldCfg.SessionTTLMinutes) * time.Minute)
 		}
 		jsonError(w, "failed to apply country filters", http.StatusInternalServerError)

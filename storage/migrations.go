@@ -256,8 +256,23 @@ func requireRowsAffected(rowsAffected int64, err error) error {
 }
 
 func (s *Storage) addProxyColumnIfMissing(name, alterSQL string) error {
+	return addProxyColumnIfMissing(s.db, name, alterSQL)
+}
+
+type sqlExecutor interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+type sqlQueryer interface {
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+func addProxyColumnIfMissing(db interface {
+	sqlExecutor
+	sqlQueryer
+}, name, alterSQL string) error {
 	var exists int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('proxies') WHERE name = ?`, name).Scan(&exists)
+	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('proxies') WHERE name = ?`, name).Scan(&exists)
 	if err != nil {
 		return fmt.Errorf("check proxies.%s column: %w", name, err)
 	}
@@ -265,7 +280,7 @@ func (s *Storage) addProxyColumnIfMissing(name, alterSQL string) error {
 		return nil
 	}
 	log.Printf("[storage] migrating: adding %s column", name)
-	if _, err := s.db.Exec(alterSQL); err != nil {
+	if _, err := db.Exec(alterSQL); err != nil {
 		return fmt.Errorf("add proxies.%s column: %w", name, err)
 	}
 	return nil

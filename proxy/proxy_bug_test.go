@@ -1002,6 +1002,22 @@ func (s *fakeProxyStore) RecordProxyUseByID(id int64, success bool) error {
 	return nil
 }
 
+func (s *fakeProxyStore) RecordProxyFailureByID(id int64, threshold int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	proxy, ok := s.proxies[id]
+	if !ok {
+		return fmt.Errorf("proxy id %d not found", id)
+	}
+	proxy.UseCount++
+	proxy.FailCount++
+	if proxy.FailCount >= threshold {
+		proxy.Status = "disabled"
+	}
+	s.proxies[id] = proxy
+	return nil
+}
+
 func (s *fakeProxyStore) DisableProxyByID(id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

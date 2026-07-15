@@ -43,23 +43,23 @@ func dataDir() string {
 func ConfigFile() string { return dataDir() + "config.json" }
 
 type Config struct {
-	HTTPPort               string
-	SOCKS5Port             string
-	WebUIPort              string
-	WebUIPasswordHash      string
-	ProxyAuthEnabled       bool
-	ProxyAuthUsername      string
-	ProxyAuthPassword      string
-	ProxyAuthPasswordHash  string
-	SessionTTLMinutes      int
+	HTTPPort              string
+	SOCKS5Port            string
+	WebUIPort             string
+	WebUIPasswordHash     string
+	ProxyAuthEnabled      bool
+	ProxyAuthUsername     string
+	ProxyAuthPassword     string
+	ProxyAuthPasswordHash string
+	SessionTTLMinutes     int
 	// MaxSessionsPerProxy limits concurrent sticky sessions per proxy node.
 	// 0 means unlimited (default, backward compatible). Values < 0 are rejected on Save.
 	MaxSessionsPerProxy int
 	// ProxyCooldownMinutes is the quiet period after a new session first-bind
 	// during which other new sessions must not bind the same proxy.
 	// 0 disables cooldown (default). Values < 0 are rejected on Save.
-	ProxyCooldownMinutes int
-	DefaultRegion        string
+	ProxyCooldownMinutes   int
+	DefaultRegion          string
 	BlockedCountries       []string
 	AllowedCountries       []string
 	DBPath                 string
@@ -76,6 +76,12 @@ type Config struct {
 	SingBoxBasePort        int
 	SingBoxShardCount      int
 	MaxRetry               int
+	// ReadOnlyAPIKeys holds read-only API credentials as SHA-256 hashes only (never plaintext).
+	ReadOnlyAPIKeys []APIKey
+	// PublicHost is an optional public hostname/IP override for external connect.host.
+	PublicHost string
+	// ReadOnlyAPIRatePerMin is the per-key rate limit for the read-only API (default 60).
+	ReadOnlyAPIRatePerMin int
 }
 
 var (
@@ -111,10 +117,10 @@ func DefaultConfig() *Config {
 		WebUIPort:              envPort("WEBUI_PORT", ":7800"),
 		ProxyAuthEnabled:       true,
 		ProxyAuthUsername:      "acct",
-		SessionTTLMinutes:    envInt("SESSION_TTL_MINUTES", 10),
-		MaxSessionsPerProxy:  envIntNonNegative("MAX_SESSIONS_PER_PROXY", 0),
-		ProxyCooldownMinutes: envIntNonNegative("PROXY_COOLDOWN_MINUTES", 0),
-		DefaultRegion:        NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
+		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 10),
+		MaxSessionsPerProxy:    envIntNonNegative("MAX_SESSIONS_PER_PROXY", 0),
+		ProxyCooldownMinutes:   envIntNonNegative("PROXY_COOLDOWN_MINUTES", 0),
+		DefaultRegion:          NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
 		BlockedCountries:       envCountriesDefault("BLOCKED_COUNTRIES", []string{"CN"}),
 		AllowedCountries:       envCountries("ALLOWED_COUNTRIES"),
 		DBPath:                 dataDir() + "proxy.db",
@@ -131,13 +137,19 @@ func DefaultConfig() *Config {
 		SingBoxBasePort:        20000,
 		SingBoxShardCount:      envInt("SINGBOX_SHARD_COUNT", 4),
 		MaxRetry:               envInt("MAX_RETRY", 3),
+		PublicHost:             strings.TrimSpace(os.Getenv("PUBLIC_HOST")),
+		ReadOnlyAPIRatePerMin:  envInt("READONLY_API_RATE_PER_MIN", 60),
 	}
 }
 
 func Load() *Config {
 	cfg := DefaultConfig()
 	data, err := os.ReadFile(ConfigFile())
-	if err == nil {
+	hasPersistedConfig := err == nil
+	if hasPersistedConfig {
+		// 已落盘配置是权威来源，不能被部署环境中的旧只读 API 变量覆盖。
+		cfg.PublicHost = ""
+		cfg.ReadOnlyAPIRatePerMin = 60
 		var saved savedConfig
 		if err := json.Unmarshal(data, &saved); err != nil {
 			panic(fmt.Sprintf("load config: parse %s: %v", ConfigFile(), err))
@@ -147,8 +159,18 @@ func Load() *Config {
 
 	// 首次启动引导：config.json 尚无凭据时，生成随机凭据并落盘。
 	// 明文仅保存在 firstBoot 供日志一次性展示，不写入磁盘明文（磁盘只存 hash）。
-	if cfg.WebUIPasswordHash == "" || cfg.ProxyAuthPasswordHash == "" {
+	needBootstrap := cfg.WebUIPasswordHash == "" || cfg.ProxyAuthPasswordHash == ""
+	if needBootstrap {
 		bootstrapCredentials(cfg)
+	}
+
+	if !hasPersistedConfig {
+		imported := importReadOnlyAPIKeysFromEnv(cfg)
+		if imported {
+			if err := Save(cfg); err != nil {
+				panic(fmt.Sprintf("persist readonly api keys: %v", err))
+			}
+		}
 	}
 
 	cfgMu.Lock()
@@ -189,25 +211,29 @@ func Get() *Config {
 }
 
 type savedConfig struct {
-	HTTPPort              string   `json:"http_port,omitempty"`
-	SOCKS5Port            string   `json:"socks5_port,omitempty"`
-	WebUIPort             string   `json:"webui_port,omitempty"`
-	WebUIPasswordHash     string   `json:"webui_password_hash,omitempty"`
-	ProxyAuthEnabled      *bool    `json:"proxy_auth_enabled,omitempty"`
-	ProxyAuthUsername     string   `json:"proxy_auth_username,omitempty"`
-	ProxyAuthPassword     string   `json:"proxy_auth_password,omitempty"`
-	ProxyAuthPasswordHash string   `json:"proxy_auth_password_hash,omitempty"`
-	SessionTTLMinutes int `json:"session_ttl_minutes,omitempty"`
+	HTTPPort              string `json:"http_port,omitempty"`
+	SOCKS5Port            string `json:"socks5_port,omitempty"`
+	WebUIPort             string `json:"webui_port,omitempty"`
+	WebUIPasswordHash     string `json:"webui_password_hash,omitempty"`
+	ProxyAuthEnabled      *bool  `json:"proxy_auth_enabled,omitempty"`
+	ProxyAuthUsername     string `json:"proxy_auth_username,omitempty"`
+	ProxyAuthPassword     string `json:"proxy_auth_password,omitempty"`
+	ProxyAuthPasswordHash string `json:"proxy_auth_password_hash,omitempty"`
+	SessionTTLMinutes     int    `json:"session_ttl_minutes,omitempty"`
 	// pointer so 0 (unlimited / disabled) can be distinguished from "field absent"
-	MaxSessionsPerProxy  *int    `json:"max_sessions_per_proxy,omitempty"`
-	ProxyCooldownMinutes *int    `json:"proxy_cooldown_minutes,omitempty"`
-	DefaultRegion        string  `json:"default_region,omitempty"`
+	MaxSessionsPerProxy   *int     `json:"max_sessions_per_proxy,omitempty"`
+	ProxyCooldownMinutes  *int     `json:"proxy_cooldown_minutes,omitempty"`
+	DefaultRegion         string   `json:"default_region,omitempty"`
 	HealthIntervalMinutes int      `json:"health_check_interval,omitempty"`
 	MaxRetry              *int     `json:"max_retry,omitempty"`
 	SingBoxPath           string   `json:"singbox_path,omitempty"`
 	SingBoxShardCount     int      `json:"singbox_shard_count,omitempty"`
 	BlockedCountries      []string `json:"blocked_countries,omitempty"`
 	AllowedCountries      []string `json:"allowed_countries,omitempty"`
+	ReadOnlyAPIKeys       []APIKey `json:"readonly_api_keys,omitempty"`
+	PublicHost            string   `json:"public_host,omitempty"`
+	// pointer so a non-default rate can round-trip; absent means keep DefaultConfig value
+	ReadOnlyAPIRatePerMin *int `json:"readonly_api_rate_per_min,omitempty"`
 }
 
 func Save(cfg *Config) error {
@@ -225,6 +251,7 @@ func saveConfig(cfg *Config, replace func(string, string) error) error {
 	maxRetry := cfg.MaxRetry
 	maxSessions := cfg.MaxSessionsPerProxy
 	cooldown := cfg.ProxyCooldownMinutes
+	ratePerMin := cfg.ReadOnlyAPIRatePerMin
 	data, err := json.MarshalIndent(savedConfig{
 		HTTPPort:              cfg.HTTPPort,
 		SOCKS5Port:            cfg.SOCKS5Port,
@@ -244,6 +271,9 @@ func saveConfig(cfg *Config, replace func(string, string) error) error {
 		SingBoxShardCount:     cfg.SingBoxShardCount,
 		BlockedCountries:      NormalizeCountryCodes(cfg.BlockedCountries),
 		AllowedCountries:      NormalizeCountryCodes(cfg.AllowedCountries),
+		ReadOnlyAPIKeys:       cfg.ReadOnlyAPIKeys,
+		PublicHost:            strings.TrimSpace(cfg.PublicHost),
+		ReadOnlyAPIRatePerMin: &ratePerMin,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -360,6 +390,13 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 	}
 	if saved.AllowedCountries != nil {
 		cfg.AllowedCountries = NormalizeCountryCodes(saved.AllowedCountries)
+	}
+	if saved.ReadOnlyAPIKeys != nil {
+		cfg.ReadOnlyAPIKeys = saved.ReadOnlyAPIKeys
+	}
+	cfg.PublicHost = strings.TrimSpace(saved.PublicHost)
+	if saved.ReadOnlyAPIRatePerMin != nil && *saved.ReadOnlyAPIRatePerMin > 0 {
+		cfg.ReadOnlyAPIRatePerMin = *saved.ReadOnlyAPIRatePerMin
 	}
 }
 

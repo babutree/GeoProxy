@@ -34,12 +34,19 @@ type Store interface {
 }
 
 func Pick(store Store, region string, excludes []int64) (*storage.Proxy, error) {
+	return PickUnlock(store, region, excludes, nil)
+}
+
+// PickUnlock 在地域选路基础上叠加 unlock 过滤（openai/claude/grok/gemini/cf）。
+// unlock 为空时与 Pick 完全一致。
+func PickUnlock(store Store, region string, excludes []int64, unlock []string) (*storage.Proxy, error) {
 	region = normalizeRegion(region)
 	proxies, err := store.GetByRegion(region, excludes)
 	if err != nil {
 		return nil, err
 	}
 	available := availableProxies(proxies)
+	available = filterByUnlock(available, unlock)
 	if len(available) == 0 {
 		return nil, noNodeError(region)
 	}
@@ -48,14 +55,14 @@ func Pick(store Store, region string, excludes []int64) (*storage.Proxy, error) 
 
 func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, error) {
 	if route.Session == "" {
-		return Pick(store, route.Region, excludes)
+		return PickUnlock(store, route.Region, excludes, route.Unlock)
 	}
 	// Sticky fast path: no first-bind lock (read + refresh only).
 	if proxy, ok := stickyBoundProxy(store, sessions, route, excludes); ok {
 		return proxy, nil
 	}
 	if sessions == nil {
-		return pickForSession(store, nil, route.Region, route.Session, excludes, maxSessionsPerProxy(), proxyCooldownMinutes())
+		return pickForSession(store, nil, route.Region, route.Session, excludes, maxSessionsPerProxy(), proxyCooldownMinutes(), route.Unlock)
 	}
 
 	// First-bind / rebind: serialize check + occupancy release + pick + write.
@@ -68,7 +75,7 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 	rebindRegion := releaseStaleBinding(sessions, route, excludes)
 	maxSessions := maxSessionsPerProxy()
 	cooldownMinutes := proxyCooldownMinutes()
-	proxy, err := pickForSession(store, sessions, rebindRegion, route.Session, excludes, maxSessions, cooldownMinutes)
+	proxy, err := pickForSession(store, sessions, rebindRegion, route.Session, excludes, maxSessions, cooldownMinutes, route.Unlock)
 	if err != nil {
 		return nil, err
 	}
@@ -87,13 +94,14 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 // 不同 session 分散到不同节点，同时把候选限制在最快的 K 个以保证出口质量。
 // maxSessions > 0 时过滤 occupancy >= max 的节点；0 表示不限制。
 // cooldownMinutes > 0 时过滤 InCooldown 节点；0 表示忽略冷却表（读侧关闭）。
-func pickForSession(store Store, sessions *affinity.Store, region, session string, excludes []int64, maxSessions, cooldownMinutes int) (*storage.Proxy, error) {
+func pickForSession(store Store, sessions *affinity.Store, region, session string, excludes []int64, maxSessions, cooldownMinutes int, unlock []string) (*storage.Proxy, error) {
 	region = normalizeRegion(region)
 	proxies, err := store.GetByRegion(region, excludes)
 	if err != nil {
 		return nil, err
 	}
 	available := availableProxies(proxies)
+	available = filterByUnlock(available, unlock)
 	if len(available) == 0 {
 		return nil, noNodeError(region)
 	}
@@ -216,6 +224,10 @@ func stickyBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedUs
 	}
 	proxy, err := store.GetProxyByID(binding.ProxyID)
 	if err != nil || proxy == nil || !proxyAvailable(*proxy) || regionMismatch(proxy.Region, route.Region) {
+		return nil, false
+	}
+	// sticky 绑定也必须满足当前 unlock 过滤，否则释放并重新选路。
+	if !proxyMatchesUnlock(*proxy, route.Unlock) {
 		return nil, false
 	}
 	return proxy, true

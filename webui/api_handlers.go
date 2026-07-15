@@ -30,15 +30,16 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	if s.affinity != nil {
 		activeSessions = s.affinity.Count()
 	}
+	cfg := s.configSnapshot()
 	jsonOK(w, map[string]interface{}{
 		"total":              total,
 		"http":               httpCount,
 		"socks5":             socks5Count,
 		"subscription_count": subscriptionCount,
 		"active_sessions":    activeSessions,
-		"http_port":          s.cfg.HTTPPort,
-		"socks5_port":        s.cfg.SOCKS5Port,
-		"webui_port":         s.cfg.WebUIPort,
+		"http_port":          cfg.HTTPPort,
+		"socks5_port":        cfg.SOCKS5Port,
+		"webui_port":         cfg.WebUIPort,
 	})
 }
 

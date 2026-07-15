@@ -1,6 +1,9 @@
 package auth
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestParseUsername(t *testing.T) {
 	tests := []struct {
@@ -42,7 +45,7 @@ func TestParseUsername(t *testing.T) {
 				t.Fatalf("ParseUsername(%q) returned error: %v", tt.raw, err)
 			}
 
-			if got != tt.want {
+			if got.Base != tt.want.Base || got.Region != tt.want.Region || got.Session != tt.want.Session || !reflect.DeepEqual(got.Unlock, tt.want.Unlock) {
 				t.Fatalf("ParseUsername(%q) = %#v, want %#v", tt.raw, got, tt.want)
 			}
 		})

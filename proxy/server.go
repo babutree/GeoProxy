@@ -40,7 +40,7 @@ type Server struct {
 type proxyStore interface {
 	selector.Store
 	RecordProxyUseByID(id int64, success bool) error
-	DisableProxyByID(id int64) error
+	RecordProxyFailureByID(id int64, threshold int) error
 }
 
 // failDisableThreshold 与健康检查一致：连续失败累计到该阈值即禁用节点。
@@ -152,16 +152,21 @@ func withDefaultRegion(route auth.ParsedUsername, defaultRegion string) auth.Par
 	return route
 }
 
-// recordProxyFailure 记录一次失败计数；当累计失败达到阈值时禁用节点，
-// 使其从 active 转为 disabled（管理界面可见、可显式恢复），而不是停留在
-// “active 但被选路/健康检查静默排除”的僵尸态。见 BUG-53。
-// p.FailCount 是本次选路时读取的旧值，本次失败后有效计数为 p.FailCount+1，
-// 与健康检查路径 (health_checker.go) 的判断口径一致。
 func recordProxyFailure(store proxyStore, p *storage.Proxy) {
-	store.RecordProxyUseByID(p.ID, false)
-	if p.FailCount+1 >= failDisableThreshold {
-		store.DisableProxyByID(p.ID)
+	if err := store.RecordProxyFailureByID(p.ID, failDisableThreshold); err != nil {
+		log.Printf("[proxy] 记录节点失败次数失败 id=%d: %v", p.ID, err)
 	}
+}
+
+// releaseFailedBinding 在拨号/转发失败后，若该 session 仍绑定到刚失败的节点，
+// 则释放绑定，使后续请求重新选路并尊重 cooldown/健康过滤，而不是经 stickyBoundProxy
+// 粘死在坏节点上。
+// 只在绑定确实指向本次失败节点时释放，避免误删已被其它请求重绑的会话。
+func (s *Server) releaseFailedBinding(route auth.ParsedUsername, p *storage.Proxy) {
+	if route.Session == "" || s.sessions == nil {
+		return
+	}
+	s.sessions.RemoveIfProxyID(route.Session, p.ID)
 }
 
 // handleHTTP 处理普通 HTTP 请求（带自动重试）
@@ -195,6 +200,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		client, err := s.buildClient(p)
 		if err != nil {
 			recordProxyFailure(s.storage, p)
+			s.releaseFailedBinding(route, p)
 			if !replayable {
 				// body 不可重放（已消费/流式），无法重试。
 				http.Error(w, "all proxies failed", http.StatusBadGateway)
@@ -219,6 +225,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		if err != nil {
 			log.Printf("[proxy] %s via %s failed", r.RequestURI, p.Address)
 			recordProxyFailure(s.storage, p)
+			s.releaseFailedBinding(route, p)
 			if !replayable {
 				// body 已在本次尝试中被消费，不能重放，直接失败。
 				http.Error(w, "all proxies failed", http.StatusBadGateway)
@@ -261,7 +268,12 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 	req.Header = r.Header.Clone()
 	cleanForwardHeaders(req.Header)
 
-	client := &http.Client{Timeout: time.Duration(s.cfg.ValidateTimeout) * time.Second}
+	client := &http.Client{
+		Timeout: time.Duration(s.cfg.ValidateTimeout) * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[proxy] %s direct (bypass upstream) failed: %v", r.RequestURI, err)
@@ -302,6 +314,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 		if err != nil {
 			log.Printf("[tunnel] dial %s via %s failed", r.Host, p.Address)
 			recordProxyFailure(s.storage, p)
+			s.releaseFailedBinding(route, p)
 			continue
 		}
 
@@ -464,6 +477,14 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 		}
 		return &bufferedConn{Conn: conn, reader: reader}, nil
 	case "socks5":
+		// 出站 SOCKS5 域名字段长度只有 1 字节（最大 255）。域名 >255 时
+		// byte(len(host)) 会截断，向上游发出长度字段错误的损坏帧。
+		// 在拨号前显式拒绝，返回明确错误而非静默截断。
+		if targetHost, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+			if net.ParseIP(targetHost) == nil && len(targetHost) > 255 {
+				return nil, fmt.Errorf("socks5 domain too long: %d bytes (max 255)", len(targetHost))
+			}
+		}
 		// Manual SOCKS5 handshake so ValidateTimeout can bound the silent-upstream case
 		// (golang.org/x/net/proxy has no per-handshake SetDeadline).
 		dialer := &net.Dialer{Timeout: timeout}

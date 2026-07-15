@@ -106,9 +106,12 @@ func TestAddManualNodeTunnel(t *testing.T) {
 	}
 
 	// 端口合并（缺陷5）：单 mixed 端口 → 每个加密节点只入库一行（socks5 协议），不再有独立 HTTP 行。
-	count, err := store.CountBySource(storage.SourceManual)
-	if err != nil {
-		t.Fatalf("CountBySource() error = %v", err)
+	// 手工节点默认 disabled 待验证，不能用只计 active 的 CountBySource。
+	var count int
+	if err := store.GetDB().QueryRow(
+		`SELECT COUNT(*) FROM proxies WHERE source = ?`, storage.SourceManual,
+	).Scan(&count); err != nil {
+		t.Fatalf("count manual proxies: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("manual proxies = %d, want 1 (单 mixed 端口)", count)
@@ -122,6 +125,9 @@ func TestAddManualNodeTunnel(t *testing.T) {
 	}
 	if proxy.Protocol != "socks5" || proxy.Region != "jp" || proxy.Source != storage.SourceManual {
 		t.Fatalf("proxy = %q/%q/%q, want socks5/jp/manual", proxy.Protocol, proxy.Region, proxy.Source)
+	}
+	if proxy.Status != "disabled" {
+		t.Fatalf("tunnel manual status = %q, want disabled until validation", proxy.Status)
 	}
 }
 

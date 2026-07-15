@@ -28,6 +28,23 @@ func TestCountByProxyRemoveDecrements(t *testing.T) {
 	}
 }
 
+func TestRemoveIfProxyIDPreservesReboundSession(t *testing.T) {
+	store := NewWithClock(10*time.Minute, time.Now)
+	store.SetProxy("s1", 1, "us-a:8080", "us")
+
+	if !store.RemoveIfProxyID("s1", 1) {
+		t.Fatal("RemoveIfProxyID() = false, want old binding removed")
+	}
+	store.SetProxy("s1", 2, "us-b:8080", "us")
+	if store.RemoveIfProxyID("s1", 1) {
+		t.Fatal("RemoveIfProxyID() removed rebound session with a different proxy ID")
+	}
+	binding, ok := store.Get("s1")
+	if !ok || binding.ProxyID != 2 {
+		t.Fatalf("binding = %#v, %v; want proxy 2", binding, ok)
+	}
+}
+
 func TestCountByProxyTTLExpiryReleasesOccupancy(t *testing.T) {
 	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
 	store := NewWithClock(10*time.Minute, func() time.Time { return now })

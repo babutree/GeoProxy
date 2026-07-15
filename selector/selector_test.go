@@ -181,11 +181,11 @@ func TestPickForSessionStableForSharedAddressAcrossInputOrder(t *testing.T) {
 	first := storage.Proxy{ID: 10, Address: "shared:8080", Region: "us", Latency: 10, Status: "active"}
 	second := storage.Proxy{ID: 20, Address: "shared:8080", Region: "us", Latency: 10, Status: "active"}
 
-	pickedA, err := pickForSession(fakeStore{proxies: []storage.Proxy{first, second}}, nil, "us", "stable", nil, 0, 0)
+	pickedA, err := pickForSession(fakeStore{proxies: []storage.Proxy{first, second}}, nil, "us", "stable", nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("first pickForSession() error = %v", err)
 	}
-	pickedB, err := pickForSession(fakeStore{proxies: []storage.Proxy{second, first}}, nil, "us", "stable", nil, 0, 0)
+	pickedB, err := pickForSession(fakeStore{proxies: []storage.Proxy{second, first}}, nil, "us", "stable", nil, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("second pickForSession() error = %v", err)
 	}

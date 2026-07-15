@@ -14,12 +14,14 @@ import (
 )
 
 const (
-	proxyHost    = "127.0.0.1"
 	testURL      = "http://ip-api.com/json/?fields=countryCode,query"
 	delaySeconds = 1
 )
 
-var proxyPort = "7802"
+var (
+	proxyHost = envOrDefault("PROXY_HOST", "127.0.0.1")
+	proxyPort = "7802"
+)
 
 type IPResponse struct {
 	Query       string `json:"query"`
@@ -36,17 +38,17 @@ func countryToEmoji(countryCode string) string {
 	if countryCode == "" {
 		return "🌐"
 	}
-	
+
 	countryCode = strings.ToUpper(countryCode)
 	if len(countryCode) != 2 {
 		return "🌐"
 	}
-	
+
 	// 将国家代码转换为 emoji
 	// A=127462, 所以 'US' -> 🇺🇸
 	first := rune(countryCode[0]) - 'A' + 127462
 	second := rune(countryCode[1]) - 'A' + 127462
-	
+
 	return string([]rune{first, second})
 }
 
@@ -63,11 +65,44 @@ func printStats() {
 	os.Exit(0)
 }
 
+func envOrDefault(key, defaultValue string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func proxyAuthUsername() string {
+	username := strings.TrimSpace(os.Getenv("GOPROXY_AUTH_USERNAME"))
+	if region := strings.TrimSpace(os.Getenv("GOPROXY_AUTH_REGION")); region != "" {
+		username += "-region-" + region
+	}
+	if session := strings.TrimSpace(os.Getenv("GOPROXY_AUTH_SESSION")); session != "" {
+		username += "-session-" + session
+	}
+	return username
+}
+
+func requireProxyAuth() (string, string) {
+	username := proxyAuthUsername()
+	password := os.Getenv("GOPROXY_AUTH_PASSWORD")
+	if strings.TrimSpace(os.Getenv("GOPROXY_AUTH_USERNAME")) == "" || password == "" {
+		fmt.Fprintln(os.Stderr, "Missing proxy credentials.")
+		fmt.Fprintln(os.Stderr, "Set GOPROXY_AUTH_USERNAME and GOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings.")
+		fmt.Fprintln(os.Stderr, "Optional: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser")
+		os.Exit(2)
+	}
+	return username, password
+}
+
 func testHTTPProxyContinuous() {
+	username, password := requireProxyAuth()
+
 	fmt.Printf("PROXY %s:%s (%s): continuous mode\n", proxyHost, proxyPort, testURL)
 	fmt.Println()
 
 	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s:%s", proxyHost, proxyPort))
+	proxyURL.User = url.UserPassword(username, password)
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
@@ -113,10 +148,20 @@ func testHTTPProxyContinuous() {
 }
 
 func main() {
+	// --check-auth：仅校验代理认证环境变量后立即退出，不进入持续请求循环。
+	// 缺失凭据时 requireProxyAuth 打印报错并以退出码 2 结束；便于 CI/dry-run。
+	for _, arg := range os.Args[1:] {
+		if arg == "--check-auth" {
+			username, _ := requireProxyAuth()
+			fmt.Printf("proxy auth OK: username=%s\n", username)
+			return
+		}
+	}
+
 	// 支持指定端口号
 	if len(os.Args) > 1 {
 		proxyPort = os.Args[1]
 	}
-	
+
 	testHTTPProxyContinuous()
 }

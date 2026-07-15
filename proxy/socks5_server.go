@@ -114,6 +114,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		if err != nil {
 			log.Printf("[socks5] dial %s via %s (%s) failed: %v", target, p.Address, p.Protocol, err)
 			recordProxyFailure(s.storage, p)
+			s.releaseFailedBinding(route, p)
 			continue
 		}
 
@@ -138,6 +139,13 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	// 所有重试都失败
 	s.sendSOCKS5Reply(clientConn, 0x01) // General failure
 	log.Printf("[socks5] all proxies failed for %s", target)
+}
+
+func (s *SOCKS5Server) releaseFailedBinding(route auth.ParsedUsername, p *storage.Proxy) {
+	if route.Session == "" || s.sessions == nil {
+		return
+	}
+	s.sessions.RemoveIfProxyID(route.Session, p.ID)
 }
 
 // socks5Direct 为内网/本地目标建立直连，不经上游节点。
@@ -446,6 +454,14 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 				req = append(req, ip...)
 			}
 		} else {
+			// 域名长度字段只有 1 字节（最大 255）。域名 >255 时 byte(len(host))
+			// 会截断，向上游发出长度字段错误的损坏帧。
+			// host 来自上面的 net.SplitHostPort(target)，已是纯 host（无端口）。
+			// 在写入前显式拒绝，返回明确错误而非静默截断。
+			if len(host) > 255 {
+				proxyConn.Close()
+				return nil, fmt.Errorf("socks5 domain too long: %d bytes (max 255)", len(host))
+			}
 			req = append(req, 0x03) // Domain
 			req = append(req, byte(len(host)))
 			req = append(req, []byte(host)...)

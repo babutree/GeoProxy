@@ -71,7 +71,7 @@ func (s *countingStore) UpdateProxyExitInfo(int64, string, string, int, float64,
 
 func (s *countingStore) RecordProxyUseByID(int64, bool) error { return nil }
 
-func (s *countingStore) DisableProxyByID(int64) error { return nil }
+func (s *countingStore) RecordProxyFailureByID(int64, int) error { return nil }
 
 // TestRunOnceSkipsWhenAlreadyRunning 复现：两次重叠 RunOnce 会并发跑完探测；
 // 期望后发 RunOnce 在已有检查进行中时直接跳过，避免 fail 计数/禁用双写。

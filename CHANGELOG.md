@@ -29,11 +29,22 @@
   - 订阅自定义请求头（含 User-Agent），用于对默认 UA 返回 401 的订阅源
   - 内网/本地目标直连 bypass（HTTP / CONNECT / SOCKS5）
   - 代理密码可持久化并经已认证 config API 下发，支持前端拼完整 URL
-- **批量导入手工节点**：WebUI「批量导入」与 `POST /api/manual-node/import`；支持多行 `socks5://`/`http://`/`https://`（行尾注释自动剥离），导入前批内去重、跳过已存在 manual 节点，返回 added/skipped/failed 报告
+- **批量导入手工节点**：WebUI「批量导入」与 `POST /api/manual-node/import`；支持多行 `socks5://`/`http://`/`https://`，从行内抽取 URL（前缀/行中/行尾注释均可），导入前批内去重、跳过已存在 manual 节点，返回 added/skipped/failed 报告
 - **节点多选批量删除**：列表勾选 + `POST /api/manual-node/batch-delete`；来源筛选（手工/订阅）
+- **对外开放只读 API（API Key）**
+  - `GET /api/v1/nodes`：节点目录（协议/区域/纯净度/CF/AI、`connect.mode=direct|gateway`）；加密节点走网关入口，不暴露 `127.0.0.1` 本地端口
+  - `GET /api/v1/occupancy`：每节点占用与真实冷却剩余秒数
+  - `GET /api/v1/ping`：鉴权探活
+  - 鉴权：`Authorization: Bearer` 或 `X-API-Key`；密钥仅存 SHA-256 hash；默认限流 60 req/min/key（`READONLY_API_RATE_PER_MIN`）
+  - 配置：`PUBLIC_HOST` 指定网关对外地址；`PUBLIC_HOST` 与 `READONLY_API_KEYS` 仅首次启动时导入
+  - WebUI：设置页 API Key 创建/吊销/删除（明文仅创建时显示一次）；「开放 API」页说明端点与示例 curl
+- **用户名 DSL 解锁过滤**：`<base>[-region-cc][-unlock-token][-session-id]`（顺序固定）；`gpt/claude/gemini/grok/cf/all` 按节点 AI/CF 探测结果过滤选路，无匹配则失败不降级
+- **AI 探测双层信号**：稳定 API（401/缺 key）为主 + OpenAI/Claude/Gemini 产品层明确地区锁/放行指纹为辅；CF 仍单独字段
 
 ### 修复
 
+- 订阅拉取失败会携带 HTTP 状态码与截断、脱敏的响应片段；5xx 与 429 最多短暂重试一次，仍禁止通过上游节点回源。
+- 长期禁用的订阅隧道节点会从 sing-box 运行态移除并释放 mixed 端口；过期探测结果不会写回已被复用的端口。
 - 会话首绑/换绑：容量与冷却检查与写入串行化，并发首绑不再突破 `max_sessions_per_proxy`，冷却也原子生效；同 session 并发 Resolve 不会拆成多节点
 - 手动隧道节点：Reload 成功后 DB 写失败会回滚运行态；删除手工隧道节点同步移出 sing-box（统一走 Manager，通用删除接口不再旁路）
 - 订阅刷新：删除旧代理失败时返回错误，不再继续半刷新/假成功
@@ -45,6 +56,10 @@
 - dual_protocol 置位失败不再静默成功；端口空洞可复用
 - HTTP 入站 SOCKS5 上游握手超时；link-local 不网关直连
 - GetProxyByAddress 同址多身份显式歧义错误；复制凭据 toast 不回显密码
+- 手工节点导入可正确识别带 userinfo 的 `socks5://` / `http://` URL，入库地址只保留 host:port；批量导入说明同步为支持前缀、行内和行尾说明
+- 本地 Bash 测试脚本改为要求显式代理认证环境变量，缺失凭据时清晰报错；配置文档同步首次启动凭据生成与国家黑名单默认值
+- 手工 HTTP/SOCKS 节点入库默认 `disabled`，导入/添加后并发验证（出口/纯净度/CF/AI）通过才 `active`；复制直连节点不再拼接网关 DSL 密码
+- AI 探测：Claude/Grok/Gemini 改为稳定 API 端点，避免官网 HTML 指纹导致大面积误报 ✗；看不懂的响应记未探测（–）而非不可达
 
 - sing-box 重启时端口 bind 竞态（等待旧监听释放后再启动）
 - 端口高水位泄漏与分片端口段超限保护
@@ -62,13 +77,21 @@
 
 ### 变更
 
+- **WebUI 设计语言 v2（Signal）**：重做设计令牌（表面分层、文字层级、accent/signal 信号色、分级 elevation、暗色 hairline 内高光、圆角/间距/字体/动效令牌），旧变量名保留为别名避免回归
+  - 侧边栏新增 PC 可见的显式「收起菜单」折叠按钮（原顶栏小箭头保留），折叠态 localStorage 持久化不变
+  - 深色模式顶栏图标按钮（刷新/GitHub/菜单/折叠）补齐 `background`，不再继承浏览器浅灰底
+  - 「开放 API」导航与页面标题统一改为「API」
+  - 「如何连接」卡片补充 curl 占位符说明（`acct`=认证用户名、`PASSWORD` 须替换为真实密码），出口 IP 提示改写为明确禁止直连、须走网关端口+认证
+  - 节点复制凭据：代理密码为空时用字面量 `PASSWORD` 占位并提示替换，仍不在成功 toast 回显含真实密码的 URL
+  - 节点表 CF / AI 表头统一为图标+短标签；AI 列改用 ✓（可达）/ ✗（不可达）/ –（未探测）紧凑标记，移除渲染异常的品牌 SVG 图标
+  - 全球节点分布地图：新增海洋径向渐变底与经纬网格层、提升陆地对比、节点发光脉冲、会话流动线改用 signal 青色（viewBox 与国家坐标投影不变）
 - 仓库不再跟踪本地专用说明与内部计划类文件（仅保留项目必需文档）
 
 ## [v0.4.1] - 2026-04-04
 
 ### 修复
 
-- 修复发布/部署配置漂移：GHCR 与 Docker Hub 发布命名空间改为 `babutree/goproxy`，Docker Compose 默认数据落点统一为宿主机 `./data`，地域黑名单默认值与 README/PRD 保持为空
+- 修复发布/部署配置漂移：Docker Compose 默认数据落点统一为宿主机 `./data`，地域黑名单默认值与 README/PRD 保持一致
 - 升级 sing-box 从 1.11.8 到 **1.13.5**，修复 anytls 等新协议不支持导致订阅节点启动失败的问题
 - sing-box 启动前新增 `sing-box check` 配置预检，配置无效时输出详细错误而非静默崩溃
 - 捕获 sing-box stderr 输出到 `[sing-box]` 日志，便于排查运行时错误
@@ -194,11 +217,11 @@
 
 - **代理认证功能**
   - HTTP 和 SOCKS5 代理服务支持可选的用户名密码认证
-  - 环境变量配置：`PROXY_AUTH_ENABLED`、`PROXY_AUTH_USERNAME`、`PROXY_AUTH_PASSWORD`
+  - 支持通过环境变量配置代理认证开关、用户名和密码（当前版本改为首次启动生成并落盘）
   - 默认关闭，开启后可保护代理服务不被未授权访问
 
 - **环境变量支持**
-  - `WEBUI_PASSWORD`：自定义 WebUI 管理密码（默认 `goproxy`）
+  - WebUI 管理密码配置（早期版本默认 `goproxy`；当前版本改为首次启动生成并落盘）
   - `DATA_DIR`：自定义数据目录路径（默认当前目录）
   - `BLOCKED_COUNTRIES`：屏蔽特定国家的代理（如 `CN,RU,KP`）
 
@@ -251,6 +274,5 @@
 ## 相关链接
 
 - [项目仓库](https://github.com/babutree/GoProxy)
-- [Docker Hub](https://hub.docker.com/r/babutree/goproxy)
 - [GitHub Container Registry](https://github.com/babutree/GoProxy/pkgs/container/goproxy)
 - [问题反馈](https://github.com/babutree/GoProxy/issues)

@@ -2,22 +2,72 @@ package custom
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"goproxy/config"
 	"goproxy/storage"
 	"goproxy/validator"
+)
+
+// longTermDisabledRetention 禁用满 1 天视为长期禁用，移出 sing-box 释放端口。
+// status=disabled 且 last_check 早于此时长则剔除；last_check 为零视为短期禁用，保留端口供重验证。
+const longTermDisabledRetention = 24 * time.Hour
+
+// 订阅直连拉取失败诊断与有限即时重试；调度退避由 RefreshMin 单独控制。
+const (
+	// subscriptionResponseSnippetMaxBytes 非 200 错误中附带的响应体片段上限。
+	subscriptionResponseSnippetMaxBytes = 512
+	// subscriptionResponseMaxBytes 限制成功响应，避免异常订阅耗尽进程内存。
+	subscriptionResponseMaxBytes int64 = 64 << 20
+	// subscriptionFetchMaxAttempts 单次 fetch 内最大尝试次数（1 次初始 + 最多 1 次重试）。
+	subscriptionFetchMaxAttempts = 2
+	// subscriptionFetchRetryBackoff 5xx/429 重试前的短退避。
+	subscriptionFetchRetryBackoff = 200 * time.Millisecond
+)
+
+// 测试可注入：生产默认走 SSRF 校验与安全拨号；测试可放行 httptest loopback。
+var (
+	subscriptionURLTargetCheck = validateSubscriptionURLTarget
+	subscriptionDialContextFn  = safeSubscriptionDialContext
+	subscriptionFetchSleepFn   = time.Sleep
+)
+
+var unsafeSubscriptionPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001:2::/48"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+var (
+	subscriptionSecretValuePattern = regexp.MustCompile(`(?i)((?:"?(?:token|password|passwd|api[_-]?key|apikey|access[_-]?token|secret|authorization|cookie)"?\s*[:=]\s*["']?))([^"'\s,;&<>]+)`)
+	subscriptionBearerPattern      = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+`)
+	subscriptionUserInfoPattern    = regexp.MustCompile(`(?i)\b((?:https?|socks4|socks5)://)[^/@\s]+@`)
+	subscriptionProxyLinkPattern   = regexp.MustCompile(`(?i)\b(?:ss|ssr|vmess|vless|trojan|hysteria|hysteria2|tuic)://[^\s"'<>]+`)
 )
 
 // Manager 订阅管理器
@@ -28,6 +78,20 @@ type Manager struct {
 	stopCh    chan struct{}
 	stopOnce  sync.Once
 	refreshMu sync.Mutex // 防止并发刷新；Stop 也持有，避免停机与刷新/Reload 交错
+	// longTermEvictedKeys 记录已剔除的长期禁用 NodeKey。
+	// 防止其它订阅刷新 re-fetch 时再次占端口；本订阅下次刷新可重新入池。
+	longTermEvictedKeys map[string]bool
+}
+
+type subscriptionProxyEntry struct {
+	addr  string
+	proto string
+	dual  bool
+}
+
+type disabledProbeTarget struct {
+	proxy         storage.Proxy
+	tunnelNodeKey string
 }
 
 // NewManager 创建订阅管理器
@@ -132,6 +196,9 @@ func (m *Manager) checkAndRefresh() {
 		log.Printf("[custom] 🔄 订阅 [%s] 到期，开始刷新", sub.Name)
 		if err := m.RefreshSubscription(sub.ID); err != nil {
 			log.Printf("[custom] ❌ 订阅 [%s] 刷新失败: %v", sub.Name, err)
+			if attemptErr := m.storage.UpdateSubscriptionAttempt(sub.ID); attemptErr != nil {
+				log.Printf("[custom] ⚠️ 记录订阅 [%s] 刷新尝试失败: %v", sub.Name, attemptErr)
+			}
 		}
 	}
 }
@@ -173,29 +240,70 @@ func (m *Manager) probeLoop() {
 	}
 }
 
-// probeDisabled 探测被禁用的订阅代理
+// probeDisabled 探测被禁用的订阅代理。
+// 先剔除仍占端口的长期禁用节点；仅探测当前 portMap 仍有本地 tunnel 地址的禁用节点。
+// 已剔除的长期禁用等待下次订阅刷新重新入池，不在此路径 dial。
 func (m *Manager) probeDisabled() {
+	// 与 Refresh/Stop 串行，避免 prune Reload 与订阅刷新交错。
+	m.refreshMu.Lock()
 	disabled, err := m.storage.GetDisabledCustomProxies()
 	if err != nil || len(disabled) == 0 {
+		m.refreshMu.Unlock()
+		return
+	}
+	if pruned, err := m.pruneLongTermDisabledFromRuntime(disabled); err != nil {
+		log.Printf("[custom] ⚠️ 剔除长期禁用节点失败: %v", err)
+	} else if pruned > 0 {
+		log.Printf("[custom] 🧹 已从运行态剔除 %d 个长期禁用隧道节点（>%s）", pruned, longTermDisabledRetention)
+	}
+	nodes := m.singbox.GetNodes()
+	portMap := m.singbox.GetPortMap()
+
+	// 仅探测仍持有本地 mixed 端口的禁用节点；无端口者视为长期剔除，等订阅刷新。
+	toProbe := make([]disabledProbeTarget, 0, len(disabled))
+	for _, proxy := range disabled {
+		if isLongTermDisabledProxy(proxy, time.Now()) {
+			continue
+		}
+		target := disabledProbeTarget{proxy: proxy}
+		if isLocalTunnelAddress(proxy.Address) {
+			key := nodeKeyForLocalAddress(nodes, portMap, proxy.Address)
+			if key == "" {
+				continue
+			}
+			target.tunnelNodeKey = key
+		}
+		toProbe = append(toProbe, target)
+	}
+	m.refreshMu.Unlock()
+	if len(toProbe) == 0 {
 		return
 	}
 
-	log.Printf("[custom] 🔍 探测 %d 个禁用的订阅代理", len(disabled))
+	log.Printf("[custom] 🔍 探测 %d 个禁用的订阅代理（已跳过无运行态端口/长期禁用）", len(toProbe))
 
 	cfg := config.Get()
 	recovered := 0
 	recoveredSubs := make(map[int64]bool)
-	for _, proxy := range disabled {
+	for _, target := range toProbe {
+		proxy := target.proxy
 		valid, latency, exitIP, exitLocation, risk := m.validator.ValidateOne(proxy)
 		if valid {
+			m.refreshMu.Lock()
+			if !m.probeTargetStillCurrentLocked(target) {
+				m.refreshMu.Unlock()
+				continue
+			}
 			// 检查地理过滤：恢复前确认不在屏蔽列表中
 			if exitLocation != "" && isGeoBlocked(exitLocation, cfg) {
 				log.Printf("[custom] 代理 %s 验证通过但被地理过滤 (%s)，保持禁用", proxy.Address, exitLocation)
 				m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability)
+				m.refreshMu.Unlock()
 				continue
 			}
 			m.storage.EnableSubscriptionProxy(proxy.Address, proxy.SubscriptionID)
 			m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability)
+			m.refreshMu.Unlock()
 			recovered++
 			recoveredSubs[proxy.SubscriptionID] = true
 			log.Printf("[custom] ✅ 代理 %s 恢复可用 (%dms)", proxy.Address, latency.Milliseconds())
@@ -209,11 +317,24 @@ func (m *Manager) probeDisabled() {
 	}
 
 	if recovered > 0 {
-		log.Printf("[custom] 探测完成：%d/%d 恢复可用", recovered, len(disabled))
+		log.Printf("[custom] 探测完成：%d/%d 恢复可用", recovered, len(toProbe))
 	}
 }
 
-// RefreshSubscription 刷新��个订阅
+// probeTargetStillCurrentLocked 确认探测结果仍对应当前禁用记录和当前隧道节点。
+// 调用方必须持有 refreshMu，避免 RefreshSubscription 在确认和写回之间复用本地端口。
+func (m *Manager) probeTargetStillCurrentLocked(target disabledProbeTarget) bool {
+	current, err := m.storage.GetProxyByIdentity(target.proxy.Address, storage.SourceSubscription, target.proxy.SubscriptionID)
+	if err != nil || current.ID != target.proxy.ID || current.Status != "disabled" {
+		return false
+	}
+	if target.tunnelNodeKey == "" {
+		return true
+	}
+	return localAddrMatches(m.singbox.GetPortMap(), target.tunnelNodeKey, target.proxy.Address)
+}
+
+// RefreshSubscription 刷新单个订阅。
 func (m *Manager) RefreshSubscription(subID int64) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
@@ -236,8 +357,7 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	}
 
 	if len(nodes) == 0 {
-		log.Printf("[custom] ⚠️ 订阅 [%s] 无有效节点", sub.Name)
-		return nil
+		return fmt.Errorf("订阅 [%s] 无有效节点", sub.Name)
 	}
 
 	log.Printf("[custom] 订阅 [%s] 解析到 %d 个节点", sub.Name, len(nodes))
@@ -257,25 +377,30 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	var allProxies []storage.Proxy
 	// 端口合并：每个 tunnel 节点只暴露一个 mixed 本地入站（单端口同时服务 SOCKS5 与 HTTP），
 	// 作为单条代理入库。协议登记为 socks5（mixed 端口接受 SOCKS5 连接，代理拨号路径按 socks5 处理）。
-	type tunnelProxy struct {
-		addr  string
-		proto string
+	var proxyEntries []subscriptionProxyEntry
+
+	oldNodes := append([]ParsedNode(nil), m.singbox.GetNodes()...)
+	oldSubKeys, err := m.subscriptionTunnelRuntimeKeys(subID, oldNodes, m.singbox.GetPortMap())
+	if err != nil {
+		return fmt.Errorf("读取订阅旧运行态失败: %w", err)
 	}
-	var tunnelProxies []tunnelProxy
+	runtimeChanged := false
 
 	// 先重载 tunnel；失败时不删除该订阅旧代理，避免一次坏配置破坏旧可用配置。
-	if len(tunnelNodes) > 0 {
-		// 收集所有订阅的 tunnel 节点（需合并）
-		allTunnelNodes, err := m.collectAllTunnelNodes()
+	// 当前订阅旧 tunnel 必须从目标运行态移除，否则刷新为 direct/no-tunnel 会留下幽灵节点。
+	if len(tunnelNodes) > 0 || len(oldSubKeys) > 0 {
+		allTunnelNodes, err := m.collectAllTunnelNodesExcludingSubscription(subID, oldSubKeys)
 		if err != nil {
-			log.Printf("[custom] ⚠️ 收集 tunnel 节点失败: %v", err)
+			return fmt.Errorf("收集 tunnel 节点失败: %w", err)
 		}
-		// 将当前订阅的 tunnel 节点也加入，去重
+		// 将当前订阅本次解析出的 tunnel 节点加入，按 NodeKey 去重。
 		nodeMap := make(map[string]ParsedNode)
 		for _, n := range allTunnelNodes {
 			nodeMap[n.NodeKey()] = n
 		}
 		for _, n := range tunnelNodes {
+			// 本订阅刷新显式重新入池：清除长期剔除标记。
+			m.clearLongTermEvictedKey(n.NodeKey())
 			nodeMap[n.NodeKey()] = n
 		}
 		var mergedNodes []ParsedNode
@@ -286,61 +411,102 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 		if err := m.singbox.Reload(mergedNodes); err != nil {
 			return fmt.Errorf("sing-box 重载失败: %w", err)
 		}
+		runtimeChanged = true
 		portMap := m.singbox.GetPortMap()
-		// 防御：即使 Reload 误返回 nil，当前订阅 tunnel key 未全部分配端口也不得删旧代理。
-		if err := incompletePortAllocationError(tunnelNodes, portMap); err != nil {
+		acceptedTunnelNodes, err := acceptedNodesForCommit(m.singbox, tunnelNodes, portMap)
+		if err != nil {
+			if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+				return fmt.Errorf("sing-box 重载失败: %w; 回滚运行态失败: %v", err, rbErr)
+			}
 			return fmt.Errorf("sing-box 重载失败: %w", err)
 		}
-		for _, node := range tunnelNodes {
+		for _, node := range acceptedTunnelNodes {
 			key := node.NodeKey()
 			if port, ok := portMap[key]; ok {
 				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-				tunnelProxies = append(tunnelProxies, tunnelProxy{addr: addr, proto: "socks5"})
+				proxyEntries = append(proxyEntries, subscriptionProxyEntry{addr: addr, proto: "socks5", dual: true})
 			}
 		}
-	}
-
-	// 到这里才替换该订阅代理：拉取/解析/隧道重载失败都不会破坏旧可用配置。
-	// 删除失败必须返回错误，禁止继续插入/标记 fetch 成功（半刷新）。
-	oldDeleted, delErr := m.storage.DeleteBySubscriptionID(subID)
-	if delErr != nil {
-		return fmt.Errorf("删除订阅旧代理失败: %w", delErr)
-	}
-	if oldDeleted > 0 {
-		log.Printf("[custom] 🧹 清理订阅 [%s] 旧代理 %d 个", sub.Name, oldDeleted)
 	}
 
 	// 处理可直接使用的 HTTP/SOCKS5 节点。新节点先保持 disabled，验证通过后才进入 active 选路。
 	for _, node := range directNodes {
 		addr := node.DirectAddress()
 		proto := node.DirectProtocol()
-		proxy, ok := m.addPendingSubscriptionProxy(addr, proto, subID, false)
-		if ok {
-			allProxies = append(allProxies, *proxy)
-		}
+		proxyEntries = append(proxyEntries, subscriptionProxyEntry{addr: addr, proto: proto})
 	}
 	if len(directNodes) > 0 {
 		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
 	}
 
-	for _, tp := range tunnelProxies {
-		proxy, ok := m.addPendingSubscriptionProxy(tp.addr, tp.proto, subID, true)
-		if ok {
-			allProxies = append(allProxies, *proxy)
+	allProxies, err = m.replaceSubscriptionProxies(subID, proxyEntries)
+	if err != nil {
+		if runtimeChanged {
+			if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+				return fmt.Errorf("替换订阅代理失败: %w; 回滚运行态失败: %v", err, rbErr)
+			}
 		}
+		return fmt.Errorf("替换订阅代理失败: %w", err)
 	}
-	if len(tunnelProxies) > 0 {
-		log.Printf("[custom] 📥 %d 个加密节点入站（单 mixed 端口，SOCKS5/HTTP 共用）通过 sing-box 转换入池", len(tunnelProxies))
+	if len(tunnelNodes) > 0 {
+		log.Printf("[custom] 📥 %d 个加密节点入站（单 mixed 端口，SOCKS5/HTTP 共用）通过 sing-box 转换入池", len(proxyEntries)-len(directNodes))
 	}
 
 	// 验证新入池的代理
 	m.validateCustomProxies(allProxies, subID)
 
-	// 更新订阅信息（记录实际入池的代理数）
-	m.storage.UpdateSubscriptionFetch(subID, len(allProxies))
 	log.Printf("[custom] ✅ 订阅 [%s] 刷新完成，解析 %d 节点，入池 %d 个", sub.Name, len(nodes), len(allProxies))
 
 	return nil
+}
+
+// acceptedNodesForCommit 仅对当前订阅 target 判定可提交节点：
+// 明确拒绝的坏节点可跳过；段满/未知缺失仍严格失败并触发回滚。
+// 返回值是 target 的子集，避免把其它订阅的运行态节点误入库。
+func acceptedNodesForCommit(shard singBoxShard, target []ParsedNode, portMap map[string]int) ([]ParsedNode, error) {
+	if len(target) == 0 {
+		return nil, nil
+	}
+	diagnostics := assemblyDiagnostics{}
+	if aware, ok := shard.(assemblyAwareShard); ok {
+		diagnostics = aware.GetAssemblyDiagnostics()
+	}
+	rejected := diagnostics.rejectedKeys()
+
+	// 无 assembler 诊断时：先用 buildOutbound 区分明确构建失败与其它缺失。
+	if len(diagnostics.rejected) == 0 && len(diagnostics.accepted) == 0 && len(diagnostics.segmentFull) == 0 {
+		for _, node := range target {
+			if _, ok := portMap[node.NodeKey()]; ok {
+				continue
+			}
+			if _, err := buildOutbound(node, "diagnostic"); err != nil {
+				diagnostics.rejected = append(diagnostics.rejected, assemblyRejectedNode{node: node, err: err})
+				rejected[node.NodeKey()] = true
+			}
+		}
+	}
+
+	accepted := make([]ParsedNode, 0, len(target))
+	missing := make([]ParsedNode, 0)
+	for _, node := range target {
+		key := node.NodeKey()
+		if rejected[key] {
+			continue
+		}
+		if _, ok := portMap[key]; ok {
+			accepted = append(accepted, node)
+			continue
+		}
+		missing = append(missing, node)
+	}
+
+	if len(missing) > 0 {
+		return nil, incompletePortAllocationErrorWithDiagnostics(missing, portMap, diagnostics)
+	}
+	if len(accepted) == 0 {
+		return nil, fmt.Errorf("所有隧道节点均被拒绝: %w", incompletePortAllocationErrorWithDiagnostics(target, portMap, diagnostics))
+	}
+	return accepted, nil
 }
 
 // RefreshAll 刷新所有活跃订阅
@@ -363,9 +529,22 @@ func (m *Manager) RefreshAll() {
 
 // collectAllTunnelNodes 收集所有订阅中需要 tunnel 的节点
 func (m *Manager) collectAllTunnelNodes() ([]ParsedNode, error) {
+	return m.collectAllTunnelNodesExcludingSubscription(0, nil)
+}
+
+func (m *Manager) collectAllTunnelNodesExcludingSubscription(excludedSubID int64, excludedRuntimeKeys map[string]bool) ([]ParsedNode, error) {
+	// 收集时排除长期禁用节点，避免继续占用 mixed 端口。
+	longTermKeys := m.longTermDisabledRuntimeKeys()
 	nodeMap := make(map[string]ParsedNode)
 	for _, node := range m.singbox.GetNodes() {
-		nodeMap[node.NodeKey()] = node
+		key := node.NodeKey()
+		if excludedRuntimeKeys[key] {
+			continue
+		}
+		if longTermKeys[key] {
+			continue
+		}
+		nodeMap[key] = node
 	}
 
 	subs, err := m.storage.GetSubscriptions()
@@ -374,7 +553,13 @@ func (m *Manager) collectAllTunnelNodes() ([]ParsedNode, error) {
 	}
 
 	for _, sub := range subs {
+		if sub.ID == excludedSubID {
+			continue
+		}
 		if sub.Status != "active" {
+			continue
+		}
+		if !sub.LastFetch.IsZero() && time.Since(sub.LastFetch) < time.Duration(sub.RefreshMin)*time.Minute {
 			continue
 		}
 		data, err := m.fetchSubscriptionData(&sub)
@@ -386,12 +571,122 @@ func (m *Manager) collectAllTunnelNodes() ([]ParsedNode, error) {
 			continue
 		}
 		for _, node := range nodes {
-			if !node.IsDirect() {
-				nodeMap[node.NodeKey()] = node
+			if node.IsDirect() {
+				continue
 			}
+			key := node.NodeKey()
+			// 已剔除的长期禁用不得被其它订阅刷新的 re-fetch 再次塞回。
+			if longTermKeys[key] {
+				continue
+			}
+			nodeMap[key] = node
 		}
 	}
 	return mapValues(nodeMap), nil
+}
+
+func (m *Manager) subscriptionTunnelRuntimeKeys(subID int64, nodes []ParsedNode, portMap map[string]int) (map[string]bool, error) {
+	rows, err := m.storage.GetDB().Query(
+		`SELECT address FROM proxies WHERE subscription_id = ? AND source = ?`, subID, storage.SourceSubscription,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make(map[string]bool)
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return nil, err
+		}
+		key := nodeKeyForLocalAddress(nodes, portMap, addr)
+		if key != "" {
+			keys[key] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+func nodesExcludingKeys(nodes []ParsedNode, keys map[string]bool) []ParsedNode {
+	if len(keys) == 0 {
+		return append([]ParsedNode(nil), nodes...)
+	}
+	kept := make([]ParsedNode, 0, len(nodes))
+	for _, node := range nodes {
+		if keys[node.NodeKey()] {
+			continue
+		}
+		kept = append(kept, node)
+	}
+	return kept
+}
+
+func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscriptionProxyEntry) ([]storage.Proxy, error) {
+	tx, err := m.storage.GetDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`DELETE FROM proxies WHERE subscription_id = ? AND source = ?`, subID, storage.SourceSubscription)
+	if err != nil {
+		return nil, fmt.Errorf("删除订阅旧代理失败: %w", err)
+	}
+	oldDeleted, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if oldDeleted > 0 {
+		log.Printf("[custom] 🧹 清理订阅旧代理 %d 个", oldDeleted)
+	}
+
+	proxies := make([]storage.Proxy, 0, len(entries))
+	for _, entry := range entries {
+		res, err := tx.Exec(
+			`INSERT INTO proxies (address, protocol, source, subscription_id, region_source, status, dual_protocol)
+			 VALUES (?, ?, ?, ?, 'auto', 'disabled', ?)
+			 ON CONFLICT(address, source, subscription_id) DO UPDATE SET
+				protocol = excluded.protocol,
+				region_source = CASE WHEN proxies.region_source = '' THEN excluded.region_source ELSE proxies.region_source END,
+				status = 'disabled',
+				dual_protocol = excluded.dual_protocol`,
+			entry.addr, entry.proto, storage.SourceSubscription, subID, entry.dual,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("新增订阅代理 %s 失败: %w", entry.addr, err)
+		}
+		if _, err := res.RowsAffected(); err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, storage.Proxy{
+			Address:        entry.addr,
+			Protocol:       entry.proto,
+			Status:         "disabled",
+			Source:         storage.SourceSubscription,
+			SubscriptionID: subID,
+			DualProtocol:   entry.dual,
+		})
+	}
+
+	res, err = tx.Exec(`UPDATE subscriptions SET last_fetch = CURRENT_TIMESTAMP, proxy_count = ? WHERE id = ?`, len(entries), subID)
+	if err != nil {
+		return nil, fmt.Errorf("更新订阅拉取状态失败: %w", err)
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if updated == 0 {
+		return nil, fmt.Errorf("subscription %d not found", subID)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return proxies, nil
 }
 
 func mapValues(nodeMap map[string]ParsedNode) []ParsedNode {
@@ -456,29 +751,128 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 // headersJSON 为订阅自定义请求头的 JSON 对象字符串（如 {"User-Agent":"clash.meta"}）。
 // 向后兼容：先设默认 User-Agent: v2rayN，再逐个应用自定义头——自定义头覆盖默认，
 // 未指定 User-Agent 时保留默认 v2rayN，不破坏现有订阅拉取。
+//
+// 非 200 错误附带截断、脱敏后的响应体片段；对 5xx/429 做有上限的即时重试。
+// 调度层仍由 RefreshMin 退避，且禁止经上游节点回源。
 func (m *Manager) fetchSubscriptionURL(urlStr, headersJSON string) ([]byte, error) {
-	if err := validateSubscriptionURLTarget(urlStr); err != nil {
+	if err := subscriptionURLTargetCheck(urlStr); err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{DialContext: safeSubscriptionDialContext}
-
+	transport := &http.Transport{DialContext: subscriptionDialContextFn}
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
-	req, err := buildSubscriptionRequest(urlStr, headersJSON)
+
+	var lastErr error
+	for attempt := 1; attempt <= subscriptionFetchMaxAttempts; attempt++ {
+		req, err := buildSubscriptionRequest(urlStr, headersJSON)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			// 连接/超时等：中文包装，不重试（避免拉长无意义等待；调度层再退避）。
+			return nil, fmt.Errorf("直接拉取订阅 URL 失败: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			data, readErr := readSubscriptionResponse(resp.Body, subscriptionResponseMaxBytes)
+			resp.Body.Close()
+			if readErr != nil {
+				return nil, fmt.Errorf("直接拉取订阅 URL 读取响应失败: %w", readErr)
+			}
+			return data, nil
+		}
+
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, int64(subscriptionResponseSnippetMaxBytes)+1))
+		resp.Body.Close()
+		lastErr = formatSubscriptionHTTPStatusError(resp.StatusCode, snippet)
+
+		if !isSubscriptionFetchRetryableStatus(resp.StatusCode) || attempt >= subscriptionFetchMaxAttempts {
+			return nil, lastErr
+		}
+		subscriptionFetchSleepFn(subscriptionFetchRetryBackoff)
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("直接拉取订阅 URL 失败: 未知错误")
+}
+
+func readSubscriptionResponse(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, err
 	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("直接拉取订阅 URL 失败: %w", err)
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("订阅响应超过 %d 字节上限", limit)
 	}
-	defer resp.Body.Close()
+	return data, nil
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("直接拉取订阅 URL 返回 HTTP %d", resp.StatusCode)
+// isSubscriptionFetchRetryableStatus 仅 5xx 与 429 允许单次 fetch 内即时重试。
+func isSubscriptionFetchRetryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= 500
+}
+
+// formatSubscriptionHTTPStatusError 构造含状态码与脱敏响应片段的诊断错误。
+func formatSubscriptionHTTPStatusError(statusCode int, body []byte) error {
+	snippet := sanitizeSubscriptionResponseSnippet(body)
+	if snippet == "" {
+		return fmt.Errorf("直接拉取订阅 URL 返回 HTTP %d", statusCode)
 	}
+	truncateNote := ""
+	if len(body) > subscriptionResponseSnippetMaxBytes {
+		truncateNote = "（已截断）"
+	}
+	return fmt.Errorf("直接拉取订阅 URL 返回 HTTP %d，响应片段%s: %s", statusCode, truncateNote, snippet)
+}
 
-	return io.ReadAll(resp.Body)
+// sanitizeSubscriptionResponseSnippet 截断响应体并脱敏常见密钥形态，避免错误日志泄漏凭据。
+// 不回显原始 Authorization 请求头；仅处理响应体中的明文片段。
+func sanitizeSubscriptionResponseSnippet(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if len(body) > subscriptionResponseSnippetMaxBytes {
+		body = body[:subscriptionResponseSnippetMaxBytes]
+	}
+	// 统一空白，去掉控制字符，便于日志阅读。
+	s := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, string(body))
+	s = strings.Join(strings.Fields(s), " ")
+	if isEncodedSubscriptionPayload(s) {
+		return "[REDACTED]"
+	}
+	s = subscriptionBearerPattern.ReplaceAllString(s, "${1}[REDACTED]")
+	s = subscriptionSecretValuePattern.ReplaceAllString(s, "${1}[REDACTED]")
+	s = subscriptionUserInfoPattern.ReplaceAllString(s, "${1}[REDACTED]@")
+	s = subscriptionProxyLinkPattern.ReplaceAllString(s, "[REDACTED]")
+	return s
+}
+
+func isEncodedSubscriptionPayload(s string) bool {
+	if len(s) < 16 || strings.ContainsAny(s, " \t\r\n") {
+		return false
+	}
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		decoded, err := encoding.DecodeString(s)
+		if err != nil {
+			continue
+		}
+		lower := strings.ToLower(string(decoded))
+		for _, scheme := range []string{"ss://", "ssr://", "vmess://", "vless://", "trojan://", "hysteria://", "hysteria2://", "tuic://"} {
+			if strings.Contains(lower, scheme) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseSubscriptionHeaders 解析订阅自定义 headers JSON。
@@ -608,7 +1002,20 @@ func lookupSubscriptionHost(ctx context.Context, host string) ([]net.IP, error) 
 }
 
 func isUnsafeSubscriptionIP(ip net.IP) bool {
-	return !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLinkLocalUnicast() {
+		return true
+	}
+	for _, prefix := range unsafeSubscriptionPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateCustomProxies 验证订阅代理，返回可用数
@@ -777,6 +1184,36 @@ func (m *Manager) DeleteManualNode(id int64) error {
 	return nil
 }
 
+// DeleteSubscription deletes a subscription and removes its tunnel nodes from sing-box runtime.
+// Runtime is changed first; if DB deletion fails, runtime is compensated back to the old node set.
+func (m *Manager) DeleteSubscription(id int64) error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	oldNodes := append([]ParsedNode(nil), m.singbox.GetNodes()...)
+	removeKeys, err := m.subscriptionTunnelRuntimeKeys(id, oldNodes, m.singbox.GetPortMap())
+	if err != nil {
+		return fmt.Errorf("读取订阅旧运行态失败: %w", err)
+	}
+	newNodes := nodesExcludingKeys(oldNodes, removeKeys)
+	runtimeChanged := len(removeKeys) > 0
+	if runtimeChanged {
+		if err := m.singbox.Reload(newNodes); err != nil {
+			return fmt.Errorf("sing-box 重载失败: %w", err)
+		}
+	}
+
+	if err := m.storage.DeleteSubscription(id); err != nil {
+		if runtimeChanged {
+			if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+				return fmt.Errorf("删除订阅失败: %w; 回滚运行态失败: %v", err, rbErr)
+			}
+		}
+		return fmt.Errorf("删除订阅失败: %w", err)
+	}
+	return nil
+}
+
 // ManualImportResult summarizes batch import of direct manual proxies.
 type ManualImportResult struct {
 	Total      int      `json:"total"`
@@ -788,7 +1225,8 @@ type ManualImportResult struct {
 }
 
 // AddManualNode 从单个链接添加人工节点，存储为 source=manual。
-// 直连节点（http/socks5）直接入库；加密节点通过 sing-box 转换为本地 socks5 后入库。
+// 直连节点（http/socks5）先以 disabled 入库，再并发验证；通过后才 active。
+// 加密节点通过 sing-box 转换为本地 socks5 后入库，并同样进入验证。
 func (m *Manager) AddManualNode(link, region, note string) error {
 	node, err := ParseSingleLink(link)
 	if err != nil {
@@ -801,15 +1239,20 @@ func (m *Manager) AddManualNode(link, region, note string) error {
 		if err := m.storage.AddManualProxy(addr, proto, region, note); err != nil {
 			return fmt.Errorf("存储直连节点失败: %w", err)
 		}
+		proxy, err := m.storage.GetProxyByIdentity(addr, storage.SourceManual, 0)
+		if err != nil {
+			return fmt.Errorf("读取手工节点失败: %w", err)
+		}
+		m.validateManualProxies([]storage.Proxy{*proxy})
 		return nil
 	}
 
 	return m.addManualTunnelNode(node, region, note)
 }
 
-// ImportManualLinks parses multi-line proxy text (scheme://host:port, optional
-// trailing annotations stripped at first whitespace) and upserts direct nodes.
-// Tunnel/encrypted links are reported as failures in this batch path (use single add).
+// ImportManualLinks parses multi-line proxy text and upserts direct nodes.
+// Each line may contain leading/trailing/inline annotations; the first
+// socks5/socks4/http/https URL token is extracted. Tunnel links fail in batch.
 // Existing identical address+source manual rows are counted as skipped.
 func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResult, error) {
 	var result ManualImportResult
@@ -822,22 +1265,26 @@ func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResu
 			continue
 		}
 		result.Total++
-		link := line
-		if i := strings.IndexAny(line, " \t"); i > 0 {
-			link = line[:i]
+		link := extractProxyLinkFromLine(line)
+		if link == "" {
+			result.Failed++
+			if len(result.Errors) < 20 {
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: no proxy URL found", truncateForError(line, 48)))
+			}
+			continue
 		}
 		node, err := ParseSingleLink(link)
 		if err != nil {
 			result.Failed++
 			if len(result.Errors) < 20 {
-				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", link, err))
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", redactedProxyLinkForError(link), err))
 			}
 			continue
 		}
 		if !node.IsDirect() {
 			result.Failed++
 			if len(result.Errors) < 20 {
-				result.Errors = append(result.Errors, fmt.Sprintf("%s: batch import supports only http/socks5 direct links", link))
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: batch import supports only http/socks5 direct links", redactedProxyLinkForError(link)))
 			}
 			continue
 		}
@@ -863,7 +1310,111 @@ func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResu
 		return result, fmt.Errorf("批量写入失败: %w", err)
 	}
 	result.Added = len(toAdd)
+	// 入库后并发验证（ValidateStream 使用配置并发度）；失败保持 disabled。
+	pending := make([]storage.Proxy, 0, len(toAdd))
+	for _, item := range toAdd {
+		proxy, err := m.storage.GetProxyByIdentity(item.Address, storage.SourceManual, 0)
+		if err != nil {
+			continue
+		}
+		pending = append(pending, *proxy)
+	}
+	m.validateManualProxies(pending)
 	return result, nil
+}
+
+// validateManualProxies 并发验证手工节点：写回出口/延迟/纯净度/CF/AI，通过则 Enable。
+// validator 为 nil 时仅保持 disabled，不静默标为可用。
+func (m *Manager) validateManualProxies(proxies []storage.Proxy) {
+	if m.validator == nil || len(proxies) == 0 {
+		return
+	}
+	log.Printf("[custom] 🔍 开始验证 %d 个手工节点", len(proxies))
+	cfg := config.Get()
+	valid, invalid := 0, 0
+	for result := range m.validator.ValidateStream(proxies) {
+		if !result.Valid {
+			invalid++
+			_ = m.storage.DisableProxyByID(result.Proxy.ID)
+			continue
+		}
+		latencyMs := int(result.Latency.Milliseconds())
+		if err := m.storage.UpdateProxyExitInfo(
+			result.Proxy.ID,
+			result.ExitIP,
+			result.ExitLocation,
+			latencyMs,
+			result.Risk.IPAPIIsScore,
+			result.Risk.Flags,
+			result.Risk.CFBlocked,
+			result.Risk.AIReachability,
+		); err != nil {
+			log.Printf("[custom] ⚠️ 写回手工节点 %s 探测结果失败: %v", result.Proxy.Address, err)
+			invalid++
+			continue
+		}
+		if result.ExitLocation != "" && isGeoBlocked(result.ExitLocation, cfg) {
+			log.Printf("[custom] 手工节点 %s 验证通过但被地理过滤 (%s)，保持禁用", result.Proxy.Address, result.ExitLocation)
+			invalid++
+			continue
+		}
+		if err := m.storage.EnableProxyByID(result.Proxy.ID); err != nil {
+			log.Printf("[custom] ⚠️ 启用手工节点 %s 失败: %v", result.Proxy.Address, err)
+			invalid++
+			continue
+		}
+		valid++
+	}
+	log.Printf("[custom] 手工节点验证完成：%d 可用，%d 不可用", valid, invalid)
+}
+
+// extractProxyLinkFromLine finds the first direct-proxy URL token in a free-form line.
+// Supports leading, trailing, or mid-line annotations around the URL.
+func extractProxyLinkFromLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return ""
+	}
+	lower := strings.ToLower(line)
+	schemes := []string{"socks5://", "socks4://", "https://", "http://"}
+	best := -1
+	bestScheme := ""
+	for _, scheme := range schemes {
+		if i := strings.Index(lower, scheme); i >= 0 {
+			if best < 0 || i < best {
+				best = i
+				bestScheme = scheme
+			}
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	// Keep original casing for the remainder; scheme match used lower only for index.
+	rest := line[best+len(bestScheme):]
+	// URL token ends at whitespace or common separators used in annotated dumps.
+	end := len(rest)
+	for i, r := range rest {
+		if unicode.IsSpace(r) || r == '|' || r == ',' || r == ';' {
+			end = i
+			break
+		}
+	}
+	token := strings.TrimSpace(rest[:end])
+	if token == "" {
+		return ""
+	}
+	// Drop trailing junk that sometimes sticks without space: ] ) >
+	token = strings.TrimRight(token, ")]}>\"'")
+	return bestScheme + token
+}
+
+func truncateForError(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // DeleteManualNodes deletes multiple manual proxies by id, using DeleteManualNode.
@@ -925,6 +1476,8 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 		}
 		return fmt.Errorf("置位手动节点 dual_protocol 失败: %w", err)
 	}
+	// mixed 本地端口依赖上游出站；入库后保持 disabled，由「测试」或后台探测写回后再 active。
+	// 不在 refreshMu 内做长时间 ValidateOne，避免阻塞订阅刷新。
 	return nil
 }
 
@@ -935,6 +1488,155 @@ func isLocalTunnelAddress(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return host == "127.0.0.1" || host == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+// isLongTermDisabledProxy 判定是否为长期禁用：status=disabled 且 last_check 非零且超过阈值。
+// last_check 为零视为短期禁用，保留运行态端口供 probeDisabled 重验证。
+func isLongTermDisabledProxy(p storage.Proxy, now time.Time) bool {
+	if p.Status != "disabled" {
+		return false
+	}
+	if p.LastCheck.IsZero() {
+		return false
+	}
+	return now.Sub(p.LastCheck) > longTermDisabledRetention
+}
+
+// disabledProxyHasRuntimePort 判断禁用代理的本地地址是否仍在当前 portMap 中。
+func disabledProxyHasRuntimePort(address string, portMap map[string]int) bool {
+	if !isLocalTunnelAddress(address) {
+		// 直连禁用代理无 mixed 端口，不在 probe 的 tunnel 端口语义内；仍允许探测。
+		return true
+	}
+	_, portStr, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return false
+	}
+	for _, p := range portMap {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) markLongTermEvictedKey(key string) {
+	if key == "" {
+		return
+	}
+	if m.longTermEvictedKeys == nil {
+		m.longTermEvictedKeys = make(map[string]bool)
+	}
+	m.longTermEvictedKeys[key] = true
+}
+
+func (m *Manager) clearLongTermEvictedKey(key string) {
+	if m.longTermEvictedKeys == nil {
+		return
+	}
+	delete(m.longTermEvictedKeys, key)
+}
+
+// longTermDisabledRuntimeKeys 汇总应排除的长期禁用 NodeKey：
+// DB 中仍映射到当前运行态地址的长期禁用 + 已记录的剔除集合。
+func (m *Manager) longTermDisabledRuntimeKeys() map[string]bool {
+	keys := make(map[string]bool)
+	for k, v := range m.longTermEvictedKeys {
+		if v {
+			keys[k] = true
+		}
+	}
+	disabled, err := m.storage.GetDisabledCustomProxies()
+	if err != nil {
+		return keys
+	}
+	allProxies, err := m.storage.GetAllForAdmin()
+	if err != nil {
+		return keys
+	}
+	nodes := m.singbox.GetNodes()
+	portMap := m.singbox.GetPortMap()
+	now := time.Now()
+	retainedAddresses := retainedRuntimeAddresses(allProxies, now)
+	for _, p := range disabled {
+		if !isLongTermDisabledProxy(p, now) {
+			continue
+		}
+		if !isLocalTunnelAddress(p.Address) {
+			continue
+		}
+		if retainedAddresses[p.Address] {
+			continue
+		}
+		if key := nodeKeyForLocalAddress(nodes, portMap, p.Address); key != "" {
+			keys[key] = true
+			m.markLongTermEvictedKey(key)
+		}
+	}
+	return keys
+}
+
+// pruneLongTermDisabledFromRuntime 从 sing-box 运行态移除仍占端口的长期禁用隧道节点。
+// 返回剔除数量；Reload 失败时返回 error，不静默吞掉。
+func (m *Manager) pruneLongTermDisabledFromRuntime(disabled []storage.Proxy) (int, error) {
+	if len(disabled) == 0 {
+		return 0, nil
+	}
+	nodes := m.singbox.GetNodes()
+	if len(nodes) == 0 {
+		return 0, nil
+	}
+	portMap := m.singbox.GetPortMap()
+	now := time.Now()
+	allProxies, err := m.storage.GetAllForAdmin()
+	if err != nil {
+		return 0, err
+	}
+	retainedAddresses := retainedRuntimeAddresses(allProxies, now)
+	removeKeys := make(map[string]bool)
+	for _, p := range disabled {
+		if !isLongTermDisabledProxy(p, now) {
+			continue
+		}
+		if !isLocalTunnelAddress(p.Address) {
+			continue
+		}
+		if retainedAddresses[p.Address] {
+			continue
+		}
+		key := nodeKeyForLocalAddress(nodes, portMap, p.Address)
+		if key == "" {
+			continue
+		}
+		removeKeys[key] = true
+		m.markLongTermEvictedKey(key)
+	}
+	if len(removeKeys) == 0 {
+		return 0, nil
+	}
+	newNodes := nodesExcludingKeys(nodes, removeKeys)
+	if len(newNodes) == len(nodes) {
+		return 0, nil
+	}
+	if err := m.singbox.Reload(newNodes); err != nil {
+		return 0, err
+	}
+	return len(removeKeys), nil
+}
+
+func retainedRuntimeAddresses(proxies []storage.Proxy, now time.Time) map[string]bool {
+	retained := make(map[string]bool)
+	for _, proxy := range proxies {
+		if !isLocalTunnelAddress(proxy.Address) || isLongTermDisabledProxy(proxy, now) {
+			continue
+		}
+		retained[proxy.Address] = true
+	}
+	return retained
 }
 
 func localAddrMatches(portMap map[string]int, key, address string) bool {

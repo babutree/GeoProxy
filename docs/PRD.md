@@ -56,9 +56,9 @@
 
 客户端在代理认证的**用户名字段**中携带参数, 密码字段为全局固定密码。
 
-**语法格式** (kv 分段, `-` 分隔):
+**语法格式** (kv 分段, `-` 分隔; **顺序固定**):
 ```
-<基础用户名>[-region-<国家码>][-session-<会话id>]
+<基础用户名>[-region-<国家码>][-unlock-<token>][-session-<会话id>]
 ```
 
 **示例**:
@@ -66,14 +66,19 @@
 |--------|------|
 | `acct` | 不限地域、不黏连: 每请求随机选任意可用节点 |
 | `acct-region-us` | 限定美国出口, 不黏连: 每请求随机选一个美国节点 |
-| `acct-region-jp-session-abc123` | 限定日本出口 + 会话 abc123 黏连到固定日本节点 |
+| `acct-unlock-gpt` | 仅选 OpenAI 探测可达的节点 |
+| `acct-unlock-all` | 要求 OpenAI+Claude+Grok+Gemini+CF 均通过 |
+| `acct-region-jp-unlock-gpt-session-abc123` | 日本出口 + GPT 解锁 + 会话 abc123 黏连 |
 | `acct-session-xy` | 不限地域 + 会话 xy 黏连到某个任意节点 |
 
 **解析规则**:
 - 基础用户名必须等于配置的 `AuthUsername`, 否则认证失败。
+- 密码校验只使用解析出的 **base** + 密码; 后缀不是凭据。
 - `region` 值为 2 位国家码 (大小写不敏感, 内部统一转小写)。
+- `unlock` 为 AI/CF 解锁过滤: `gpt|openai|chatgpt|claude|gemini|grok|cf|all` (可用 `+`/`,` 组合; `all` 展开五维 AND)。
 - `session` 值为任意字符串 (建议限制长度 ≤ 64, 字符集 `[a-zA-Z0-9_-]`)。
-- 参数顺序固定: region 在前, session 在后。缺省即不启用对应能力。
+- 参数顺序固定: **region → unlock → session**。顺序错误会导致整段用户名解析失败, 从而认证失败 (即使密码正确)。
+- 缺省即不启用对应能力; 无节点满足 unlock 时请求失败, 不静默降级。
 - 密码必须等于配置的 `AuthPassword` (或其 hash), 否则认证失败。
 
 **协议差异**:
@@ -296,24 +301,24 @@ type Binding struct {
 
 ---
 
-## 7. 配置项 (目标 .env / config.json)
+## 7. 配置项 (环境种子 / config.json)
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `WEBUI_PASSWORD` | (必填) | 管理面板登录密码 |
-| `PROXY_AUTH_USERNAME` | `acct` | 基础用户名 (DSL 前缀) |
-| `PROXY_AUTH_PASSWORD` | (必填) | 代理认证密码 |
 | `HTTP_PORT` | 7802 | HTTP 入口端口 |
 | `SOCKS5_PORT` | 7801 | SOCKS5 入口端口 |
 | `WEBUI_PORT` | 7800 | WebUI 端口 |
 | `SESSION_TTL_MINUTES` | 10 | 会话黏连 TTL |
 | `DEFAULT_REGION` | (空) | 未指定 region 时的默认地域, 空=全局 |
 | `ALLOWED_COUNTRIES` | (空) | 地域白名单 (仅这些地域节点入库) |
-| `BLOCKED_COUNTRIES` | (空) | 地域黑名单 |
+| `BLOCKED_COUNTRIES` | 未设置时 `CN`; 显式空值时为空 | 地域黑名单；仅在白名单为空时生效 |
 | `HEALTH_CHECK_INTERVAL` | 5 | 健康检查间隔(分钟) |
 | `MAX_RETRY` | 3 | 单请求换节点重试上限 |
 | `SINGBOX_PATH` | sing-box | sing-box 路径 (Docker 内置) |
+| `SINGBOX_SHARD_COUNT` | 4 | sing-box 分片进程数 |
 | `TZ` | Asia/Shanghai | 时区 |
+
+凭据不再通过 `WEBUI_PASSWORD`、`PROXY_AUTH_USERNAME` 或 `PROXY_AUTH_PASSWORD` 环境变量注入。首次启动会生成 WebUI 登录密码和代理认证凭据，打印一次到日志，并持久化到 `config.json`; 后续修改通过 WebUI Settings 或配置保存路径完成。
 
 移除: 所有 POOL_* / 抓取 / SOURCE 相关配置。
 

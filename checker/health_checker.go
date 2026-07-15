@@ -22,7 +22,7 @@ type healthStore interface {
 	GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]storage.Proxy, error)
 	UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int, aiReachability string) error
 	RecordProxyUseByID(id int64, success bool) error
-	DisableProxyByID(id int64) error
+	RecordProxyFailureByID(id int64, threshold int) error
 }
 
 // healthValidator 健康检查对验证器的最小依赖。
@@ -134,19 +134,10 @@ func (hc *HealthChecker) RunOnce() {
 				updateCount++
 			}
 		} else {
-			// 失败次数+1
-			if err := hc.storage.RecordProxyUseByID(result.Proxy.ID, false); err != nil {
+			if err := hc.storage.RecordProxyFailureByID(result.Proxy.ID, failDisableThreshold); err != nil {
 				log.Printf("[health] 记录失败次数失败 id=%d: %v", result.Proxy.ID, err)
-			}
-			// 如果失败次数达到阈值，禁用节点等待显式处理或后续探测恢复。
-			// 成功路径 UpdateProxyExitInfo 会将 fail_count 归零（BUG-53），
-			// 故只有持续探测失败的节点才会累加到此处被 disable。
-			if result.Proxy.FailCount+1 >= failDisableThreshold {
-				if err := hc.storage.DisableProxyByID(result.Proxy.ID); err != nil {
-					log.Printf("[health] 禁用节点失败 id=%d: %v", result.Proxy.ID, err)
-				} else {
-					disableCount++
-				}
+			} else if result.Proxy.FailCount+1 >= failDisableThreshold {
+				disableCount++
 			}
 		}
 	}

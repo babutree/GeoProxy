@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+// dashboardBundle 聚合前端产物：CSS/JS 已从 dashboardHTML 合规分离到 dashboardCSS/dashboardJS，
+// 由 /assets/dashboard.css、/assets/dashboard.js 路由下发。前端 invariant 断言针对该聚合串，
+// 等价于“最终送达浏览器的 HTML+CSS+JS 中包含该片段”，语义与分离前一致，覆盖不降低。
+var dashboardBundle = dashboardHTML + dashboardCSS + dashboardJS
+
 func TestDashboardEscapesAPIFieldsBeforeInnerHTML(t *testing.T) {
 	checks := []string{
 		"function html(value)",
@@ -31,7 +36,7 @@ func TestDashboardEscapesAPIFieldsBeforeInnerHTML(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing escaped API-field usage %q", check)
 			}
 		})
@@ -43,7 +48,7 @@ func TestDashboardEscapesAPIFieldsBeforeInnerHTML(t *testing.T) {
 		"+String(line).replace",
 	} {
 		t.Run("reject "+unsafe, func(t *testing.T) {
-			if strings.Contains(dashboardHTML, unsafe) {
+			if strings.Contains(dashboardBundle, unsafe) {
 				t.Fatalf("dashboardHTML still contains unsafe innerHTML pattern %q", unsafe)
 			}
 		})
@@ -72,7 +77,7 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing risk-columns invariant %q", check)
 			}
 		})
@@ -86,7 +91,7 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 		"<td colspan=\"9\" class=\"empty\">没有匹配节点</td>",
 	} {
 		t.Run("reject "+unsafe, func(t *testing.T) {
-			if strings.Contains(dashboardHTML, unsafe) {
+			if strings.Contains(dashboardBundle, unsafe) {
 				t.Fatalf("dashboardHTML still has stale aggregated risk model %q", unsafe)
 			}
 		})
@@ -97,9 +102,10 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 // toggleStar/starBtn/randSession 函数、星标可用置顶 sort 片段、/api/proxy/star 路由调用。
 func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 	checks := []string{
-		// 表头新增星标列与 CF 列。
+		// 表头新增星标列与 CF 列（CF 表头图标化，与 AI 表头统一为 th-ico 图标+短标签）。
 		"<th>★</th>",
-		"<th>CF 拦截</th>",
+		`<span class="th-ico" title="Cloudflare 拦截探测`,
+		`<span class="tx">CF</span>`,
 		// 两处 colspan 为 14（含多选勾选列）。
 		"<td colspan=\"14\" class=\"empty\">加载中</td>",
 		"<td colspan=\"14\" class=\"empty\">没有匹配节点</td>",
@@ -124,7 +130,7 @@ func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing star/copy/cf invariant %q", check)
 			}
 		})
@@ -146,18 +152,18 @@ func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *test
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing available-region invariant %q", check)
 			}
 		})
 	}
 
 	// 回归防护：isAvailable 必须真正读取 user_paused，不得退回旧口径（只看 status/fail_count）。
-	if strings.Contains(dashboardHTML, "function isAvailable(proxy){return (proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}") {
+	if strings.Contains(dashboardBundle, "function isAvailable(proxy){return (proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}") {
 		t.Fatal("dashboardHTML isAvailable reverted to legacy form that ignores user_paused (BUG-50)")
 	}
 	// 回归防护：nodeState 不得只靠 status==='paused' 判定暂停（新数据 status 恒为 active，永不命中）。
-	if strings.Contains(dashboardHTML, "function nodeState(p){if(p.status==='paused')return 'paused';") {
+	if strings.Contains(dashboardBundle, "function nodeState(p){if(p.status==='paused')return 'paused';") {
 		t.Fatal("dashboardHTML nodeState reverted to legacy status==='paused' only check (BUG-50)")
 	}
 }
@@ -174,7 +180,7 @@ func TestDashboardPausedNodeTogglesToEnableButton(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing paused-toggle-button invariant %q", check)
 			}
 		})
@@ -190,7 +196,7 @@ func TestDashboardShowsPausedSubscriptionCountsAndLabels(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing paused subscription display %q", check)
 			}
 		})
@@ -209,13 +215,13 @@ func TestDashboardShowsExplainedSingBoxStatusInsteadOfBoolFailure(t *testing.T) 
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing explained sing-box status %q", check)
 			}
 		})
 	}
 
-	if strings.Contains(dashboardHTML, "running?'运行中':'未运行'") {
+	if strings.Contains(dashboardBundle, "running?'运行中':'未运行'") {
 		t.Fatal("dashboardHTML still maps singbox_running=false directly to 未运行")
 	}
 }
@@ -241,13 +247,13 @@ func TestDashboardAsyncEntrypointsUseUnifiedErrorHandling(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing unified async handling %q", check)
 			}
 		})
 	}
 
-	if strings.Contains(dashboardHTML, ".catch(err=>showToast(err.message))") {
+	if strings.Contains(dashboardBundle, ".catch(err=>showToast(err.message))") {
 		t.Fatal("dashboardHTML still uses one-off catch instead of runAsync")
 	}
 }
@@ -256,9 +262,7 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 	checks := []string{
 		"const id=proxyIDArg(p)",
 		"toggleProxy('+id+',decodeURIComponent",
-		"editManualRegion('+id+',decodeURIComponent",
-		"editManualNote('+id+',decodeURIComponent",
-		"deleteManualNode('+id+',decodeURIComponent",
+		"manageManualNode('+id+',decodeURIComponent",
 		"const current=allProxies.find(p=>Number(p.id)===Number(id))||{}",
 		"JSON.stringify({id,address,region})",
 		"JSON.stringify({id,address,note})",
@@ -270,7 +274,7 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing proxy-id action invariant %q", check)
 			}
 		})
@@ -278,9 +282,7 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 
 	for _, unsafe := range []string{
 		"toggleProxy(decodeURIComponent",
-		"editManualRegion(decodeURIComponent",
-		"editManualNote(decodeURIComponent",
-		"deleteManualNode(decodeURIComponent",
+		"manageManualNode(decodeURIComponent",
 		"allProxies.find(p=>p.address===address)",
 		"JSON.stringify({address,region})",
 		"JSON.stringify({address,note})",
@@ -288,7 +290,7 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 		"JSON.stringify({address,enable})",
 	} {
 		t.Run("reject "+unsafe, func(t *testing.T) {
-			if strings.Contains(dashboardHTML, unsafe) {
+			if strings.Contains(dashboardBundle, unsafe) {
 				t.Fatalf("dashboardHTML still depends on address-only proxy action pattern %q", unsafe)
 			}
 		})
@@ -303,22 +305,22 @@ func TestDashboardDoesNotShowOKBadgeForEmptySessionRegion(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing empty-session-region guard %q", check)
 			}
 		})
 	}
 
-	if strings.Contains(dashboardHTML, "'<span class=\"badge ok\">'+html(s.region)") {
+	if strings.Contains(dashboardBundle, "'<span class=\"badge ok\">'+html(s.region)") {
 		t.Fatal("dashboardHTML still renders an ok badge directly from s.region")
 	}
 }
 
 func TestDashboardConnectionExampleAvoidsHttpbinSinglePoint(t *testing.T) {
-	if strings.Contains(dashboardHTML, "httpbin.org") {
+	if strings.Contains(dashboardBundle, "httpbin.org") {
 		t.Fatal("dashboardHTML still uses httpbin.org as a connection example target")
 	}
-	if !strings.Contains(dashboardHTML, "https://www.gstatic.com/generate_204") {
+	if !strings.Contains(dashboardBundle, "https://www.gstatic.com/generate_204") {
 		t.Fatal("dashboardHTML missing stable HTTPS connection example target")
 	}
 }
@@ -341,18 +343,18 @@ func TestDashboardProtocolBadgesShowMixedNodeDualLabels(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing protocol-badges invariant %q", check)
 			}
 		})
 	}
 
 	// 回归防护：协议列不得再内联单徽章，须走 protocolBadges 封装。
-	if strings.Contains(dashboardHTML, "<td><span class=\"badge blue\">'+html(p.protocol).toUpperCase()+'</span></td>") {
+	if strings.Contains(dashboardBundle, "<td><span class=\"badge blue\">'+html(p.protocol).toUpperCase()+'</span></td>") {
 		t.Fatal("dashboardHTML still inlines single protocol badge in row instead of protocolBadges(p)")
 	}
 	// 回归防护：不得再靠地址长相猜 mixed（方案A 已被方案Y 取代）。
-	if strings.Contains(dashboardHTML, "if(addr.startsWith('127.0.0.1:'))return '<span class=\"badge blue\">SOCKS5</span>") {
+	if strings.Contains(dashboardBundle, "if(addr.startsWith('127.0.0.1:'))return '<span class=\"badge blue\">SOCKS5</span>") {
 		t.Fatal("dashboardHTML still guesses mixed node by 127.0.0.1 address instead of dual_protocol field")
 	}
 }
@@ -414,45 +416,97 @@ func TestDashboardWorldMap(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing world-map invariant %q", check)
 			}
 		})
 	}
 }
 
-// TestDashboardCopyProxyCredBuildsFullURL 验证需求2：copyProxyCred 复制完整代理 URL
-// 协议://用户名DSL:密码@IP:端口。密码取 configCache.proxy_auth_password（为空时留空并提示）；
-// mixed 节点用 confirm 选择 socks5/http，单协议节点直接用 p.protocol；
-// 剪贴板仍写完整 URL，成功 toast 仅「已复制」不回显含密码完整 URL。
+// TestDashboardCopyProxyCredBuildsFullURL 验证 copyProxyCred：
+// - 网关节点：协议://用户名DSL:密码@网关入口（密码可为空占位 PASSWORD）
+// - 直连节点（手工 HTTP/SOCKS 等非 tunnel）：协议://节点自身 IP:端口，绝不拼网关密码
+// mixed 网关节点 confirm 选 socks5/http；成功 toast 不回显含真实密码的完整 URL。
 func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 	checks := []string{
-		// 密码取自 config 下发缓存，为空容错。
-		"const pass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''",
-		// 协议选择：mixed 节点（dual_protocol）confirm 选 socks5/http，否则用存储协议。
-		"const scheme=isDualProtocol(p)?(confirm('确定复制 SOCKS5？取消则复制 HTTP')?'socks5':'http'):String(p.protocol||'socks5')",
-		// 完整 URL 拼接：协议://用户名:密码@IP:端口。
-		"const url=scheme+'://'+user+':'+pass+'@'+addr",
-		// 密码未配置时提示。
-		"if(!pass)showToast('代理密码未配置')",
-		// 剪贴板写完整 URL；成功 toast 仅「已复制」，不回显含密码 URL。
-		"navigator.clipboard.writeText(url).then(()=>showToast('已复制'))",
+		// 直连 vs 网关分支：dual_protocol 或回环本地地址才走网关 DSL。
+		"function isGatewayNode(p){",
+		"function isDirectNode(p){return !isGatewayNode(p)}",
+		// 直连复制：scheme://host:port，无 userinfo。
+		"if(isDirectNode(p)){",
+		"const url=scheme+'://'+addr",
+		// 网关复制：仍用 DSL + 密码（空则 PASSWORD 占位）。
+		"const rawPass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''",
+		"const pass=rawPass||'PASSWORD'",
+		"const url=scheme+'://'+encodeProxyUserInfo(user)+':'+encodeProxyUserInfo(pass)+'@'+host",
+		"function encodeProxyUserInfo(value){return encodeURIComponent(String(value||'')).replace(/[!'()*]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())}",
+		"const okMsg=rawPass?'已复制':'已复制，请将 PASSWORD 替换为真实密码'",
+		"navigator.clipboard.writeText(url).then(()=>showToast(okMsg))",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing copy-full-url invariant %q", check)
 			}
 		})
 	}
 
-	// 回归防护：不得再只复制用户名 DSL（旧实现 writeText(cred)）。
-	if strings.Contains(dashboardHTML, "navigator.clipboard.writeText(cred)") {
+	// 回归防护：直连节点不得再强制拼网关 DSL 密码到任意 p.address。
+	if strings.Contains(dashboardBundle, "const url=scheme+'://'+encodeProxyUserInfo(user)+':'+encodeProxyUserInfo(pass)+'@'+addr") {
+		t.Fatal("dashboardHTML copyProxyCred still appends gateway auth to raw node address (breaks open SOCKS/HTTP)")
+	}
+	if strings.Contains(dashboardBundle, "navigator.clipboard.writeText(cred)") {
 		t.Fatal("dashboardHTML copyProxyCred still copies bare username DSL instead of full proxy URL")
 	}
-	// 安全：成功 toast 不得拼接完整 URL（会把密码显示在屏幕上）。
-	if strings.Contains(dashboardHTML, "showToast('已复制: '+url)") {
+	if strings.Contains(dashboardBundle, "showToast('已复制: '+url)") {
 		t.Fatal("dashboardHTML copyProxyCred success toast must not echo full proxy URL with password")
+	}
+	if strings.Contains(dashboardBundle, "showToast(url)") {
+		t.Fatal("dashboardHTML copyProxyCred success toast must not echo url variable with password")
+	}
+}
+
+// TestDashboardProxyActionsUnifiedAcrossSources：
+// 手工与订阅节点共享测试/复制/停用；手工额外「管理」入口（地域/备注/删除），不再两套按钮列。
+func TestDashboardProxyActionsUnifiedAcrossSources(t *testing.T) {
+	checks := []string{
+		"const testBtn=",
+		"const copyBtn=",
+		"const toggleBtn=",
+		// 统一基础操作：测试 + 复制 + 停用/启用。
+		"const baseActions=testBtn+' '+copyBtn+' '+toggleBtn",
+		// 手工附加管理入口，而不是单独一整套不同按钮。
+		"const manageBtn=manual?('<button class=\"mini\" onclick=\"manageManualNode('+id+',decodeURIComponent(\\''+addr+'\\'))\">管理</button>'):''",
+		"const actions=baseActions+(manageBtn?(' '+manageBtn):'')",
+		"function manageManualNode(",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboardHTML missing unified actions invariant %q", check)
+			}
+		})
+	}
+	// 旧的手工专属「地域 备注 测试 复制 停用 删除」长串不得残留为唯一 actions 分支。
+	if strings.Contains(dashboardBundle, "const actions=manual?('<button class=\"mini\" onclick=\"editManualRegion(") {
+		t.Fatal("dashboardHTML still uses divergent manual action column")
+	}
+}
+
+// TestDashboardHasSettingsEntry：顶栏或侧栏必须有系统设置入口（不能只藏在 API 页）。
+func TestDashboardHasSettingsEntry(t *testing.T) {
+	checks := []string{
+		"openSettings()",
+		"settings-modal",
+		// 顶栏 actions 或侧栏 foot 中的设置入口。
+		`title="系统设置"`,
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboard missing settings entry invariant %q", check)
+			}
+		})
 	}
 }
 
@@ -462,8 +516,8 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 // 行渲染调用 aiBadges(p.ai_reachability)。
 func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 	checks := []string{
-		// 表头新增 AI 可达性列。
-		"<th>AI</th>",
+		// AI 表头图标化（图标 + 短标签 AI），与 CF 表头统一为 th-ico 图标语言。
+		`<span class="tx">AI</span>`,
 		// 两处 colspan 为 14（加载中 + 无匹配节点，含勾选列）。
 		"<td colspan=\"14\" class=\"empty\">加载中</td>",
 		"<td colspan=\"14\" class=\"empty\">没有匹配节点</td>",
@@ -471,10 +525,19 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 		"function aiBadges(",
 		// 行渲染引用 ai_reachability 字段。
 		"aiBadges(p.ai_reachability)",
+		// AI 列 body 用 ✓/✗/– 标记取代坏掉的品牌 SVG（可达✓ / 不可达✗ / 未探测–）。
+		"const glyph=n===0?'✓':(n===1?'✗':'–')",
+		// 四服务紧凑标记容器。
+		`'<span class="ai-marks">'`,
+		"<span class=\"ai-mark '+cls+'\"",
+	}
+	// 回归防护：不得再残留坏掉的 AI 品牌图标函数 aiIconSVG。
+	if strings.Contains(dashboardBundle, "function aiIconSVG(") {
+		t.Fatal("dashboardHTML still defines broken brand aiIconSVG; AI column should render ✓/✗/– marks")
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing ai-reachability invariant %q", check)
 			}
 		})
@@ -487,7 +550,7 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 		"<td colspan=\"13\" class=\"empty\">加载中</td>",
 		"<td colspan=\"13\" class=\"empty\">没有匹配节点</td>",
 	} {
-		if strings.Contains(dashboardHTML, unsafe) {
+		if strings.Contains(dashboardBundle, unsafe) {
 			t.Fatalf("dashboardHTML still has stale colspan %q (should be 14 with selection column)", unsafe)
 		}
 	}
@@ -506,28 +569,133 @@ func TestDashboardSubscriptionCustomHeaders(t *testing.T) {
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing subscription custom-headers invariant %q", check)
 			}
 		})
 	}
 }
 
+func TestDashboardManualImportCopyAllowsAnyAnnotationPosition(t *testing.T) {
+	checks := []string{
+		"代理列表（每行一条 socks5/http/https URL，支持前缀/行内/行尾说明）",
+		"prefix socks5://1.2.3.4:1080 suffix",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboardHTML missing manual import copy %q", check)
+			}
+		})
+	}
+
+	if strings.Contains(dashboardBundle, "行尾注释自动忽略") {
+		t.Fatal("dashboardHTML still says manual import only ignores trailing comments")
+	}
+}
+
 func TestDashboardLogoutUsesPostFlow(t *testing.T) {
 	checks := []string{
-		`<button class="btn danger" onclick="logout()">退出</button>`,
+		`<button class="btn danger" onclick="logout()" title="退出登录" aria-label="退出登录">`,
 		"async function logout(){return runAsync('退出失败'",
 		"fetch('/logout',{method:'POST'})",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
-			if !strings.Contains(dashboardHTML, check) {
+			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing POST logout invariant %q", check)
 			}
 		})
 	}
 
-	if strings.Contains(dashboardHTML, `href="/logout"`) {
+	if strings.Contains(dashboardBundle, `href="/logout"`) {
 		t.Fatal("dashboardHTML still exposes logout as a GET link")
+	}
+}
+
+// TestDashboardAPIKeyManagementUI 验证任务7：API Key 管理 UI（列表/创建/吊销/删除）。
+// 列表展示名称、创建时间、末次使用、状态；创建后一次性明文 +「仅显示一次」；
+// 吊销/删除走 confirm；绝不在列表渲染 hash 字段。
+func TestDashboardAPIKeyManagementUI(t *testing.T) {
+	checks := []string{
+		// API 路由调用。
+		"/api/apikeys",
+		"/api/apikey/create",
+		"/api/apikey/revoke",
+		"/api/apikey/delete",
+		// 列表字段文案。
+		"名称",
+		"创建时间",
+		"末次使用",
+		"状态",
+		// 一次性明文提示。
+		"仅显示一次",
+		// 吊销/删除须 confirm。
+		"confirm(",
+		// 关键函数。
+		"function loadAPIKeys(",
+		"function createAPIKey(",
+		"function revokeAPIKey(",
+		"function deleteAPIKey(",
+		// 打开设置时加载 keys。
+		"loadAPIKeys",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboardHTML missing API Key management invariant %q", check)
+			}
+		})
+	}
+
+	// 负向：列表渲染不得展示 hash / 历史明文。
+	for _, unsafe := range []string{
+		"k.hash",
+		"key_hash",
+		"key.hash",
+	} {
+		t.Run("reject "+unsafe, func(t *testing.T) {
+			if strings.Contains(dashboardBundle, unsafe) {
+				t.Fatalf("dashboardHTML must not render hash field %q", unsafe)
+			}
+		})
+	}
+
+	// revoke/delete 必须各自带 confirm（不只是页面别处的 confirm）。
+	if !strings.Contains(dashboardBundle, "revoke") || !strings.Contains(dashboardBundle, "delete") {
+		t.Fatal("dashboardHTML missing revoke/delete API key actions")
+	}
+	// 至少两处 confirm 用于吊销/删除文案（中文）。
+	revokeConfirm := strings.Contains(dashboardBundle, "吊销") && strings.Contains(dashboardBundle, "confirm(")
+	deleteConfirm := strings.Contains(dashboardBundle, "删除") && strings.Contains(dashboardBundle, "confirm(")
+	if !revokeConfirm || !deleteConfirm {
+		t.Fatal("dashboardHTML missing confirm for API key revoke/delete")
+	}
+}
+
+// TestDashboardOpenAPITab 验证任务9：开放 API 功能页/tab。
+// 含 data-tab=api、page-api、端点列表、鉴权说明、限流、curl 示例、连接模式、链到 Key 管理。
+func TestDashboardOpenAPITab(t *testing.T) {
+	checks := []string{
+		`data-tab="api"`,
+		`id="page-api"`,
+		"/api/v1/nodes",
+		"/api/v1/occupancy",
+		"/api/v1/ping",
+		"Authorization: Bearer",
+		"X-API-Key",
+		"60/min",
+		"curl",
+		"direct",
+		"gateway",
+		`<span class="lbl">API</span>`,
+		"<h3>API</h3>",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboardHTML missing Open API tab invariant %q", check)
+			}
+		})
 	}
 }

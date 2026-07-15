@@ -8,10 +8,12 @@ import requests
 import time
 import sys
 import signal
+import os
+from urllib.parse import quote
 from requests.exceptions import RequestException
 
 # 配置
-PROXY_HOST = "127.0.0.1"
+PROXY_HOST = os.getenv("PROXY_HOST", "127.0.0.1")
 PROXY_PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 7802
 TEST_URL = "http://ip-api.com/json/?fields=countryCode,query"
 DELAY_SECONDS = 1
@@ -48,11 +50,36 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
+def proxy_auth_username():
+    """Build the proxy username DSL from GOPROXY_AUTH_* env vars."""
+    username = os.getenv("GOPROXY_AUTH_USERNAME", "").strip()
+    region = os.getenv("GOPROXY_AUTH_REGION", "").strip()
+    session = os.getenv("GOPROXY_AUTH_SESSION", "").strip()
+    if region:
+        username = f"{username}-region-{region}"
+    if session:
+        username = f"{username}-session-{session}"
+    return username
+
+
+def require_proxy_auth():
+    """Return proxy auth credentials or exit before entering continuous mode."""
+    base_username = os.getenv("GOPROXY_AUTH_USERNAME", "").strip()
+    password = os.getenv("GOPROXY_AUTH_PASSWORD", "")
+    if not base_username or not password:
+        print("Missing proxy credentials.", file=sys.stderr)
+        print("Set GOPROXY_AUTH_USERNAME and GOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings.", file=sys.stderr)
+        print("Optional: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser", file=sys.stderr)
+        sys.exit(2)
+    return proxy_auth_username(), password
+
+
 def test_http_proxy_continuous():
     """持续测试 HTTP 代理"""
     global total_count, success_count
     
-    proxy_url = f"http://{PROXY_HOST}:{PROXY_PORT}"
+    username, password = require_proxy_auth()
+    proxy_url = f"http://{quote(username, safe='')}:{quote(password, safe='')}@{PROXY_HOST}:{PROXY_PORT}"
     proxies = {
         "http": proxy_url,
         "https": proxy_url,
@@ -94,4 +121,10 @@ def test_http_proxy_continuous():
 
 
 if __name__ == "__main__":
+    # --check-auth：仅校验代理认证环境变量后立即退出，不进入持续请求循环。
+    # 缺失凭据时 require_proxy_auth 打印报错并以退出码 2 结束；便于 CI/dry-run。
+    if "--check-auth" in sys.argv[1:]:
+        username, _ = require_proxy_auth()
+        print(f"proxy auth OK: username={username}")
+        sys.exit(0)
     test_http_proxy_continuous()

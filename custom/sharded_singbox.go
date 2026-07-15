@@ -25,8 +25,16 @@ type singBoxShard interface {
 	GetLocalAddress(nodeKey string) string
 }
 
+// assemblyAwareShard exposes exact node assembly decisions when available.
+// Shard implementations without it keep the conservative fallback behavior.
+type assemblyAwareShard interface {
+	GetAssemblyDiagnostics() assemblyDiagnostics
+}
+
 // 编译期断言：真实进程实现满足分片接口。若 SingBoxProcess 方法签名漂移，此处将直接编译失败。
 var _ singBoxShard = (*SingBoxProcess)(nil)
+var _ assemblyAwareShard = (*SingBoxProcess)(nil)
+var _ assemblyAwareShard = (*ShardedSingBox)(nil)
 
 // ShardedSingBox 是纯编排组件：把节点集合按稳定哈希切分到 N 个独立 sing-box 分片，
 // 使得订阅重载时仅重启节点集合真正变化的分片，未变化分片保持进程不动（平滑重载）。
@@ -41,6 +49,8 @@ type ShardedSingBox struct {
 	// assignedKeys 记录每个分片"当前已成功加载"的节点 key 集合。
 	// 仅在 shard.Reload 成功后更新，Reload 失败时保持不变，以便下次重载对该分片重试。
 	assignedKeys []map[string]bool
+	// assembly 汇总最近一次成功提交的节点装配诊断（跨分片）。
+	assembly assemblyDiagnostics
 }
 
 // shardFactory 依据分片序号与分片起始端口构造一个分片实现。
@@ -114,24 +124,39 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 		return errors.New("sing-box already stopped")
 	}
 
-	// 1. 过滤 tunnel 节点。
+	// 1. 过滤 tunnel 节点，并预先剔除明确不可构建节点（坏节点不阻断好节点，也不污染 assignedKeys）。
 	var tunnelNodes []ParsedNode
+	var preRejected []assemblyRejectedNode
 	for _, n := range nodes {
-		if !n.IsDirect() {
-			tunnelNodes = append(tunnelNodes, n)
+		if n.IsDirect() {
+			continue
 		}
+		if _, err := buildOutbound(n, "prefilter"); err != nil {
+			log.Printf("[custom] 跳过节点 %s (%s): %v", n.Name, n.Type, err)
+			preRejected = append(preRejected, assemblyRejectedNode{node: n, err: err})
+			continue
+		}
+		tunnelNodes = append(tunnelNodes, n)
 	}
 
-	// 2. 无 tunnel 节点：全部停止并清空已分配集。
+	// 2. 全部 tunnel 节点被明确拒绝时，保留最后一次成功运行态。
+	// 这与真正的 direct-only 目标不同：前者刷新失败，不能停止旧代理；后者才应清空运行态。
 	if len(tunnelNodes) == 0 {
+		if len(preRejected) > 0 {
+			return fmt.Errorf("所有隧道节点均被拒绝: %w", incompletePortAllocationErrorWithDiagnostics(
+				rejectedNodesOnly(preRejected), map[string]int{}, assemblyDiagnostics{rejected: preRejected}))
+		}
+
+		// 无 tunnel 节点：全部停止并清空已分配集。
 		for i, shard := range sb.shards {
 			shard.Stop()
 			sb.assignedKeys[i] = make(map[string]bool)
 		}
+		sb.assembly = assemblyDiagnostics{}
 		return nil
 	}
 
-	// 3. 分区并稳定排序。
+	// 3. 分区并稳定排序（仅可构建节点）。
 	target := make([][]ParsedNode, len(sb.shards))
 	for _, n := range tunnelNodes {
 		idx := shardIndexForKey(n.NodeKey(), len(sb.shards))
@@ -169,11 +194,12 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 		}
 		// 仅 ReadyPorts==TotalPorts 且目标 key 均在 portMap 时才提交 assignedKeys。
 		// Partial / 段满跳过等假成功不得提交，否则上层会删旧代理。
-		if err := shardReloadCommitError(target[i], sb.shards[i]); err != nil {
+		accepted, err := shardReloadCommitError(target[i], sb.shards[i])
+		if err != nil {
 			errs = append(errs, fmt.Errorf("shard %d: %w", i, err))
 			continue
 		}
-		sb.assignedKeys[i] = newKeys
+		sb.assignedKeys[i] = nodeKeySet(accepted)
 	}
 
 	if len(errs) > 0 {
@@ -193,7 +219,7 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 				rbErrs = append(rbErrs, fmt.Errorf("shard %d rollback: %w", i, err))
 				continue
 			}
-			if err := shardReloadCommitError(oldNodesByShard[i], sb.shards[i]); err != nil {
+			if _, err := shardReloadCommitError(oldNodesByShard[i], sb.shards[i]); err != nil {
 				rbErrs = append(rbErrs, fmt.Errorf("shard %d rollback: %w", i, err))
 			}
 		}
@@ -202,7 +228,46 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 		}
 		return errors.Join(errs...)
 	}
+
+	// 成功提交后汇总诊断，供 Manager 区分“明确拒绝”与“加载不完整”。
+	sb.assembly = mergeAssemblyDiagnostics(preRejected, sb.shards)
 	return nil
+}
+
+func rejectedNodesOnly(rejected []assemblyRejectedNode) []ParsedNode {
+	out := make([]ParsedNode, 0, len(rejected))
+	for _, r := range rejected {
+		out = append(out, r.node)
+	}
+	return out
+}
+
+func mergeAssemblyDiagnostics(preRejected []assemblyRejectedNode, shards []singBoxShard) assemblyDiagnostics {
+	out := assemblyDiagnostics{rejected: append([]assemblyRejectedNode(nil), preRejected...)}
+	for _, shard := range shards {
+		aware, ok := shard.(assemblyAwareShard)
+		if !ok {
+			// 无诊断的分片：把当前已加载节点视为 accepted。
+			out.accepted = append(out.accepted, shard.GetNodes()...)
+			continue
+		}
+		d := aware.GetAssemblyDiagnostics()
+		out.accepted = append(out.accepted, d.accepted...)
+		out.rejected = append(out.rejected, d.rejected...)
+		out.segmentFull = append(out.segmentFull, d.segmentFull...)
+	}
+	return out
+}
+
+// GetAssemblyDiagnostics 汇总各分片装配诊断（调用方需在 Reload 成功后读取）。
+func (sb *ShardedSingBox) GetAssemblyDiagnostics() assemblyDiagnostics {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return assemblyDiagnostics{
+		accepted:    append([]ParsedNode(nil), sb.assembly.accepted...),
+		rejected:    append([]assemblyRejectedNode(nil), sb.assembly.rejected...),
+		segmentFull: append([]ParsedNode(nil), sb.assembly.segmentFull...),
+	}
 }
 
 func copyKeySet(in map[string]bool) map[string]bool {
@@ -218,23 +283,45 @@ func copyKeySet(in map[string]bool) map[string]bool {
 
 // shardReloadCommitError 在分片 Reload 返回 nil 后二次校验是否可提交 assignedKeys。
 // 空目标（停止分片）视为完整；否则要求 portMap 覆盖全部目标 key，且运行态全就绪。
-func shardReloadCommitError(target []ParsedNode, shard singBoxShard) error {
+func shardReloadCommitError(target []ParsedNode, shard singBoxShard) ([]ParsedNode, error) {
 	if len(target) == 0 {
-		return nil
+		return nil, nil
 	}
 	portMap := shard.GetPortMap()
-	if err := incompletePortAllocationError(target, portMap); err != nil {
-		return err
+	diagnostics := assemblyDiagnostics{}
+	if aware, ok := shard.(assemblyAwareShard); ok {
+		diagnostics = aware.GetAssemblyDiagnostics()
+	}
+
+	rejected := diagnostics.rejectedKeys()
+	accepted := make([]ParsedNode, 0, len(target))
+	missing := make([]ParsedNode, 0)
+	for _, node := range target {
+		key := node.NodeKey()
+		if rejected[key] {
+			continue
+		}
+		if _, ok := portMap[key]; ok {
+			accepted = append(accepted, node)
+			continue
+		}
+		missing = append(missing, node)
+	}
+	if len(missing) > 0 {
+		return nil, incompletePortAllocationErrorWithDiagnostics(missing, portMap, diagnostics)
+	}
+	if len(accepted) == 0 {
+		return nil, fmt.Errorf("所有隧道节点均被拒绝: %w", incompletePortAllocationErrorWithDiagnostics(target, portMap, diagnostics))
 	}
 	rs := shard.GetRuntimeStatus()
 	if rs.Status == SingBoxStatusPartial || rs.Reason == "ports_not_ready" {
-		return fmt.Errorf("sing-box 重载不完整: status=%s reason=%s ready=%d/%d",
+		return nil, fmt.Errorf("sing-box 重载不完整: status=%s reason=%s ready=%d/%d",
 			rs.Status, rs.Reason, rs.ReadyPorts, rs.TotalPorts)
 	}
 	if rs.TotalPorts > 0 && rs.ReadyPorts != rs.TotalPorts {
-		return fmt.Errorf("sing-box 端口未完全就绪（%d/%d）", rs.ReadyPorts, rs.TotalPorts)
+		return nil, fmt.Errorf("sing-box 端口未完全就绪（%d/%d）", rs.ReadyPorts, rs.TotalPorts)
 	}
-	return nil
+	return accepted, nil
 }
 
 // shardNeedsReloadForRuntime 判断 key 集未变化时是否仍需因运行态异常而强制重载。
@@ -255,10 +342,19 @@ func shardNeedsReloadForRuntime(target []ParsedNode, shard singBoxShard) bool {
 	if rs.TotalPorts > 0 && rs.ReadyPorts != rs.TotalPorts {
 		return true
 	}
-	if incompletePortAllocationError(target, shard.GetPortMap()) != nil {
+	// 已提交的 assigned 节点若丢失端口，必须重载；明确拒绝的节点不计入缺失。
+	if _, err := shardReloadCommitError(target, shard); err != nil {
 		return true
 	}
 	return false
+}
+
+func nodeKeySet(nodes []ParsedNode) map[string]bool {
+	keys := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		keys[node.NodeKey()] = true
+	}
+	return keys
 }
 
 const shardHealthCheckInterval = 5 * time.Second

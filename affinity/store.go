@@ -108,6 +108,27 @@ func (s *Store) Remove(sessionID string) {
 	}
 }
 
+// RemoveIfProxyID 仅在会话仍绑定到 expectedProxyID 时删除，避免旧失败请求
+// 删除已被并发请求重新绑定到健康节点的会话。
+func (s *Store) RemoveIfProxyID(sessionID string, expectedProxyID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	binding, ok := s.bindings[sessionID]
+	if !ok {
+		return false
+	}
+	if s.expired(binding) {
+		s.removeBindingLocked(sessionID, binding)
+		return false
+	}
+	if binding.ProxyID != expectedProxyID {
+		return false
+	}
+	s.removeBindingLocked(sessionID, binding)
+	return true
+}
+
 // SetCooldown records that proxyID must not receive new session first-binds
 // until the given absolute time. Sticky sessions are unaffected. Callers that
 // want CD disabled should simply skip calling this method (or use config CD=0

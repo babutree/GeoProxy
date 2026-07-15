@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"goproxy/storage"
+	"goproxy/validator"
 )
 
 // TestAddManualTunnelNodeRollsBackRuntimeWhenDBTransactionFails:
@@ -147,6 +148,136 @@ func TestRefreshSubscriptionReturnsErrorWhenDeletingOldProxiesFails(t *testing.T
 	// New proxies from the file must not be partially committed if delete failed first.
 	if _, err := store.GetProxyByAddress("10.0.0.1:8080"); err == nil {
 		t.Fatal("new proxy committed despite delete failure")
+	}
+}
+
+// TestRefreshSubscriptionToDirectRemovesOldSubscriptionTunnelRuntime:
+// when a subscription previously owned a tunnel node but refreshes to direct-only,
+// the old tunnel must be removed from sing-box runtime instead of surviving via GetNodes().
+func TestRefreshSubscriptionToDirectRemovesOldSubscriptionTunnelRuntime(t *testing.T) {
+	store := newTestStorage(t)
+	directFile := writeSubscriptionFile(t, "proxies:\n  - name: direct\n    type: http\n    server: 10.0.0.10\n    port: 8080\n")
+	subID, err := store.AddSubscription("sub", "", directFile, "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+
+	sb := newSpyShard()
+	oldNode := tunnelNode("old-sub-tunnel", "old-sub.example.com", "oldpass")
+	if err := sb.Reload([]ParsedNode{oldNode}); err != nil {
+		t.Fatalf("seed Reload: %v", err)
+	}
+	oldPort := sb.GetPortMap()[oldNode.NodeKey()]
+	oldAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort))
+	if err := store.AddProxyWithSource(oldAddr, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("seed old subscription proxy: %v", err)
+	}
+
+	m := &Manager{storage: store, validator: validator.New(1, 1, "http://127.0.0.1/validate"), singbox: sb}
+	if err := m.RefreshSubscription(subID); err != nil {
+		t.Fatalf("RefreshSubscription: %v", err)
+	}
+
+	for _, n := range sb.GetNodes() {
+		if n.NodeKey() == oldNode.NodeKey() {
+			t.Fatal("old subscription tunnel still in runtime after direct-only refresh")
+		}
+	}
+	if _, err := store.GetProxyByAddress(oldAddr); err == nil {
+		t.Fatal("old subscription tunnel proxy still in DB after refresh")
+	}
+}
+
+// TestDeleteSubscriptionRemovesRuntimeTunnel:
+// deleting a subscription must remove its tunnel runtime, not just DB rows.
+func TestDeleteSubscriptionRemovesRuntimeTunnel(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("sub", "", writeSubscriptionFile(t, "trojan://password@delete-sub.example.com:443?sni=delete-sub.example.com#delete-sub"), "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+
+	sb := newSpyShard()
+	node := tunnelNode("delete-sub", "delete-sub.example.com", "password")
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("seed Reload: %v", err)
+	}
+	port := sb.GetPortMap()[node.NodeKey()]
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if err := store.AddProxyWithSource(addr, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("seed subscription proxy: %v", err)
+	}
+
+	m := &Manager{storage: store, singbox: sb}
+	if err := m.DeleteSubscription(subID); err != nil {
+		t.Fatalf("DeleteSubscription: %v", err)
+	}
+
+	for _, n := range sb.GetNodes() {
+		if n.NodeKey() == node.NodeKey() {
+			t.Fatal("deleted subscription tunnel still in runtime")
+		}
+	}
+	if _, err := store.GetSubscription(subID); err == nil {
+		t.Fatal("subscription row still present after delete")
+	}
+}
+
+// TestRefreshSubscriptionRollsBackRuntimeWhenDBDeleteFails:
+// after a successful runtime reload, a DB delete failure must surface and restore old runtime.
+func TestRefreshSubscriptionRollsBackRuntimeWhenDBDeleteFails(t *testing.T) {
+	store := newTestStorage(t)
+	file := writeSubscriptionFile(t, "trojan://password@new-sub.example.com:443?sni=new-sub.example.com#new-sub")
+	subID, err := store.AddSubscription("sub", "", file, "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+
+	sb := newSpyShard()
+	oldNode := tunnelNode("old-sub", "old-sub.example.com", "oldpass")
+	if err := sb.Reload([]ParsedNode{oldNode}); err != nil {
+		t.Fatalf("seed Reload: %v", err)
+	}
+	oldAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(sb.GetPortMap()[oldNode.NodeKey()]))
+	if err := store.AddProxyWithSource(oldAddr, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("seed old subscription proxy: %v", err)
+	}
+	if _, err := store.GetDB().Exec(fmt.Sprintf(`
+		CREATE TRIGGER fail_sub_delete_after_reload
+		BEFORE DELETE ON proxies
+		WHEN OLD.subscription_id = %d
+		BEGIN
+			SELECT RAISE(ABORT, 'injected subscription delete failure after reload');
+		END
+	`, subID)); err != nil {
+		t.Fatalf("install delete fail trigger: %v", err)
+	}
+
+	m := &Manager{storage: store, validator: validator.New(1, 1, "http://127.0.0.1/validate"), singbox: sb}
+	err = m.RefreshSubscription(subID)
+	if err == nil {
+		t.Fatal("RefreshSubscription expected DB delete failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "injected subscription delete failure after reload") {
+		t.Fatalf("error = %v, want injected delete failure", err)
+	}
+
+	keys := map[string]bool{}
+	for _, n := range sb.GetNodes() {
+		keys[n.NodeKey()] = true
+	}
+	if !keys[oldNode.NodeKey()] {
+		t.Fatalf("old runtime node missing after DB failure rollback; keys=%v", keys)
+	}
+	newNode, parseErr := ParseSingleLink("trojan://password@new-sub.example.com:443?sni=new-sub.example.com#new-sub")
+	if parseErr != nil {
+		t.Fatalf("ParseSingleLink: %v", parseErr)
+	}
+	if keys[newNode.NodeKey()] {
+		t.Fatalf("new runtime node committed despite DB failure; keys=%v", keys)
+	}
+	if _, err := store.GetProxyByAddress(oldAddr); err != nil {
+		t.Fatalf("old DB proxy missing after failed refresh: %v", err)
 	}
 }
 
