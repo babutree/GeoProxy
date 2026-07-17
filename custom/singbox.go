@@ -195,21 +195,29 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 
 	// 健壮性：整份配置若校验失败，二分剔除坏节点，用剩余可用节点重建，
 	// 避免单个非法节点拖垮全部订阅（一坏全灭）。
+	// 关键：被剔除的节点必须记入 assembly.rejected，否则上层 shardReloadCommitError
+	// 仍按完整 target 要端口 → 误报「端口分配不完整」并整批回滚成 0。
+	prePruneAccepted := append([]ParsedNode(nil), diagnostics.accepted...)
 	goodNodes := s.pruneInvalidNodes(diagnostics.accepted)
 	if len(goodNodes) == 0 {
 		restoreState()
 		s.setStatusLocked(SingBoxStatusFailed, "all_tunnel_nodes_invalid", 0)
 		return fmt.Errorf("所有隧道节点均无法通过 sing-box 校验")
 	}
-	if len(goodNodes) != len(diagnostics.accepted) {
+	if len(goodNodes) != len(prePruneAccepted) {
 		log.Printf("[custom] ⚠️ 剔除 %d 个非法节点，保留 %d 个可用节点",
-			len(diagnostics.accepted)-len(goodNodes), len(goodNodes))
+			len(prePruneAccepted)-len(goodNodes), len(goodNodes))
+		// 必须保留 rebuild 前的 rejected（buildOutbound 失败等），否则 generateConfig
+		// 会换一份新 diagnostics，上层 commit 仍按完整 target 要端口 → 整批回滚。
+		prevRejected := append([]assemblyRejectedNode(nil), diagnostics.rejected...)
+		pruned := prunedAsRejected(prePruneAccepted, goodNodes)
 		diagnostics, err = s.generateConfig(goodNodes)
 		if err != nil {
 			restoreState()
 			s.setStatusLocked(SingBoxStatusFailed, "config_rebuild_failed", 0)
 			return fmt.Errorf("重建 sing-box 配置失败: %w", err)
 		}
+		diagnostics.rejected = append(append(prevRejected, diagnostics.rejected...), pruned...)
 		s.assembly = diagnostics
 		if err := incompletePortAllocationErrorWithDiagnostics(diagnostics.accepted, s.portMap, diagnostics); err != nil {
 			restoreState()
@@ -233,6 +241,7 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	}
 
 	s.nodes = goodNodes
+	// 只刷新 accepted；rejected 必须保留（含 prune / 构建失败），供 commit 跳过坏节点。
 	s.assembly.accepted = append([]ParsedNode(nil), goodNodes...)
 	return nil
 }
@@ -344,6 +353,23 @@ func (s *SingBoxProcess) pruneInvalidNodes(nodes []ParsedNode) []ParsedNode {
 	left := s.pruneInvalidNodes(nodes[:mid])
 	right := s.pruneInvalidNodes(nodes[mid:])
 	return append(left, right...)
+}
+
+// prunedAsRejected 把 check/prune 阶段丢掉的节点记为明确拒绝，
+// 使 shardReloadCommitError / acceptedNodesForCommit 可跳过它们，
+// 而不是把缺失端口误判为「端口分配不完整」并整订阅回滚。
+func prunedAsRejected(before, after []ParsedNode) []assemblyRejectedNode {
+	kept := nodeKeySet(after)
+	out := make([]assemblyRejectedNode, 0)
+	for _, n := range before {
+		if !kept[n.NodeKey()] {
+			out = append(out, assemblyRejectedNode{
+				node: n,
+				err:  fmt.Errorf("无法通过 sing-box 校验，已剔除"),
+			})
+		}
+	}
+	return out
 }
 
 // generateConfig 生成 sing-box JSON 配置并写入运行态（更新 s.portMap、写 configFile）。
@@ -669,8 +695,9 @@ func applyTransport(raw map[string]interface{}, out map[string]interface{}) erro
 	network := getStrDefault(raw, "network", "tcp")
 
 	switch network {
-	case "tcp", "":
+	case "tcp", "", "raw", "none":
 		// 裸 TCP，sing-box 默认即为此，无需 transport 字段。
+		// clash-meta 有时用 raw、Xray/v2rayN 用 none 表示纯 TCP，语义等同。
 		return nil
 
 	case "ws":
@@ -700,18 +727,49 @@ func applyTransport(raw map[string]interface{}, out map[string]interface{}) erro
 		out["transport"] = transport
 		return nil
 
-	case "h2":
+	case "h2", "http":
+		// clash-meta 的 network=http 与 h2 均映射为 sing-box http transport。
+		// 选项来源：h2 读 h2-opts，http 读 http-opts；两者结构一致（path + host 列表）。
 		transport := map[string]interface{}{
 			"type": "http",
 		}
-		if h2Opts, ok := raw["h2-opts"].(map[string]interface{}); ok {
-			if path := getStr(h2Opts, "path"); path != "" {
+		optsKey := "h2-opts"
+		if network == "http" {
+			optsKey = "http-opts"
+		}
+		if httpOpts, ok := raw[optsKey].(map[string]interface{}); ok {
+			// clash-meta 的 path 可能是 string 或 string 列表；host 同理。
+			// 也常见仅写 headers.Host 而不写 host 字段。
+			if path := getStr(httpOpts, "path"); path != "" {
 				transport["path"] = path
-			}
-			if host, ok := h2Opts["host"].([]interface{}); ok && len(host) > 0 {
-				if h, ok := host[0].(string); ok {
-					transport["host"] = []string{h}
+			} else if pathArr, ok := httpOpts["path"].([]interface{}); ok && len(pathArr) > 0 {
+				if p, ok := pathArr[0].(string); ok && p != "" {
+					transport["path"] = p
 				}
+			}
+			hostVal := ""
+			if host, ok := httpOpts["host"].([]interface{}); ok && len(host) > 0 {
+				if h, ok := host[0].(string); ok {
+					hostVal = h
+				}
+			} else if hostStr := getStr(httpOpts, "host"); hostStr != "" {
+				hostVal = hostStr
+			}
+			if hostVal == "" {
+				if headers, ok := httpOpts["headers"].(map[string]interface{}); ok {
+					if h := getStr(headers, "Host"); h != "" {
+						hostVal = h
+					} else if h := getStr(headers, "host"); h != "" {
+						hostVal = h
+					} else if arr, ok := headers["Host"].([]interface{}); ok && len(arr) > 0 {
+						if h, ok := arr[0].(string); ok {
+							hostVal = h
+						}
+					}
+				}
+			}
+			if hostVal != "" {
+				transport["host"] = []string{hostVal}
 			}
 		}
 		out["transport"] = transport

@@ -12,11 +12,18 @@
 - **WebUI 布局**：按设计稿对齐外壳（总控/运维分组、主题仅顶栏、设置独立页、总览左分布右栏）
 - **主题令牌**：生产 CSS 改为 `data-theme="space"|"day"`（对齐设计稿）；兼容旧 localStorage `light`/`dark`
 - **总览节点分布**：动画分布图替换世界地图；按地域与延迟档聚合，连线表示 session 绑定；可暂停
+- **活跃会话表/卡片**：对齐设计稿详情（Proxy ID、DSL 地域、协议、来源、最近活跃、冷却、占用条、路由标签）；出口节点优先真实 `exit_ip`，本机 `127.0.0.1:mixed` 仅作绑定地址；定时刷新保留展开状态
+- **节点统一管理弹窗**：订阅与手工节点共享「管理」入口；地域/备注/删除走应用内弹窗，替换浏览器 `prompt`/`confirm`
 - **节点表 AI/Cloudflare**：表头与筛选用 Cloudflare / ChatGPT / Claude / Gemini / Grok；状态为畅通/阻断/未知
 - **节点名称/来源列去重**：名称列不再回退显示订阅名（来源列已展示），无备注时显示脱敏地址
-- **备注编辑对订阅节点开放**：名称列可点击编辑备注（订阅节点亦可），region/删除仍限手工节点
-- **轨道分布动画丝滑化**：卫星改为单一 `transform` 合成层动画（消除逐帧 left/top/width/height 布局抖动）；引力透镜由椭圆改为平滑鹅卵石轮廓
+- **备注/地域编辑**：非破坏性路径对订阅节点开放（删除走来源无关的 `/api/proxy/delete`）
+- **轨道分布动画丝滑化**：卫星改为单一 `transform` 合成层动画；引力透镜改为平滑鹅卵石轮廓；beam 能量色读 `--sun-energy`
+- **轨道几何即时重算**：侧栏折叠/展开与返回总览时重建 stage，避免网关/轨道/S 标记数秒错位
+- **星标视觉**：未点亮亦用琥珀色描边星，点亮带光晕，提升辨识度
 - **节点表列宽**：收紧 ip-api 标记与 Cloudflare 列间距；AI 解锁四标记强制单行不再挤成 2×2
+- **节点清单分页**：默认每页 20 条，可选 20/50/100；筛选条件变化回到第 1 页（替换无限滚动分批）
+- **总览布局**：右侧改为「如何连接」，「地域分布」下移，避免地域过多撑高星系卡片
+- **星系会话连线**：按「地区+品质/延迟档」匹配卫星，不再因该地区任一 session 点亮全部 S/A/B/C 轨道
 - **节点状态**：`disabled` 且无 `last_check` 显示「待验证」，有验证记录或失败次数超限显示「不可用」
 - **示例凭据**：文档/默认用户名占位改为 `username`，连接示例主机改为 `YOUR-HOST-IP`
 - **DSL 文档**：README / GEO_FILTER / CLAUDE 补齐固定顺序中的 `-unlock-`
@@ -25,13 +32,13 @@
 
 ### 修复
 
-- **带认证的 http/socks 节点**：解析、存储（`proxy_username`/`proxy_password` 列）、拨号（HTTP CONNECT Basic / SOCKS5 RFC1929）与验证全链路注入上游凭据；此前凭据被丢弃导致认证节点永远「待验证」且「测试」无效。凭据绝不写入日志或错误串
-- **节点复制携带凭据**：直连节点「复制」在存有账密时生成 `scheme://user:pass@host:port`，不再丢失认证信息
-- **shadowsocksr 诚实跳过**：ssr 改为解析阶段按节点显式跳过（sing-box 1.13 无原生支持），不再「解析通过却在构建必然失败」导致计数虚高、节点永远待验证
-- **reality 缺指纹兜底**：含 `reality-opts` 但缺 `client-fingerprint` 的节点补默认 utls 指纹，避免 sing-box check 拒绝
-- **带认证的 http/socks 节点**：解析、存储、拨号与验证全链路支持 `user:pass@host:port` 上游凭据（此前凭据被静默丢弃，导致认证代理永远「待验证」、测试无反应、复制丢失账密）；凭据仅存于 DB 与内存握手，绝不写入日志/错误串
-- **订阅节点类型覆盖对齐**：`parseClashProxy` 支持类型与 `buildOutbound` 严格对齐；`shadowsocksr`（sing-box 1.13 无原生支持）改为解析阶段明确按节点跳过，消除「解析通过却构建必失败」的计数虚高与永久待验证
-- **Reality 缺省指纹**：含 `reality-opts` 但缺 `client-fingerprint` 的 vless 节点自动补默认 utls 指纹，避免 sing-box 拒绝
+- **带认证的 http/socks 节点**：解析、存储、拨号与验证全链路支持 `user:pass@host:port`；凭据仅存于 DB 与内存握手，绝不入日志
+- **验证失败状态**：`DisableProxyByID` 同步写 `last_check`，验证失败节点显示「不可用」而非永久「待验证」
+- **节点复制携带凭据**：直连节点「复制」在存有账密时生成 `scheme://user:pass@host:port`
+- **传输层映射**：`network=http`→sing-box http transport，`raw`/`none`→裸 TCP；消除 clash-meta 大批误跳过
+- **shadowsocksr 诚实跳过**：解析阶段按节点显式跳过（sing-box 1.13 无原生支持）
+- **Reality 缺省指纹**：缺 `client-fingerprint` 时补默认 utls，避免 sing-box 拒绝
+- **校验剔除后误报端口不完整**：`pruneInvalidNodes` 丢弃的节点记入 `assembly.rejected`，commit 层可跳过，避免整订阅回滚成 0
 - **订阅刷新保留 user_paused**：刷新 DELETE+INSERT 后按 address 回写用户停用，避免手动停用被静默撤销
 - **sticky + unlock 回归**：预绑 session 在 unlock 不匹配时 rebind，并补真 sticky 测试
 - **sticky 尊重暂停**：`user_paused` 与父订阅 `paused` 时 sticky 不得继续粘住旧节点

@@ -79,41 +79,41 @@ const dashboardHTML = `<!DOCTYPE html>
      </div>
     </div>
    </div>
-   <div class="overview-side">
-    <div class="card">
-     <div class="card-head card-h"><h3>sing-box 引擎</h3><div class="tools"><button class="mini" onclick="runAsync('状态刷新失败',loadCustomStatus)">刷新</button></div></div>
-     <div class="card-body card-b"><div id="singbox-status"><div class="empty">加载中</div></div></div>
-    </div>
-    <div class="card">
-     <div class="card-head card-h"><h3>地域分布</h3><span class="muted sub" id="region-total">--</span></div>
-     <div class="card-body card-b"><div id="region-list"><div class="empty">加载中</div></div></div>
+    <div class="overview-side">
+     <div class="card">
+      <div class="card-head card-h"><h3>sing-box 引擎</h3><div class="tools"><button class="mini" onclick="runAsync('状态刷新失败',loadCustomStatus)">刷新</button></div></div>
+      <div class="card-body card-b"><div id="singbox-status"><div class="empty">加载中</div></div></div>
+     </div>
+     <div class="card">
+      <div class="card-head card-h"><h3>如何连接</h3><span class="muted sub">网关端口 + 认证</span></div>
+      <div class="card-body card-b">
+       <div class="conn">
+        <div class="conn-item"><div class="k">SOCKS5 代理</div><div class="v" id="conn-socks5">127.0.0.1:7801</div><div class="desc">raw TCP，HTTP/HTTPS 目标都可</div></div>
+        <div class="conn-item"><div class="k">HTTP 代理</div><div class="v" id="conn-http">127.0.0.1:7802</div><div class="desc">HTTPS 目标走 CONNECT 隧道</div></div>
+        <div class="conn-item"><div class="k">用户名（含路由 DSL）</div><div class="v" id="conn-user">username</div><div class="desc">见下方 DSL 规则</div></div>
+        <div class="conn-item"><div class="k">密码</div><div class="v" id="conn-pass">见首次启动日志 / 系统设置</div><div class="desc" id="conn-auth-state">代理认证状态</div></div>
+       </div>
+       <div class="cmd" id="conn-cmd">curl --socks5 username:PASSWORD@127.0.0.1:7801 https://www.gstatic.com/generate_204</div>
+       <div class="hint" id="dsl-hint">前缀 “username” = 代理认证用户名；-region-XX 地域；-unlock-gpt|claude|gemini|grok|cf|all 解锁过滤；-node-IP:端口 锁定入口节点(出口可能因上游漂移)；-session-ID 黏连。</div>
+       <div id="dsl-examples" hidden></div>
+       <div class="notice"><span>⚠️</span><span><b>「出口 IP」不是连接地址</b>，须走网关端口 + 认证。</span></div>
+      </div>
+     </div>
     </div>
    </div>
-  </div>
 
-  <div class="card" style="margin-top:16px">
-   <div class="card-head card-h"><h3>活跃会话</h3><span class="muted sub" id="ov-sess-count">--</span><div class="tools"><button class="mini" type="button" onclick="switchTab('sessions')">查看全部</button></div></div>
-   <div class="card-body card-b" style="padding:6px 8px;overflow-x:auto">
-    <table class="tbl"><thead><tr><th>会话 ID</th><th>出口地域</th><th>出口节点</th><th>剩余 TTL</th></tr></thead>
-    <tbody id="ov-session-rows"><tr><td colspan="4" class="empty">加载中</td></tr></tbody></table>
-   </div>
-  </div>
-
-  <div class="card" style="margin-top:16px">
-   <div class="card-head card-h"><h3>如何连接</h3><span class="muted sub">用网关端口 + 认证，不是直连节点</span></div>
-   <div class="card-body card-b">
-    <div class="conn">
-     <div class="conn-item"><div class="k">SOCKS5 代理</div><div class="v" id="conn-socks5">127.0.0.1:7801</div><div class="desc">raw TCP，HTTP/HTTPS 目标都可</div></div>
-     <div class="conn-item"><div class="k">HTTP 代理</div><div class="v" id="conn-http">127.0.0.1:7802</div><div class="desc">HTTPS 目标走 CONNECT 隧道</div></div>
-     <div class="conn-item"><div class="k">用户名（含路由 DSL）</div><div class="v" id="conn-user">username</div><div class="desc">见下方 DSL 规则</div></div>
-     <div class="conn-item"><div class="k">密码</div><div class="v" id="conn-pass">见首次启动日志 / 系统设置</div><div class="desc" id="conn-auth-state">代理认证状态</div></div>
+   <div class="card" style="margin-top:16px">
+    <div class="card-head card-h"><h3>活跃会话</h3><span class="muted sub" id="ov-sess-count">--</span><div class="tools"><button class="mini" type="button" onclick="switchTab('sessions')">查看全部</button></div></div>
+    <div class="card-body card-b" style="padding:6px 8px;overflow-x:auto">
+     <table class="tbl"><thead><tr><th>会话 ID</th><th>路由标签</th><th>出口地域</th><th>出口节点</th><th>品质</th><th>延迟</th><th>剩余 TTL</th></tr></thead>
+     <tbody id="ov-session-rows"><tr><td colspan="7" class="empty">加载中</td></tr></tbody></table>
     </div>
-    <div class="cmd" id="conn-cmd">curl --socks5 username:PASSWORD@127.0.0.1:7801 https://www.gstatic.com/generate_204</div>
-    <div class="hint" id="dsl-hint">前缀 “username” = 代理认证用户名；-region-XX 地域；-unlock-gpt|claude|gemini|grok|cf|all 解锁过滤；-node-IP:端口 锁定入口节点(出口可能因上游漂移)；-session-ID 黏连。</div>
-    <div id="dsl-examples" hidden></div>
-    <div class="notice"><span>⚠️</span><span><b>「出口 IP」不是连接地址</b>，须走网关端口 + 认证。</span></div>
    </div>
-  </div>
+
+   <div class="card" style="margin-top:16px">
+    <div class="card-head card-h"><h3>地域分布</h3><span class="muted sub" id="region-total">--</span></div>
+    <div class="card-body card-b"><div id="region-list"><div class="empty">加载中</div></div></div>
+   </div>
  </section>
 
  <!-- 节点 -->
@@ -152,15 +152,29 @@ const dashboardHTML = `<!DOCTYPE html>
      <button class="mini primary" onclick="addManualNode()">添加</button>
     </div>
     <div class="hint" style="margin:0 0 10px">AI 解锁：<span style="color:var(--ok);font-weight:700">绿=畅通</span> · <span style="color:var(--danger);font-weight:700">红=阻断</span> · <span style="color:var(--gray);font-weight:700">灰=未知</span></div>
-    <div class="table-wrap">
-     <table class="tbl">
-      <thead><tr><th><input type="checkbox" id="proxy-select-all" onchange="toggleSelectAll(this.checked)" aria-label="全选"></th><th>★</th><th>名称 / 备注</th><th>协议</th><th>地域</th><th>出口 IP<span class="muted"> (信息)</span></th><th>延迟</th><th>ipapi.is 滥用分<span class="muted"> /1.00</span></th><th>ip-api 标记</th><th><span class="th-ico" title="Cloudflare：畅通 / 阻断 / 未知"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M17.5 15.5c.3 0 .5-.2.5-.5 0-2-1.6-3.6-3.6-3.6-.3 0-.6 0-.9.1A4 4 0 0 0 6 12.5c-1.4.1-2.5 1.3-2.5 2.7 0 .2.2.3.4.3h13.6z"/></svg><span class="tx">CF</span></span></th><th><span class="th-ico" title="AI 解锁：ChatGPT / Claude / Grok / Gemini（绿畅通 / 红阻断 / 灰未知）"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9z"/></svg><span class="tx">AI 解锁</span></span></th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody id="proxy-rows"><tr><td colspan="14" class="empty">加载中</td></tr></tbody>
-     </table>
+     <div class="table-wrap">
+      <table class="tbl">
+       <thead><tr><th><input type="checkbox" id="proxy-select-all" onchange="toggleSelectAll(this.checked)" aria-label="全选"></th><th>★</th><th>名称 / 备注</th><th>协议</th><th>地域</th><th>出口 IP<span class="muted"> (信息)</span></th><th>延迟</th><th>ipapi.is 滥用分<span class="muted"> /1.00</span></th><th>ip-api 标记</th><th><span class="th-ico" title="Cloudflare：畅通 / 阻断 / 未知"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M17.5 15.5c.3 0 .5-.2.5-.5 0-2-1.6-3.6-3.6-3.6-.3 0-.6 0-.9.1A4 4 0 0 0 6 12.5c-1.4.1-2.5 1.3-2.5 2.7 0 .2.2.3.4.3h13.6z"/></svg><span class="tx">CF</span></span></th><th><span class="th-ico" title="AI 解锁：ChatGPT / Claude / Grok / Gemini（绿畅通 / 红阻断 / 灰未知）"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9z"/></svg><span class="tx">AI 解锁</span></span></th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+       <tbody id="proxy-rows"><tr><td colspan="14" class="empty">加载中</td></tr></tbody>
+      </table>
+     </div>
+     <div class="pager" id="proxy-pager" aria-label="节点列表分页">
+      <span class="muted" id="proxy-page-info">--</span>
+      <div class="pager-actions">
+       <button type="button" class="mini" id="proxy-page-prev" onclick="proxyPagePrev()" disabled>上一页</button>
+       <span class="muted" id="proxy-page-num">1 / 1</span>
+       <button type="button" class="mini" id="proxy-page-next" onclick="proxyPageNext()" disabled>下一页</button>
+       <label class="muted" for="proxy-page-size" style="margin-left:8px">每页</label>
+       <select class="input sm" id="proxy-page-size" onchange="proxyPageSizeChange()" aria-label="每页条数">
+        <option value="20" selected>20</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+       </select>
+      </div>
+     </div>
     </div>
    </div>
-  </div>
- </section>
+  </section>
 
  <!-- 订阅 -->
  <section class="page" id="page-subs">
@@ -262,6 +276,8 @@ const dashboardHTML = `<!DOCTYPE html>
 </div>
 
 <div class="modal" id="import-modal"><div class="dialog"><h3>批量导入手工节点</h3><div class="form-grid"><div class="field full"><label>代理列表（每行一条 socks5/http/https URL，支持前缀/行内/行尾说明）</label><textarea id="import-text" rows="12" placeholder="prefix socks5://1.2.3.4:1080 suffix&#10;http://5.6.7.8:8080 备注可忽略"></textarea></div><div class="field"><label>地域</label><input id="import-region" maxlength="2" placeholder="可选"></div><div class="field"><label>备注</label><input id="import-note" placeholder="可选"></div></div><div class="dialog-actions"><button class="btn" onclick="document.getElementById('import-modal').classList.remove('show')">取消</button><button class="btn primary" onclick="importManualNodes()">导入</button></div></div></div>
+<div class="modal" id="node-modal"><div class="dialog"><h3>节点管理</h3><input type="hidden" id="node-modal-id" value=""><div class="muted mono" id="node-modal-addr" style="margin:-6px 0 12px;font-size:12px;word-break:break-all"></div><div class="form-grid"><div class="field"><label>地域</label><input id="node-modal-region" maxlength="2" placeholder="如 us / jp"></div><div class="field full"><label>备注</label><input id="node-modal-note" placeholder="可选备注"></div></div><div class="dialog-actions" style="justify-content:space-between"><button class="btn danger" onclick="nodeModalDelete()">删除节点</button><span><button class="btn" onclick="closeNodeModal()">取消</button><button class="btn primary" onclick="nodeModalSave()">保存</button></span></div></div></div>
+<div class="modal" id="confirm-modal"><div class="dialog"><h3 id="confirm-modal-title">确认</h3><p class="muted" id="confirm-modal-msg" style="word-break:break-all"></p><div class="dialog-actions"><button class="btn" id="confirm-modal-cancel">取消</button><button class="btn primary" id="confirm-modal-ok">确定</button></div></div></div>
 <div class="modal" id="sub-modal"><div class="dialog"><h3 id="sub-modal-title">添加订阅</h3><input type="hidden" id="sub-edit-id" value=""><div class="form-grid"><div class="field"><label>名称</label><input id="sub-name" placeholder="primary subscription"></div><div class="field"><label>刷新间隔（分钟）</label><input id="sub-refresh" type="number" value="60" min="10" step="10"></div><div class="field full"><label>订阅 URL</label><input id="sub-url" placeholder="https://example.com/sub"></div><div class="field full" id="sub-file-field"><label>或粘贴配置文件内容</label><textarea id="sub-file-content" placeholder="Clash YAML / V2ray / Base64 / plain text"></textarea></div><div class="field full"><label>自定义请求头（可选，JSON）</label><textarea id="sub-headers" placeholder="{&#34;User-Agent&#34;:&#34;clash&#34;}"></textarea></div></div><div class="dialog-actions"><button class="btn" onclick="closeSubModal()">取消</button><button class="btn primary" id="sub-modal-submit" onclick="submitSubscription()">添加</button></div></div></div>
 <div class="modal" id="apikey-once-modal"><div class="dialog"><h3>API Key 已创建</h3><p class="muted">明文仅显示一次，请立即复制保存。关闭后无法再次查看。</p><div class="field full"><label>名称</label><input id="apikey-once-name" readonly></div><div class="field full"><label>Key（仅显示一次）</label><input id="apikey-once-key" readonly style="font-family:monospace"></div><div class="dialog-actions"><button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('apikey-once-key').value).then(()=>showToast('已复制')).catch(()=>showToast('复制失败'))">复制</button><button class="btn primary" onclick="document.getElementById('apikey-once-modal').classList.remove('show')">关闭</button></div></div></div>
 <div class="toast" id="toast"></div>

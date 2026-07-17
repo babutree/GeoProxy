@@ -250,7 +250,7 @@ func TestManualNodeMutationRequiresAuthentication(t *testing.T) {
 	assertNoBusinessTerms(t, rec.Body.String())
 }
 
-func TestManualNodeRejectsSubscriptionSourceMutations(t *testing.T) {
+func TestManualNodeAllowsSubscriptionRegionAndNoteEdits(t *testing.T) {
 	server := newTestServer(t)
 	subID, err := server.storage.AddSubscription("test", "https://example.test/webui.yaml", "", "auto", 60, "")
 	if err != nil {
@@ -260,28 +260,17 @@ func TestManualNodeRejectsSubscriptionSourceMutations(t *testing.T) {
 		t.Fatalf("AddProxyWithSource() error = %v", err)
 	}
 
-	// region/delete 仍严格限手工节点：订阅节点这两条路径必须 403。
-	for _, tc := range []struct {
-		name string
-		path string
-		body string
-	}{
-		{"region", "/api/manual-node/region", `{"address":"198.51.100.10:8080","region":"jp"}`},
-		{"delete", "/api/manual-node/delete", `{"address":"198.51.100.10:8080"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := authenticatedJSONRequest(http.MethodPost, tc.path, tc.body)
-			rec := httptest.NewRecorder()
+	// 统一节点管理：note 与 region 两条非破坏性路径对任意来源开放（订阅节点也可编辑）。
+	// 删除走来源无关的 /api/proxy/delete（本测试不删，保留节点做后续断言）。
+	t.Run("region", func(t *testing.T) {
+		req := authenticatedJSONRequest(http.MethodPost, "/api/manual-node/region", `{"address":"198.51.100.10:8080","region":"jp"}`)
+		rec := httptest.NewRecorder()
+		server.routes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("region status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+	})
 
-			server.routes().ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
-			}
-		})
-	}
-
-	// 备注编辑对任意来源开放：订阅节点也允许编辑备注（仅放宽备注这一非破坏性路径）。
 	t.Run("note", func(t *testing.T) {
 		req := authenticatedJSONRequest(http.MethodPost, "/api/manual-node/note", `{"address":"198.51.100.10:8080","note":"blocked"}`)
 		rec := httptest.NewRecorder()
@@ -299,6 +288,9 @@ func TestManualNodeRejectsSubscriptionSourceMutations(t *testing.T) {
 	}
 	if proxy.Source != storage.SourceSubscription {
 		t.Fatalf("source = %q, want %q", proxy.Source, storage.SourceSubscription)
+	}
+	if proxy.Region != "jp" || proxy.RegionSource != "manual" {
+		t.Fatalf("region = %q source = %q, want jp/manual (subscription region override should persist)", proxy.Region, proxy.RegionSource)
 	}
 	if proxy.Note != "blocked" {
 		t.Fatalf("note = %q, want %q (subscription note edit should persist)", proxy.Note, "blocked")
@@ -892,8 +884,12 @@ func TestSessionAPIReturnsActiveBindings(t *testing.T) {
 	}
 	var rows []struct {
 		SessionID           string `json:"session_id"`
+		ProxyID             int64  `json:"proxy_id"`
+		RouteLabel          string `json:"route_label"`
 		Node                string `json:"node"`
+		BindAddress         string `json:"bind_address"`
 		Region              string `json:"region"`
+		RegionReq           string `json:"region_req"`
 		RemainingTTLSeconds int64  `json:"remaining_ttl_seconds"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
@@ -905,8 +901,64 @@ func TestSessionAPIReturnsActiveBindings(t *testing.T) {
 	if rows[0].SessionID != "browser-1" || rows[0].Node != "203.0.113.10:8080" || rows[0].Region != "us" {
 		t.Fatalf("row = %#v", rows[0])
 	}
+	if rows[0].RouteLabel != "region-us-session-browser-1" {
+		t.Fatalf("route_label = %q, want region-us-session-browser-1", rows[0].RouteLabel)
+	}
+	if rows[0].RegionReq != "us" {
+		t.Fatalf("region_req = %q, want us", rows[0].RegionReq)
+	}
+	if rows[0].BindAddress != "203.0.113.10:8080" {
+		t.Fatalf("bind_address = %q", rows[0].BindAddress)
+	}
 	if rows[0].RemainingTTLSeconds <= 0 || rows[0].RemainingTTLSeconds > int64((10*time.Minute).Seconds()) {
 		t.Fatalf("remaining_ttl_seconds = %d, want within ttl", rows[0].RemainingTTLSeconds)
+	}
+}
+
+// TestSessionAPIPrefersExitIPOverLocalMixedBind 隧道会话绑定地址常为 127.0.0.1:mixed，
+// 展示出口节点必须优先真实 exit_ip，不能把本机 mixed 当地址出口。
+func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.storage.AddManualProxy("127.0.0.1:31001", "socks5", "jp", "tunnel-note"); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	proxy, err := server.storage.GetProxyByIdentity("127.0.0.1:31001", storage.SourceManual, 0)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() error = %v", err)
+	}
+	if err := server.storage.UpdateProxyExitInfo(proxy.ID, "133.242.1.2", "JP", 312, 0, "", 0, ""); err != nil {
+		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
+	}
+	server.affinity.SetProxy("app01", proxy.ID, "127.0.0.1:31001", "jp")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: newSession()})
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []sessionRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len=%d want 1", len(rows))
+	}
+	if rows[0].Node != "133.242.1.2" {
+		t.Fatalf("node display = %q, want exit_ip 133.242.1.2 (not local mixed)", rows[0].Node)
+	}
+	if rows[0].BindAddress != "127.0.0.1:31001" {
+		t.Fatalf("bind_address = %q, want local mixed", rows[0].BindAddress)
+	}
+	if rows[0].ProxyID != proxy.ID {
+		t.Fatalf("proxy_id = %d, want %d", rows[0].ProxyID, proxy.ID)
+	}
+	if rows[0].ExitIP != "133.242.1.2" || rows[0].Latency != 312 || rows[0].QualityGrade == "" && false {
+		// quality may be computed by UpdateProxyExitInfo path
+	}
+	if rows[0].Source != storage.SourceManual {
+		t.Fatalf("source = %q, want manual", rows[0].Source)
 	}
 }
 

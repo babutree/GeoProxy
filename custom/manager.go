@@ -1536,6 +1536,19 @@ func (m *Manager) DeleteManualNodes(ids []int64) (deleted int, errs []string) {
 	return deleted, errs
 }
 
+// DeleteManagedProxies 批量删除任意来源节点（含订阅），走 deleteProxyWithRuntime。
+// 供统一节点表多选删除；勿再走仅手工的 DeleteManualNodes。
+func (m *Manager) DeleteManagedProxies(ids []int64) (deleted int, errs []string) {
+	for _, id := range ids {
+		if err := m.DeleteManagedProxy(id); err != nil {
+			errs = append(errs, fmt.Sprintf("id=%d: %v", id, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errs
+}
+
 // addManualTunnelNode 处理加密节点：合并进现有 sing-box 节点集后重载，取本地端口入库。
 // DB 写入失败时补偿回滚到旧运行态，避免幽灵节点。
 func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) error {

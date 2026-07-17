@@ -35,7 +35,9 @@ func TestBuildOutboundUnsupportedTransport(t *testing.T) {
 	}
 }
 
-// TestBuildOutboundSupportedTransport 验证受支持的传输层（ws / 裸 tcp）正常生成出站配置。
+// TestBuildOutboundSupportedTransport 验证受支持的传输层（ws / 裸 tcp / http / raw）正常生成出站配置。
+// 大量 clash-meta 订阅使用 network=http（HTTP 传输）与 network=raw（=tcp）；
+// 此前被 default 分支误拒为「不支持的传输层」，导致可用节点被成批跳过。
 func TestBuildOutboundSupportedTransport(t *testing.T) {
 	// ws 传输应写入 transport.type=ws
 	wsNode := ParsedNode{
@@ -83,6 +85,94 @@ func TestBuildOutboundSupportedTransport(t *testing.T) {
 	}
 	if _, exists := out["transport"]; exists {
 		t.Fatalf("裸 tcp 出站不应有 transport 字段: %v", out["transport"])
+	}
+
+	// clash-meta network=http → sing-box transport.type=http（读 http-opts；path/host 可能是列表）
+	httpNode := ParsedNode{
+		Name:   "http-transport",
+		Type:   "vless",
+		Server: "example.com",
+		Port:   443,
+		Raw: map[string]interface{}{
+			"type":    "vless",
+			"uuid":    "347b77a2-dbf7-4755-adb9-64ef05f51e84",
+			"tls":     true,
+			"sni":     "example.com",
+			"network": "http",
+			"http-opts": map[string]interface{}{
+				"path": []interface{}{"/"},
+				"host": []interface{}{"example.com"},
+			},
+		},
+	}
+	out, err = buildOutbound(httpNode, "node-2")
+	if err != nil {
+		t.Fatalf("network=http buildOutbound() error = %v (clash-meta HTTP 传输应被支持)", err)
+	}
+	httpTransport, ok := out["transport"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("network=http 出站缺少 transport: %v", out)
+	}
+	if httpTransport["type"] != "http" {
+		t.Fatalf("network=http transport.type = %v, want http", httpTransport["type"])
+	}
+	if httpTransport["path"] != "/" {
+		t.Fatalf("network=http transport.path = %v, want /", httpTransport["path"])
+	}
+	if hosts, ok := httpTransport["host"].([]string); !ok || len(hosts) != 1 || hosts[0] != "example.com" {
+		t.Fatalf("network=http transport.host = %v, want [example.com]", httpTransport["host"])
+	}
+
+	// 仅 headers.Host、无 host 字段时也应映射
+	httpHdrNode := ParsedNode{
+		Name:   "http-headers-host",
+		Type:   "vless",
+		Server: "example.com",
+		Port:   443,
+		Raw: map[string]interface{}{
+			"type":    "vless",
+			"uuid":    "347b77a2-dbf7-4755-adb9-64ef05f51e84",
+			"tls":     true,
+			"sni":     "example.com",
+			"network": "http",
+			"http-opts": map[string]interface{}{
+				"path":    "/",
+				"headers": map[string]interface{}{"Host": "cdn.example.com"},
+			},
+		},
+	}
+	out, err = buildOutbound(httpHdrNode, "node-2b")
+	if err != nil {
+		t.Fatalf("network=http headers.Host buildOutbound() error = %v", err)
+	}
+	httpHdrTransport, ok := out["transport"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("headers.Host 出站缺少 transport: %v", out)
+	}
+	if hosts, ok := httpHdrTransport["host"].([]string); !ok || len(hosts) != 1 || hosts[0] != "cdn.example.com" {
+		t.Fatalf("headers.Host transport.host = %v, want [cdn.example.com]", httpHdrTransport["host"])
+	}
+
+	// Xray/v2rayN network=raw 语义等同裸 TCP
+	rawNode := ParsedNode{
+		Name:   "raw-tcp",
+		Type:   "vless",
+		Server: "example.com",
+		Port:   443,
+		Raw: map[string]interface{}{
+			"type":    "vless",
+			"uuid":    "347b77a2-dbf7-4755-adb9-64ef05f51e84",
+			"tls":     true,
+			"sni":     "example.com",
+			"network": "raw",
+		},
+	}
+	out, err = buildOutbound(rawNode, "node-3")
+	if err != nil {
+		t.Fatalf("network=raw buildOutbound() error = %v (raw 应映射为裸 TCP)", err)
+	}
+	if _, exists := out["transport"]; exists {
+		t.Fatalf("network=raw 不应有 transport 字段: %v", out["transport"])
 	}
 }
 

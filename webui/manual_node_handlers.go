@@ -61,7 +61,8 @@ func (s *Server) apiManualNodeBatchDelete(w http.ResponseWriter, r *http.Request
 		jsonError(w, "manual node manager unavailable", http.StatusInternalServerError)
 		return
 	}
-	deleted, errs := s.customMgr.DeleteManualNodes(req.IDs)
+	// 与节点表多选对齐：任意来源（含订阅）均可批量删除，避免勾选订阅节点后全部失败。
+	deleted, errs := s.customMgr.DeleteManagedProxies(req.IDs)
 	jsonOK(w, map[string]interface{}{
 		"deleted": deleted,
 		"failed":  len(errs),
@@ -105,13 +106,15 @@ func (s *Server) apiManualNodeRegion(w http.ResponseWriter, r *http.Request) {
 		Address string `json:"address"`
 		Region  string `json:"region"`
 	}
-	proxy, ok := s.requireManualNodeRequest(w, r, &req, &req.ID, &req.Address)
+	// 地域覆盖对任意来源开放：订阅节点也允许手工覆盖地域（非破坏性、可逆）。
+	// 仅放宽地域与备注两条非破坏性路径；删除仍按来源分流。
+	proxy, ok := s.requireNoteEditableRequest(w, r, &req, &req.ID, &req.Address)
 	if !ok {
 		return
 	}
 	if err := s.storage.UpdateProxyRegionByID(proxy.ID, req.Region, true); err != nil {
-		log.Printf("[webui] update manual node region %q failed: %v", req.Address, err)
-		jsonError(w, "failed to update manual node region", http.StatusInternalServerError)
+		log.Printf("[webui] update node region %q failed: %v", req.Address, err)
+		jsonError(w, "failed to update node region", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "updated"})

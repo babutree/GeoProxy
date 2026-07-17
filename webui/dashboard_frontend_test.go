@@ -125,8 +125,8 @@ func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 		"starBtn(p)",
 		"cfBadge(p.cf_blocked)",
 		"copyProxyCred('+id+')",
-		// 取消星标须 confirm 确认。
-		"if(!confirm('取消该节点星标？'))return",
+		// 取消星标须应用内确认弹窗（替换浏览器 confirm）。
+		"const ok=await showConfirm('取消该节点星标？','取消星标')",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -233,9 +233,7 @@ func TestDashboardAsyncEntrypointsUseUnifiedErrorHandling(t *testing.T) {
 		"try{data=JSON.parse(text)}catch(err){if(!res.ok)throw new Error(res.statusText||('HTTP '+res.status));throw new Error('响应解析失败')}",
 		"async function refreshAll(){return runAsync('刷新失败'",
 		"async function addManualNode(){return runAsync('添加失败'",
-		"async function editManualRegion(id,address){return runAsync('地域更新失败'",
-		"async function editManualNote(id,address){return runAsync('备注更新失败'",
-		"async function deleteManualNode(id,address){return runAsync('删除失败'",
+		"async function nodeModalSave(){return runAsync('保存失败'",
 		"async function toggleProxy(id,address,enable){return runAsync('操作失败'",
 		"async function addSubscription(){return runAsync('添加失败'",
 		"async function refreshSub(id){return runAsync('刷新失败'",
@@ -263,11 +261,10 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 	checks := []string{
 		"const id=proxyIDArg(p)",
 		"toggleProxy('+id+',decodeURIComponent",
-		"manageManualNode('+id+',decodeURIComponent",
-		"const current=allProxies.find(p=>Number(p.id)===Number(id))||{}",
-		"JSON.stringify({id,address,region})",
-		"JSON.stringify({id,address,note})",
-		"JSON.stringify({id,address})",
+		"manageNode('+id+')",
+		"const p=allProxies.find(x=>Number(x.id)===Number(id))||{}",
+		"JSON.stringify({id,region})",
+		"JSON.stringify({id,note})",
 		"JSON.stringify({id,address,enable})",
 		// 单节点测试连通按钮：走 proxy-id 优先身份，调用后端 /api/proxy/refresh。
 		"testProxy('+id+',decodeURIComponent",
@@ -301,8 +298,10 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 func TestDashboardDoesNotShowOKBadgeForEmptySessionRegion(t *testing.T) {
 	checks := []string{
 		"const region=String(s.region||'').trim().toLowerCase()",
-		"const regionBadge=region&&region!=='unknown'?'<span class=\"badge ok\">'+html(region).toUpperCase()+'</span> ':'<span class=\"badge gray\">未知</span> '",
-		"'+regionBadge+masked+'",
+		// 空/unknown 地域不得渲染 ok 徽章；出口节点单独显示地址（不再拼 regionBadge+masked）。
+		"const regionBadge=region&&region!=='unknown'?'<span class=\"badge ok\">'+html(region).toUpperCase()+'</span>':'<span class=\"badge gray\">未知</span>'",
+		"s.route_label",
+		"sessionQualityBadge(s.quality_grade)",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -314,6 +313,10 @@ func TestDashboardDoesNotShowOKBadgeForEmptySessionRegion(t *testing.T) {
 
 	if strings.Contains(dashboardBundle, "'<span class=\"badge ok\">'+html(s.region)") {
 		t.Fatal("dashboardHTML still renders an ok badge directly from s.region")
+	}
+	// 旧的 regionBadge 直接拼进出口节点单元格会把“未知”徽章塞进地址列。
+	if strings.Contains(dashboardBundle, "'+regionBadge+masked+'") {
+		t.Fatal("dashboardHTML still concatenates regionBadge into exit-node cell")
 	}
 }
 
@@ -386,6 +389,14 @@ func TestDashboardNodeOrbit(t *testing.T) {
 		"function spawnWindStreams(",
 		`id="orbit-wind"`,
 		`id="orbit-lens"`,
+		// 颜色 1:1：beam energy 读 --sun-energy（对齐 orbit-dashboard.html）
+		"getPropertyValue('--sun-energy')",
+		// 折叠/展开与回到总览即时重算几何，避免网关/轨道数秒错位
+		"function scheduleOrbitReflow(",
+		"function applySidebar(collapsed){document.body.classList.toggle('sidebar-collapsed',!!collapsed);try{localStorage.setItem('gg-sidebar',collapsed?'1':'0')}catch(e){}scheduleOrbitReflow()}",
+		"function markViewLazy(name){if(name==='overview'){try{renderOrbitSystem()}catch(e){}",
+		// 星标视觉：.star 类 + 已点亮 .on
+		`class="star'+(on?' on':'')+'"`,
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -464,10 +475,10 @@ func TestDashboardProxyActionsUnifiedAcrossSources(t *testing.T) {
 		"const toggleBtn=",
 		// 统一基础操作：测试 + 复制 + 停用/启用。
 		"const baseActions=testBtn+' '+copyBtn+' '+toggleBtn",
-		// 手工附加管理入口，而不是单独一整套不同按钮。
-		"const manageBtn=manual?('<button class=\"mini\" onclick=\"manageManualNode('+id+',decodeURIComponent(\\''+addr+'\\'))\">管理</button>'):''",
-		"const actions=baseActions+(manageBtn?(' '+manageBtn):'')",
-		"function manageManualNode(",
+		// 管理入口对所有来源开放（订阅节点与手工节点都可用），走统一应用内弹窗。
+		"const manageBtn='<button class=\"mini\" onclick=\"manageNode('+id+')\">管理</button>'",
+		"const actions=baseActions+' '+manageBtn",
+		"function manageNode(",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -732,6 +743,141 @@ func TestDashboardOrbitThemeTokens(t *testing.T) {
 		t.Run("reject "+bad, func(t *testing.T) {
 			if strings.Contains(dashboardBundle, bad) {
 				t.Fatalf("dashboard bundle still has non-Orbit token/label %q", bad)
+			}
+		})
+	}
+}
+
+// TestDashboardOrbitSessionBeamsMatchQuality 会话连线按地区+品质匹配卫星，
+// 禁止仅按地区把 S/A/B/C 全档点亮。D 档不进轨道是产品预期（byQ 仅 s/a/b/c）。
+func TestDashboardOrbitSessionBeamsMatchQuality(t *testing.T) {
+	checks := []string{
+		"function orbitSessionQualityTrack(",
+		"const key=r+'|'+q",
+		"b.k=sessCount[b.cc+'|'+b.q]||0",
+		"const byQ={s:[],a:[],b:[],c:[]}",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboard missing orbit session-quality beam invariant %q", check)
+			}
+		})
+	}
+	// 旧逻辑：只按地区计数再赋给该地区所有品质桶。
+	if strings.Contains(dashboardBundle, "b.k=sessCount[b.cc]||0") {
+		t.Fatal("dashboard still assigns session beams by region only (ignores quality track)")
+	}
+	// D 档不得进入 byQ（轨道不展示 D 是正确产品行为）。
+	if strings.Contains(dashboardBundle, "const byQ={s:[],a:[],b:[],c:[],d:[]}") {
+		t.Fatal("dashboard must not place D-grade satellites on orbit tracks")
+	}
+}
+
+// TestDashboardOverviewRegionConnectionSwap 总览：如何连接放右侧（矮），地域分布放下方，
+// 避免地域列表过长把星系卡片撑高。
+func TestDashboardOverviewRegionConnectionSwap(t *testing.T) {
+	html := dashboardHTML
+	conn := strings.Index(html, `<h3>如何连接</h3>`)
+	region := strings.Index(html, `<h3>地域分布</h3>`)
+	orbit := strings.Index(html, `id="orbit-stage"`)
+	if conn < 0 || region < 0 || orbit < 0 {
+		t.Fatalf("missing overview sections conn=%d region=%d orbit=%d", conn, region, orbit)
+	}
+	// 如何连接应在 overview-side（orbit 之后、地域分布之前或至少不在把侧栏撑爆的长列表位）。
+	side := strings.Index(html, `class="overview-side"`)
+	if side < 0 || conn < side {
+		t.Fatal("如何连接 should be inside overview-side")
+	}
+	if region < conn {
+		t.Fatal("地域分布 should be below 如何连接 (swap), not above it in the side column")
+	}
+}
+
+// TestDashboardSessionCardsMatchDesignFields 会话卡对齐设计：完整详情字段、出口节点优先 exit_ip、
+// 刷新保留展开状态（避免全部展开后定时刷新自动折叠）。
+func TestDashboardSessionCardsMatchDesignFields(t *testing.T) {
+	checks := []string{
+		"function sessionCardHTML(",
+		"function sessionExitNode(",
+		"function sessionIsOpen(",
+		"let sessionOpenIDs={}",
+		"绑定节点 Proxy ID",
+		"DSL 地域请求",
+		"解锁过滤",
+		"最近活跃",
+		"节点冷却",
+		"节点占用",
+		"路由标签",
+		"sessionExpandAll",
+		"data-sid=",
+		// 出口节点不得再把地域徽章拼进地址。
+		"sessionExitNode(s)",
+		// 全部折叠不得进入 sticky false（否则刷新后手动展开会被压回）。
+		"if(open){sessionExpandAll=true}else{sessionExpandAll=null;sessionOpenIDs={}}",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboard missing session-card design invariant %q", check)
+			}
+		})
+	}
+	for _, bad := range []string{
+		"'+regionBadge+masked+'",
+		// 旧 4 字段详情网格（仅会话ID/地域/节点/TTL）不得作为唯一详情。
+	} {
+		t.Run("reject "+bad, func(t *testing.T) {
+			if strings.Contains(dashboardBundle, bad) {
+				t.Fatalf("dashboard still has bad session display fragment %q", bad)
+			}
+		})
+	}
+}
+
+// TestDashboardProxyListPagination 节点清单分页：默认每页 20，可选 20/50/100，筛选重置到第 1 页。
+func TestDashboardProxyListPagination(t *testing.T) {
+	checks := []string{
+		`id="proxy-pager"`,
+		`id="proxy-page-size"`,
+		`id="proxy-page-prev"`,
+		`id="proxy-page-next"`,
+		`id="proxy-page-info"`,
+		`<option value="20" selected>20</option>`,
+		`<option value="50">50</option>`,
+		`<option value="100">100</option>`,
+		"let proxyPage=1;let proxyPageSize=20",
+		"function proxyTotalPages(",
+		"function proxyPageSlice(",
+		"function renderProxyPage(",
+		"function renderProxyPager(",
+		"function proxyPagePrev(",
+		"function proxyPageNext(",
+		"function proxyPageSizeChange(",
+		"function renderProxies(keepPage){if(!keepPage)proxyPage=1;",
+		"proxyPageSize=(n===50||n===100)?n:20",
+		// 数据轮询 loadProxies 必须 keepPage=true，避免把用户从第 N 页踢回第 1 页。
+		"renderProxies(true)",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboard missing proxy pagination invariant %q", check)
+			}
+		})
+	}
+	// 旧无限滚动分批不得残留。
+	for _, bad := range []string{
+		"const PROXY_BATCH=80",
+		"function renderProxyBatch(",
+		"function onProxyScroll(",
+		"window.addEventListener('scroll',onProxyScroll",
+		// 错误：无 keepPage 的 loadProxies 会在 10s 刷新时重置分页。
+		"renderRegionFilter();renderProxies();renderRegions()",
+	} {
+		t.Run("reject "+bad, func(t *testing.T) {
+			if strings.Contains(dashboardBundle, bad) {
+				t.Fatalf("dashboard still has infinite-scroll batching %q", bad)
 			}
 		})
 	}

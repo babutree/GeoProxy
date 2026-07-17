@@ -327,8 +327,11 @@ func (s *Storage) DisableSubscriptionProxy(address string, subscriptionID int64)
 }
 
 func (s *Storage) disableProxyWhere(where string, args ...interface{}) error {
+	// 禁用必写 last_check：禁用只发生在验证/健康检查失败路径（见 checker、manager、
+	// api refresh），前端 nodeState 以 last_check 是否存在区分「已验证失败(不可用)」与
+	// 「从未验证(待验证)」。漏写会让验证失败的节点永远显示为待验证。
 	res, err := s.db.Exec(
-		`UPDATE proxies SET status = 'disabled' WHERE `+where,
+		`UPDATE proxies SET status = 'disabled', last_check = CURRENT_TIMESTAMP WHERE `+where,
 		args...,
 	)
 	if err != nil {
