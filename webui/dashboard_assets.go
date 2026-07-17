@@ -204,21 +204,21 @@ a{color:inherit;text-decoration:none}
 .layer{position:absolute;inset:0;pointer-events:none}
 /* 卫星球体 */
 .sat,.orbit-sat{position:absolute;transform:translate(-50%,-50%);will-change:left,top,width,height;cursor:pointer;pointer-events:auto}
-.sat .ball{position:relative;width:100%;height:100%;border-radius:50%;display:grid;place-items:center;line-height:1;
+.sat .ball,.orbit-sat .ball{position:relative;width:100%;height:100%;border-radius:50%;display:grid;place-items:center;line-height:1;
  background:radial-gradient(circle at 34% 28%,#fff 0%,var(--qc,var(--q-a)) 42%,color-mix(in srgb,var(--qc,var(--q-a)) 55%,#04060e) 100%);
  box-shadow:inset 0 -3px 8px rgba(0,0,0,.35),inset 2px 2px 6px rgba(255,255,255,.35),0 0 10px color-mix(in srgb,var(--qc,var(--q-a)) 45%,transparent);
  border:1px solid color-mix(in srgb,var(--qc,var(--q-a)) 60%,transparent)}
-.sat .cc{font-size:10px;font-weight:900;letter-spacing:.02em;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6)}
-.sat .cnt{position:absolute;top:-5px;right:-5px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;
+.sat .cc,.orbit-sat .cc{font-size:10px;font-weight:900;letter-spacing:.02em;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6)}
+.sat .cnt,.orbit-sat .cnt{position:absolute;top:-5px;right:-5px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;
  display:grid;place-items:center;font-size:8px;font-weight:800;color:var(--ink);
  background:var(--panel-solid);border:1px solid var(--qc,var(--q-a))}
-.sat .tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);white-space:nowrap;
+.sat .tip,.orbit-sat .tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);white-space:nowrap;
  padding:6px 10px;border-radius:8px;background:var(--panel-solid);border:1px solid var(--line);
  color:var(--ink);font-size:11px;font-weight:600;box-shadow:var(--sh-md);opacity:0;pointer-events:none;
  transition:opacity var(--t-micro);z-index:20}
-.sat:hover .tip{opacity:1}
+.sat:hover .tip,.orbit-sat:hover .tip{opacity:1}
 /* 会话中卫星:轻微辉光呼吸(仅辉光,本体不缩放跳动) */
-.sat.live .ball{box-shadow:inset 0 -3px 8px rgba(0,0,0,.35),inset 2px 2px 6px rgba(255,255,255,.4),0 0 16px color-mix(in srgb,var(--qc,var(--q-a)) 75%,transparent)}
+.sat.live .ball,.orbit-sat.live .ball{box-shadow:inset 0 -3px 8px rgba(0,0,0,.35),inset 2px 2px 6px rgba(255,255,255,.4),0 0 16px color-mix(in srgb,var(--qc,var(--q-a)) 75%,transparent)}
 
 /* 太阳:网关(中心,z 居中,可被前景卫星盖住) */
 .sun,.orbit-sun{position:absolute;left:50%;top:50%;width:92px;height:92px;transform:translate(-50%,-50%);
@@ -269,6 +269,7 @@ a{color:inherit;text-decoration:none}
 .badge.qa{background:color-mix(in srgb,var(--q-a) 20%,transparent);color:var(--q-a);border-color:color-mix(in srgb,var(--q-a) 40%,transparent)}
 .badge.qb{background:color-mix(in srgb,var(--q-b) 22%,transparent);color:var(--q-s);border-color:color-mix(in srgb,var(--q-b) 46%,transparent)}
 .badge.qc{background:color-mix(in srgb,var(--q-c) 22%,transparent);color:var(--ink-2);border-color:color-mix(in srgb,var(--q-c) 46%,transparent)}
+.badge.qd{background:color-mix(in srgb,var(--danger) 20%,transparent);color:var(--danger);border-color:color-mix(in srgb,var(--danger) 42%,transparent)}
 .badge.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok);border-color:color-mix(in srgb,var(--ok) 38%,transparent)}
 .badge.warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 38%,transparent)}
 .badge.danger{background:color-mix(in srgb,var(--danger) 18%,transparent);color:var(--danger);border-color:color-mix(in srgb,var(--danger) 38%,transparent)}
@@ -285,6 +286,8 @@ a{color:inherit;text-decoration:none}
  text-align:left;padding:10px;border-bottom:1px solid var(--line)}
 .tbl td{padding:11px 10px;border-bottom:1px solid var(--hairline);white-space:nowrap}
 .tbl tr:last-child td{border:none}
+/* 表内复选框:深空主题下原生 checkbox 暗底几乎不可见,显式给出可见外观与配色 */
+.tbl input[type=checkbox]{appearance:auto;-webkit-appearance:auto;width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--accent);vertical-align:middle}
 .tbl tbody tr{transition:background var(--t-micro)}
 .tbl tbody tr:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
 .mono{font-family:"Consolas",monospace}
@@ -541,13 +544,13 @@ function copyProxyCred(id){ const p=allProxies.find(x=>Number(x.id)===Number(id)
 // toggleStar: 加星直接生效；取消星标须 confirm() 确认。
 async function toggleStar(id,on){ if(on){ if(!confirm('取消该节点星标？'))return } return runAsync('星标操作失败',async()=>{ await api('/api/proxy/star',{method:'POST',body:JSON.stringify({id,starred:!on})}); await loadProxies(); showToast(on?'已取消星标':'已加星标') }) }
 function renderProxies(){const protocol=document.getElementById('protocol-filter').value;const region=document.getElementById('region-filter').value;const sf=document.getElementById('status-filter').value;const srcf=(document.getElementById('source-filter')||{}).value||'';const qf=filterVal('quality-filter');const cff=filterVal('cf-filter');const aif={openai:filterVal('ai-openai-filter'),claude:filterVal('ai-claude-filter'),grok:filterVal('ai-grok-filter'),gemini:filterVal('ai-gemini-filter')};const latMinRaw=filterVal('latency-min');const latMaxRaw=filterVal('latency-max');const latMin=latMinRaw===''?null:Number(latMinRaw);const latMax=latMaxRaw===''?null:Number(latMaxRaw);const kw=filterVal('keyword-filter').toLowerCase();let rows=allProxies.filter(p=>(!protocol||p.protocol===protocol)&&(!region||regionOf(p)===region));if(sf)rows=rows.filter(p=>nodeState(p)===sf);if(srcf==='manual')rows=rows.filter(p=>p.source==='manual');else if(srcf==='subscription')rows=rows.filter(p=>p.source!=='manual');if(qf)rows=rows.filter(p=>qualityOf(p)===qf);if(cff)rows=rows.filter(p=>cfStateOf(p)===cff);['openai','claude','grok','gemini'].forEach(function(svc){const v=aif[svc];if(v)rows=rows.filter(p=>aiStateOf(p,svc)===v)});if(latMin!==null&&Number.isFinite(latMin))rows=rows.filter(p=>Number(p.latency||0)>=latMin);if(latMax!==null&&Number.isFinite(latMax))rows=rows.filter(p=>Number(p.latency||0)<=latMax);if(kw)rows=rows.filter(p=>{const addr=String(p.address||'').toLowerCase();const note=String(p.note||'').toLowerCase();const exitIP=String(p.exit_ip||'').toLowerCase();return addr.indexOf(kw)>=0||note.indexOf(kw)>=0||exitIP.indexOf(kw)>=0});const order={ok:0,pending:1,paused:2,failed:3};rows.sort((a,b)=>{const fa=(nodeState(a)==='ok'&&(a.starred===true||Number(a.starred)===1))?1:0;const fb=(nodeState(b)==='ok'&&(b.starred===true||Number(b.starred)===1))?1:0;if(fa!==fb)return fb-fa;const sa=nodeState(a),sb=nodeState(b);if(order[sa]!==order[sb])return order[sa]-order[sb];return Number(a.latency||1e9)-Number(b.latency||1e9)});const body=document.getElementById('proxy-rows');if(rows.length===0){body.innerHTML='<tr><td colspan="14" class="empty">没有匹配节点</td></tr>';return}proxyRenderRows=rows;proxyRenderCount=0;renderProxyBatch()}
-function renderRegions(){const counts={};allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).forEach(p=>{const r=regionOf(p);counts[r]=(counts[r]||0)+1});const entries=Object.keys(counts).sort().map(region=>({region,count:counts[region]}));const total=entries.reduce((sum,item)=>sum+item.count,0);document.getElementById('region-total').textContent=total+' 个可用节点';const list=document.getElementById('region-list');if(entries.length===0){list.innerHTML='<div class="empty">暂无可用地域数据</div>';return}list.innerHTML=entries.map(item=>{const pct=total?Math.round(item.count*100/total):0;return '<div class="region-row"><strong>'+html(item.region).toUpperCase()+'</strong><div class="bar"><span style="width:'+pct+'%"></span></div><span class="cnt">'+html(item.count)+'</span></div>'}).join('')}
+function renderRegions(){const counts={};allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).forEach(p=>{const r=regionOf(p);counts[r]=(counts[r]||0)+1});const entries=Object.keys(counts).sort().map(region=>({region,count:counts[region]}));const total=entries.reduce((sum,item)=>sum+item.count,0);document.getElementById('region-total').textContent=total+' 个可用节点';const list=document.getElementById('region-list');if(entries.length===0){list.innerHTML='<div class="empty">暂无可用地域数据</div>';return}const maxN=entries.reduce((m,item)=>Math.max(m,item.count),0);list.innerHTML=entries.map(item=>{const pct=maxN?Math.round(item.count*100/maxN):0;return '<div class="region"><span class="cc">'+html(item.region).toUpperCase()+'</span><div class="bar"><i style="width:'+pct+'%"></i></div><span class="n num">'+html(item.count)+'</span></div>'}).join('')}
 // 总览节点分布：按地域+延迟档聚合圆点，有 session 的地域画连线。
 // renderWorldMap 保留为旧调用名，实际转调 renderOrbitSystem。
 const ORBIT_TRACKS={s:{rr:0.42,w:15,dir:1,phase:0},a:{rr:0.60,w:11,dir:-1,phase:40},b:{rr:0.78,w:8.5,dir:1,phase:15},c:{rr:0.96,w:6.5,dir:-1,phase:70}};
 const ORBIT_QVAR={s:'var(--q-s)',a:'var(--q-a)',b:'var(--q-b)',c:'var(--q-c)'};
 let orbitSats=[];let orbitT=0;let orbitLast=0;let orbitPaused=false;let orbitRAF=0;let orbitBuilt=false;
-function orbitQualityTrack(p){const g=qualityOf(p);if(g==='S'||g==='A'||g==='B'||g==='C')return g.toLowerCase();const lat=Number(p&&p.latency||0);if(lat>0&&lat<=500)return 's';if(lat>0&&lat<=1000)return 'a';if(lat>0&&lat<=2000)return 'b';return 'c'}
+function orbitQualityTrack(p){const g=qualityOf(p);if(g==='S'||g==='A'||g==='B'||g==='C'||g==='D')return g.toLowerCase();const lat=Number(p&&p.latency||0);if(lat>0&&lat<=200)return 's';if(lat>0&&lat<=500)return 'a';if(lat>0&&lat<=1000)return 'b';if(lat>0&&lat<=2000)return 'c';return 'd'}
 function orbitStageGeom(){const st=document.getElementById('orbit-stage');const w=st?st.clientWidth:600;const h=st?st.clientHeight:338;return {cx:w/2,cy:h/2,halfW:w/2,halfH:h/2}}
 function orbitAngAbsDiff(a,b){let d=a-b;while(d>Math.PI)d-=Math.PI*2;while(d<-Math.PI)d+=Math.PI*2;return Math.abs(d)}
 function orbitRibbonPath(sx,sy,x,y,baseW,phase,widthScale,wind,lens){const dx=x-sx,dy=y-sy;const len=Math.hypot(dx,dy)||1;const ux=dx/len,uy=dy/len;const nx=-uy,ny=ux;const SEG=20;const swing=Math.min(len*0.038,6.5)*(0.85+0.15*(0.5+0.5*Math.sin(phase*0.32)));const side=Math.sin(phase*0.34);const wScale=widthScale==null?1:widthScale;const top=[],bot=[];let windHitMax=0;for(let i=0;i<=SEG;i++){const tt=i/SEG;let bend=swing*side*Math.sin(tt*Math.PI);let px=sx+ux*len*tt+nx*bend;let py=sy+uy*len*tt+ny*bend;let thin=1;if(wind&&wind.r>0){const rdx=px-wind.ox,rdy=py-wind.oy;const dist=Math.hypot(rdx,rdy)||1;const ang=Math.atan2(rdy,rdx);if(orbitAngAbsDiff(ang,wind.angle)<=wind.halfAperture){const u=(dist-wind.r)/Math.max(8,wind.band);const axis=1-orbitAngAbsDiff(ang,wind.angle)/Math.max(1e-4,wind.halfAperture);const hit=Math.exp(-u*u)*Math.pow(Math.max(0,axis),0.7);if(hit>0.02){if(hit>windHitMax)windHitMax=hit;const push=wind.force*hit;const tx=-wind.wy,ty=wind.wx;px+=wind.wx*push+tx*push*0.18*side;py+=wind.wy*push+ty*push*0.18*side;thin*=1-0.82*hit}}}if(lens&&lens.rx>0&&lens.ry>0){const ldx=px-lens.lx,ldy=py-lens.ly;const nr=Math.hypot(ldx/lens.rx,ldy/lens.ry);if(nr<1.35){const fall=Math.exp(-2.2*nr*nr);const w=fall*lens.strength;const rlen=Math.hypot(ldx,ldy)||1;const radial=Math.sin(lens.phase*0.7)*0.55;px+=(ldx/rlen)*w*radial*lens.rx*0.22;py+=(ldy/rlen)*w*radial*lens.ry*0.22;const txx=-ldy/rlen,tyy=ldx/rlen;const swirl=Math.sin(nr*Math.PI*1.1+lens.phase*0.9)*0.35;px+=txx*w*swirl*lens.rx*0.12;py+=tyy*w*swirl*lens.ry*0.12;thin*=1+0.12*fall*lens.strength}}const envelope=Math.pow(Math.sin(tt*Math.PI),0.95);const travel=0.92+0.08*Math.sin(tt*Math.PI-phase);const breath=0.97+0.03*Math.sin(phase*0.45);const hw=Math.max(0.12,(baseW*0.5)*envelope*travel*breath*wScale*Math.max(0.06,thin));top.push([px+nx*hw,py+ny*hw]);bot.push([px-nx*hw,py-ny*hw])}return {d:orbitRibbonSmooth(top,bot),windHit:windHitMax}}

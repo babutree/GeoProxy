@@ -18,7 +18,8 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 		     WHEN 'S' THEN 1
 		     WHEN 'A' THEN 2
 		     WHEN 'B' THEN 3
-		     ELSE 4
+		     WHEN 'C' THEN 4
+		     ELSE 5
 		   END,
 		   RANDOM()
 		 LIMIT 1`,

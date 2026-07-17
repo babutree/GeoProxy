@@ -219,16 +219,19 @@ func (s *Storage) RecordProxyFailureByID(id int64, threshold int) error {
 }
 
 // CalculateQualityGrade 根据延迟计算质量等级
+// 阈值：S≤200ms A≤500ms B≤1000ms C≤2000ms；>2000ms 归入 D（视为无法连接）。
 func CalculateQualityGrade(latencyMs int) string {
 	switch {
-	case latencyMs <= 500:
+	case latencyMs <= 200:
 		return "S" // 超快
-	case latencyMs <= 1000:
+	case latencyMs <= 500:
 		return "A" // 良好
-	case latencyMs <= 2000:
+	case latencyMs <= 1000:
 		return "B" // 可用
-	default:
+	case latencyMs <= 2000:
 		return "C" // 淘汰候选
+	default:
+		return "D" // 无法连接（>2000ms）
 	}
 }
 
@@ -245,7 +248,7 @@ func (s *Storage) DisableBlockedCountries(countryCodes []string) (int64, error) 
 	var total int64
 	for _, code := range countryCodes {
 		res, err := tx.Exec(
-			`UPDATE proxies SET status = 'disabled' WHERE status = 'active' AND (region = ? OR exit_location = ? OR exit_location LIKE ?)`,
+			`UPDATE proxies SET status = 'disabled' WHERE status IN ('active', 'degraded') AND (region = ? OR exit_location = ? OR exit_location LIKE ?)`,
 			normalizeRegion(code), strings.ToUpper(code), strings.ToUpper(code)+" %",
 		)
 		if err != nil {
@@ -275,7 +278,7 @@ func (s *Storage) DisableNotAllowedCountries(allowedCodes []string) (int64, erro
 		conditions = append(conditions, "region = ?", "exit_location = ?", "exit_location LIKE ?")
 		args = append(args, normalizeRegion(code), upper, upper+" %")
 	}
-	query := `UPDATE proxies SET status = 'disabled' WHERE status = 'active' AND (region != '' OR exit_location != '') AND NOT (` + strings.Join(conditions, " OR ") + `)`
+	query := `UPDATE proxies SET status = 'disabled' WHERE status IN ('active', 'degraded') AND (region != '' OR exit_location != '') AND NOT (` + strings.Join(conditions, " OR ") + `)`
 	res, err := s.db.Exec(query, args...)
 	if err != nil {
 		return 0, err

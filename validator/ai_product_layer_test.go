@@ -151,3 +151,49 @@ func TestAIProductTargetsConfiguredForCoreServices(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeGenericCloudflareChallengeDoesNotOverrideReachableAPI 回归保护：
+// 产品层 claude.ai 对几乎所有数据中心/代理 IP 下发通用 Cloudflare 反爬挑战
+// （cf-mitigated: challenge / "Just a moment" / error code: 1020），这是与地区无关
+// 的机器人拦截，不得判为地域封禁。API 主信号 401（认证错误=可达）应最终胜出，
+// 否则会把可用节点误判为 Claude 全红（真实故障复盘）。
+func TestClaudeGenericCloudflareChallengeDoesNotOverrideReachableAPI(t *testing.T) {
+	// API 层：匿名 401 认证错误 = 可达。
+	apiOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error"}}`))
+	}))
+	defer apiOK.Close()
+	// 产品层：通用 CF 挑战（cf-mitigated 头 + "Just a moment" 正文），无任何地域指纹。
+	cfChallenge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("cf-mitigated", "challenge")
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Attention Required! Cloudflare error code: 1020</body></html>`))
+	}))
+	defer cfChallenge.Close()
+
+	oldTargets := aiProbeTargets
+	oldExtra := aiProductProbeTargets
+	defer func() {
+		aiProbeTargets = oldTargets
+		aiProductProbeTargets = oldExtra
+	}()
+	aiProbeTargets = map[string]string{"openai": apiOK.URL, "claude": apiOK.URL, "grok": apiOK.URL, "gemini": apiOK.URL}
+	aiProductProbeTargets = map[string][]string{"claude": {cfChallenge.URL}}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	// 产品层单独分类：通用 CF 挑战 → -1（未知），不得为 1。
+	if got := probeOneAIProductLayer(client, "claude", cfChallenge.URL); got != -1 {
+		t.Fatalf("claude generic CF challenge product classify = %d, want -1 (unknown, not regional block)", got)
+	}
+	// 合并结果：API 401 可达应胜出。
+	got := probeAIReachability(client)
+	var m map[string]int
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["claude"] != 0 {
+		t.Fatalf("claude merge = %d, want 0 (reachable API wins over generic CF challenge) (full=%s)", m["claude"], got)
+	}
+}

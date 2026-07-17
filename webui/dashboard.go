@@ -70,10 +70,10 @@ const dashboardHTML = `<!DOCTYPE html>
      </div>
      <div class="orbit-legend legend">
       <div class="orbit-legend-row legend-row">
-       <b><span class="qd s"></span>S ≤500ms</b>
-       <b><span class="qd a"></span>A ≤1000ms</b>
-       <b><span class="qd b"></span>B ≤2000ms</b>
-       <b><span class="qd c"></span>C 更慢</b>
+       <b><span class="qd s"></span>S ≤200ms</b>
+       <b><span class="qd a"></span>A ≤500ms</b>
+       <b><span class="qd b"></span>B ≤1000ms</b>
+       <b><span class="qd c"></span>C ≤2000ms</b>
        <b><span class="beam-swatch"></span>会话连线（越粗绑定越多）</b>
       </div>
      </div>
@@ -132,7 +132,7 @@ const dashboardHTML = `<!DOCTYPE html>
      <select class="input sm" id="region-filter" onchange="renderProxies()" aria-label="地域"><option value="">全部地域</option></select>
      <select class="input sm" id="status-filter" onchange="renderProxies()" aria-label="状态"><option value="">全部状态</option><option value="ok">可用</option><option value="paused">已停用</option><option value="failed">不可用</option><option value="pending">待验证</option></select>
      <select class="input sm" id="source-filter" onchange="renderProxies()" aria-label="来源"><option value="">全部来源</option><option value="manual">手工</option><option value="subscription">订阅</option></select>
-     <select class="input sm" id="quality-filter" onchange="renderProxies()" aria-label="延迟档"><option value="">全部延迟档</option><option value="S">S</option><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
+     <select class="input sm" id="quality-filter" onchange="renderProxies()" aria-label="延迟档"><option value="">全部延迟档</option><option value="S">S</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="D">D</option></select>
      <span class="sep" aria-hidden="true" style="width:1px;height:22px;background:var(--line);flex:0 0 auto"></span>
      <select class="hidden-select" id="cf-filter"><option value="">全部 Cloudflare</option><option value="unlocked">Cloudflare 畅通</option><option value="blocked">Cloudflare 阻断</option><option value="unknown">Cloudflare 未知</option></select><button type="button" class="filter-toggle" id="cf-toggle" data-sel="cf-filter" onclick="cycleFilter('cf-filter','cf-toggle')" aria-pressed="false" title="Cloudflare：全部/畅通/阻断/未知"><span class="tx">Cloudflare</span><span class="st">全部</span></button>
      <select class="hidden-select" id="ai-openai-filter"><option value="">ChatGPT 全部</option><option value="unlocked">ChatGPT 畅通</option><option value="blocked">ChatGPT 阻断</option><option value="unprobed">ChatGPT 未知</option></select><button type="button" class="filter-toggle" id="ai-openai-toggle" data-sel="ai-openai-filter" onclick="cycleFilter('ai-openai-filter','ai-openai-toggle')" aria-pressed="false" title="ChatGPT：全部/畅通/阻断/未知"><span class="tx">ChatGPT</span><span class="st">全部</span></button>
@@ -154,7 +154,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="hint" style="margin:0 0 10px">AI 解锁：<span style="color:var(--ok);font-weight:700">绿=畅通</span> · <span style="color:var(--danger);font-weight:700">红=阻断</span> · <span style="color:var(--gray);font-weight:700">灰=未知</span></div>
     <div class="table-wrap">
      <table class="tbl">
-      <thead><tr><th><input type="checkbox" id="proxy-select-all" onchange="toggleSelectAll(this.checked)" aria-label="全选"></th><th>★</th><th>名称 / 备注</th><th>协议</th><th>地域</th><th>出口 IP<span class="muted"> (信息)</span></th><th>延迟</th><th>ipapi.is 滥用分<span class="muted"> /1.00</span></th><th>ip-api 标记</th><th><span class="th-ico" title="Cloudflare：畅通 / 阻断 / 未知"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M17.5 15.5c.3 0 .5-.2.5-.5 0-2-1.6-3.6-3.6-3.6-.3 0-.6 0-.9.1A4 4 0 0 0 6 12.5c-1.4.1-2.5 1.3-2.5 2.7 0 .2.2.3.4.3h13.6z"/></svg><span class="tx">Cloudflare</span></span></th><th><span class="th-ico" title="AI 解锁：ChatGPT / Claude / Grok / Gemini（绿畅通 / 红阻断 / 灰未知）"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9z"/></svg><span class="tx">AI 解锁</span></span></th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+      <thead><tr><th><input type="checkbox" id="proxy-select-all" onchange="toggleSelectAll(this.checked)" aria-label="全选"></th><th>★</th><th>名称 / 备注</th><th>协议</th><th>地域</th><th>出口 IP<span class="muted"> (信息)</span></th><th>延迟</th><th>ipapi.is 滥用分<span class="muted"> /1.00</span></th><th>ip-api 标记</th><th><span class="th-ico" title="Cloudflare：畅通 / 阻断 / 未知"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M17.5 15.5c.3 0 .5-.2.5-.5 0-2-1.6-3.6-3.6-3.6-.3 0-.6 0-.9.1A4 4 0 0 0 6 12.5c-1.4.1-2.5 1.3-2.5 2.7 0 .2.2.3.4.3h13.6z"/></svg><span class="tx">CF</span></span></th><th><span class="th-ico" title="AI 解锁：ChatGPT / Claude / Grok / Gemini（绿畅通 / 红阻断 / 灰未知）"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9z"/></svg><span class="tx">AI 解锁</span></span></th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
       <tbody id="proxy-rows"><tr><td colspan="14" class="empty">加载中</td></tr></tbody>
      </table>
     </div>

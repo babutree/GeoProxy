@@ -379,7 +379,7 @@ func TestDashboardNodeOrbit(t *testing.T) {
 		"function renderWorldMap(){renderOrbitSystem()}",
 		"renderRegions();renderOrbitSystem()",
 		"orbitSessions=Array.isArray(sessions)?sessions:[];renderOrbitSystem()",
-		"S ≤500ms",
+		"S ≤200ms",
 		"会话连线（越粗绑定越多）",
 		"function updateSolarWind(",
 		"function updateGravLens(",

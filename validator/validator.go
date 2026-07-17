@@ -407,14 +407,15 @@ func probeOneAIProductLayer(client *http.Client, service, target string) int {
 }
 
 // classifyAIProductLayer 只识别“明确”的产品层地区锁或解锁指纹，不做模糊猜测。
+//
+// 注意：产品层网站（如 claude.ai）对几乎所有数据中心/代理出口 IP 都会下发
+// 通用 Cloudflare 反爬挑战（cf-mitigated: challenge / "Just a moment" / error code: 1020），
+// 这是与地区无关的机器人拦截，不能作为“地域封禁”依据——否则会把 API 层
+// 明确可达（401 认证错误）的节点误判为不可达。真正的地域封禁有独立指纹
+// （app-unavailable-in-region、unsupported_country、明确地区拒绝文案），单独识别。
+// 故此处不再把通用 CF 挑战判为 1；遇到通用挑战时返回 -1（未知），让 API 主信号决定。
 func classifyAIProductLayer(service string, statusCode int, header http.Header, req *http.Request, body string) int {
-	if header.Get("cf-mitigated") != "" {
-		return 1
-	}
 	lower := strings.ToLower(body)
-	if hasAICloudflareBlock(statusCode, lower) {
-		return 1
-	}
 	if hasRegionalBlockCode(body) || hasExplicitRegionalRejection(body) {
 		return 1
 	}
