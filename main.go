@@ -4,14 +4,14 @@ import (
 	"log"
 	"time"
 
-	"goproxy/checker"
-	"goproxy/config"
-	"goproxy/custom"
-	"goproxy/logger"
-	"goproxy/proxy"
-	"goproxy/storage"
-	"goproxy/validator"
-	"goproxy/webui"
+	"github.com/babutree/GeoProxy/checker"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/custom"
+	"github.com/babutree/GeoProxy/logger"
+	"github.com/babutree/GeoProxy/proxy"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
+	"github.com/babutree/GeoProxy/webui"
 )
 
 func main() {

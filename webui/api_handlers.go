@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strings"
 
-	"goproxy/config"
-	"goproxy/logger"
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/logger"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // apiAuthCheck 检查当前用户是否为管理员
@@ -22,10 +22,30 @@ func (s *Server) apiAuthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
-	total, _ := s.storage.CountAll()
-	httpCount, _ := s.storage.CountAvailableByProtocol("http")
-	socks5Count, _ := s.storage.CountAvailableByProtocol("socks5")
-	subscriptionCount, _ := s.storage.CountBySource(storage.SourceSubscription)
+	total, err := s.storage.CountAll()
+	if err != nil {
+		log.Printf("[webui] stats CountAll failed: %v", err)
+		jsonError(w, "failed to load stats", http.StatusInternalServerError)
+		return
+	}
+	httpCount, err := s.storage.CountAvailableByProtocol("http")
+	if err != nil {
+		log.Printf("[webui] stats CountAvailableByProtocol(http) failed: %v", err)
+		jsonError(w, "failed to load stats", http.StatusInternalServerError)
+		return
+	}
+	socks5Count, err := s.storage.CountAvailableByProtocol("socks5")
+	if err != nil {
+		log.Printf("[webui] stats CountAvailableByProtocol(socks5) failed: %v", err)
+		jsonError(w, "failed to load stats", http.StatusInternalServerError)
+		return
+	}
+	subscriptionCount, err := s.storage.CountBySource(storage.SourceSubscription)
+	if err != nil {
+		log.Printf("[webui] stats CountBySource failed: %v", err)
+		jsonError(w, "failed to load stats", http.StatusInternalServerError)
+		return
+	}
 	activeSessions := 0
 	if s.affinity != nil {
 		activeSessions = s.affinity.Count()
@@ -56,10 +76,14 @@ func (s *Server) apiProxies(w http.ResponseWriter, r *http.Request) {
 	// 构建 subscription_id -> name 映射，供前端以订阅名称区分节点来源，
 	// 而非笼统地显示 "subscription"。
 	nameByID := map[int64]string{}
-	if subs, subErr := s.storage.GetSubscriptions(); subErr == nil {
-		for _, sub := range subs {
-			nameByID[sub.ID] = sub.Name
-		}
+	subs, subErr := s.storage.GetSubscriptions()
+	if subErr != nil {
+		log.Printf("[webui] list proxies subscription names failed: %v", subErr)
+		jsonError(w, "failed to list proxies", http.StatusInternalServerError)
+		return
+	}
+	for _, sub := range subs {
+		nameByID[sub.ID] = sub.Name
 	}
 
 	type proxyView struct {
@@ -120,8 +144,9 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
-	if proxy.Source == storage.SourceManual && s.customMgr != nil {
-		err = s.customMgr.DeleteManualNode(proxy.ID)
+	// 任意来源删除都必须经 Manager：隧道节点需同步卸载 sing-box 运行态（BUG-06）。
+	if s.customMgr != nil {
+		err = s.customMgr.DeleteManagedProxy(proxy.ID)
 	} else if req.ID > 0 {
 		err = s.storage.DeleteProxyByID(req.ID)
 	} else {

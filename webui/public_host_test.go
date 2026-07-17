@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 func resetPublicIPCache() {

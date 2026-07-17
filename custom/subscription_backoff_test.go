@@ -75,7 +75,8 @@ func TestCollectTunnelNodesDoesNotRefetchBackedOffSubscription(t *testing.T) {
 	if _, err := m.collectAllTunnelNodesExcludingSubscription(excludedID, nil); err != nil {
 		t.Fatalf("collectAllTunnelNodesExcludingSubscription() error = %v", err)
 	}
+	// BUG-05：collect 不再旁路 re-fetch 其它订阅；backed-off URL 也不得被触达。
 	if got := hits.Load(); got != 0 {
-		t.Fatalf("backed-off subscription fetched %d times, want 0", got)
+		t.Fatalf("subscription fetched %d times via collect path, want 0", got)
 	}
 }

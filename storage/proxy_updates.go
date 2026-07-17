@@ -363,8 +363,8 @@ func (s *Storage) enableProxyWhere(where string, args ...interface{}) error {
 	return requireRowsAffected(res.RowsAffected())
 }
 
-// PauseProxy 用户手动停用节点，状态置为 'paused' 以区别于验证失败的 'disabled'。
-// paused 表示“用户主动不用”，disabled 表示“系统判定不可用”。两者都不参与选路。
+// PauseProxy 用户手动停用节点：写 user_paused=1，不改 status 底色（active/degraded/disabled）。
+// user_paused 表示“用户主动不用”，status=disabled 表示“系统判定不可用”。两者都不参与选路。
 func (s *Storage) PauseProxy(address string) error {
 	if err := s.requireUnambiguousAddress(address); err != nil {
 		return err

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func newNodesAPITestServer(t *testing.T, plainKey string) (*Server, string) {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 const (

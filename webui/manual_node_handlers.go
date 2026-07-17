@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func (s *Server) apiManualNodeImport(w http.ResponseWriter, r *http.Request) {

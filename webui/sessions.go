@@ -24,6 +24,11 @@ type proxyOccupancyRow struct {
 }
 
 func (s *Server) apiSessions(w http.ResponseWriter, _ *http.Request) {
+	// 与 occupancy 一致：非标准装配下 affinity 可能为 nil，不得 panic（RISK-03）。
+	if s.affinity == nil {
+		jsonOK(w, []sessionRow{})
+		return
+	}
 	bindings := s.affinity.List()
 	rows := make([]sessionRow, 0, len(bindings))
 	for _, binding := range bindings {

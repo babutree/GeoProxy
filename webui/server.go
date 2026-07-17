@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/config"
-	"goproxy/custom"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/custom"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 // 简单内存 session
@@ -383,6 +383,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// 仪表盘 HTML 不得被浏览器长缓存：否则新 HTML 可能配合旧 /assets/* 触发跨版本函数名失配（BUG-08）。
+	w.Header().Set("Cache-Control", "no-store")
 	if !validSession(r) {
 		fmt.Fprint(w, loginHTML)
 		return
@@ -397,13 +399,14 @@ func assetETag(content string) string {
 }
 
 // serveAsset 统一下发静态文本资源：正确 Content-Type、基于内容 hash 的 ETag、
-// Cache-Control（max-age=3600 + must-revalidate，配合 ETag 保证内容变更即失效），
-// 支持 If-None-Match 命中返回 304。仅内嵌 Go 常量，无外链、无独立文件。
+// Cache-Control: no-cache（每次必须向服务器再验证，命中 ETag 才 304）。
+// 禁止 max-age 新鲜窗口：固定 URL + 长缓存会让新 HTML 调用到旧 JS（BUG-08）。
+// 仅内嵌 Go 常量，无外链、无独立文件。
 func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request, contentType, content string) {
 	etag := assetETag(content)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("ETag", etag)
-	w.Header().Set("Cache-Control", "max-age=3600, must-revalidate")
+	w.Header().Set("Cache-Control", "no-cache")
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return

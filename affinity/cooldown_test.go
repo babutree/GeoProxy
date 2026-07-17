@@ -64,7 +64,6 @@ func TestCooldownConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-
 func TestCollectExpiredRemovesUnqueriedCooldownEntries(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	store := NewWithClock(10*time.Minute, func() time.Time { return now })
@@ -82,7 +81,7 @@ func TestCollectExpiredRemovesUnqueriedCooldownEntries(t *testing.T) {
 func TestCollectExpiredKeepsActiveCooldownEntries(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	store := NewWithClock(10*time.Minute, func() time.Time { return now })
-	store.SetCooldown(1, now.Add(time.Minute))   // will expire
+	store.SetCooldown(1, now.Add(time.Minute))    // will expire
 	store.SetCooldown(2, now.Add(10*time.Minute)) // still active
 	now = now.Add(2 * time.Minute)
 	store.collectExpired()

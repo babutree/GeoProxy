@@ -11,8 +11,8 @@ on:
 env:
   REGISTRY_DOCKERHUB: docker.io
   REGISTRY_GHCR: ghcr.io
-  GHCR_IMAGE_NAME: babutree/goproxy
-  DOCKERHUB_IMAGE_NAME: babutree/goproxy
+  GHCR_IMAGE_NAME: babutree/geoproxy
+  DOCKERHUB_IMAGE_NAME: babutree/geoproxy
 
 jobs:
   build-and-push:

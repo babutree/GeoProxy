@@ -1,6 +1,6 @@
 # Geo Filtering And Region Routing
 
-GoProxy supports two related controls:
+GeoProxy supports two related controls:
 
 - Country filters decide whether validated upstream nodes remain available.
 - Username DSL region suffixes decide which region a client request should use.
@@ -36,13 +36,14 @@ Proxy authentication usernames may include these suffixes:
 ```text
 username-region-us
 username-session-browser
-username-region-jp-session-app01
+username-region-jp-unlock-gpt-session-app01
 ```
 
 Rules:
 
 - Region must be two ASCII letters and is normalized to lowercase.
 - Session can contain ASCII letters, digits, `_`, and `-`, up to 64 characters.
+- Optional `-unlock-<token>` appears after region and before session when present.
 - A request-specific region overrides `DEFAULT_REGION`.
 - A session key keeps the client bound to the same available node until the session TTL expires or the node becomes unavailable.
 

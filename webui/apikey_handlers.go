@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 type apiKeyPublicView struct {

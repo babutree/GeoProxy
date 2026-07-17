@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/auth"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func TestPickFiltersByGPTUnlock(t *testing.T) {

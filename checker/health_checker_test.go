@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // slowValidator 模拟慢速探测：每个结果延迟 delay，用于制造 RunOnce 重叠。

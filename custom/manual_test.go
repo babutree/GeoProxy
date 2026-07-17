@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"testing"
 
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 // newTestStorage 创建临时 SQLite 存储（CGO 已启用）。

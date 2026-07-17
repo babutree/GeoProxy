@@ -19,9 +19,9 @@ import (
 	"time"
 	"unicode"
 
-	"goproxy/config"
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // longTermDisabledRetention 禁用满 1 天视为长期禁用，移出 sing-box 释放端口。
@@ -297,12 +297,22 @@ func (m *Manager) probeDisabled() {
 			// 检查地理过滤：恢复前确认不在屏蔽列表中
 			if exitLocation != "" && isGeoBlocked(exitLocation, cfg) {
 				log.Printf("[custom] 代理 %s 验证通过但被地理过滤 (%s)，保持禁用", proxy.Address, exitLocation)
-				m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability)
+				if err := m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability); err != nil {
+					log.Printf("[custom] 写回地理过滤出口信息失败 %s: %v", proxy.Address, err)
+				}
 				m.refreshMu.Unlock()
 				continue
 			}
-			m.storage.EnableSubscriptionProxy(proxy.Address, proxy.SubscriptionID)
-			m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability)
+			if err := m.storage.EnableSubscriptionProxy(proxy.Address, proxy.SubscriptionID); err != nil {
+				m.refreshMu.Unlock()
+				log.Printf("[custom] 启用探测恢复节点失败 %s: %v", proxy.Address, err)
+				continue
+			}
+			if err := m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability); err != nil {
+				m.refreshMu.Unlock()
+				log.Printf("[custom] 写回探测恢复出口信息失败 %s: %v", proxy.Address, err)
+				continue
+			}
 			m.refreshMu.Unlock()
 			recovered++
 			recoveredSubs[proxy.SubscriptionID] = true
@@ -312,7 +322,9 @@ func (m *Manager) probeDisabled() {
 	// 有恢复的代理则更新对应订阅的 last_success
 	for subID := range recoveredSubs {
 		if subID > 0 {
-			m.storage.UpdateSubscriptionSuccess(subID)
+			if err := m.storage.UpdateSubscriptionSuccess(subID); err != nil {
+				log.Printf("[custom] 更新订阅 last_success 失败 sub=%d: %v", subID, err)
+			}
 		}
 	}
 
@@ -532,7 +544,11 @@ func (m *Manager) collectAllTunnelNodes() ([]ParsedNode, error) {
 	return m.collectAllTunnelNodesExcludingSubscription(0, nil)
 }
 
+// collectAllTunnelNodesExcludingSubscription 只合并当前 sing-box 运行态快照。
+// 不旁路拉取其它订阅：其它订阅的解析/入库必须走它们自己的完整 Refresh 事务（BUG-05）。
+// excludedSubID 保留以兼容调用方签名；当前实现仅按 excludedRuntimeKeys 剔除。
 func (m *Manager) collectAllTunnelNodesExcludingSubscription(excludedSubID int64, excludedRuntimeKeys map[string]bool) ([]ParsedNode, error) {
+	_ = excludedSubID
 	// 收集时排除长期禁用节点，避免继续占用 mixed 端口。
 	longTermKeys := m.longTermDisabledRuntimeKeys()
 	nodeMap := make(map[string]ParsedNode)
@@ -545,42 +561,6 @@ func (m *Manager) collectAllTunnelNodesExcludingSubscription(excludedSubID int64
 			continue
 		}
 		nodeMap[key] = node
-	}
-
-	subs, err := m.storage.GetSubscriptions()
-	if err != nil {
-		return mapValues(nodeMap), err
-	}
-
-	for _, sub := range subs {
-		if sub.ID == excludedSubID {
-			continue
-		}
-		if sub.Status != "active" {
-			continue
-		}
-		if !sub.LastFetch.IsZero() && time.Since(sub.LastFetch) < time.Duration(sub.RefreshMin)*time.Minute {
-			continue
-		}
-		data, err := m.fetchSubscriptionData(&sub)
-		if err != nil {
-			continue
-		}
-		nodes, err := Parse(data, sub.Format)
-		if err != nil {
-			continue
-		}
-		for _, node := range nodes {
-			if node.IsDirect() {
-				continue
-			}
-			key := node.NodeKey()
-			// 已剔除的长期禁用不得被其它订阅刷新的 re-fetch 再次塞回。
-			if longTermKeys[key] {
-				continue
-			}
-			nodeMap[key] = node
-		}
 	}
 	return mapValues(nodeMap), nil
 }
@@ -791,7 +771,11 @@ func (m *Manager) fetchSubscriptionURL(urlStr, headersJSON string) ([]byte, erro
 		return nil, err
 	}
 	transport := &http.Transport{DialContext: subscriptionDialContextFn}
-	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	client := &http.Client{
+		Timeout:       30 * time.Second,
+		Transport:     transport,
+		CheckRedirect: subscriptionCheckRedirect,
+	}
 
 	var lastErr error
 	for attempt := 1; attempt <= subscriptionFetchMaxAttempts; attempt++ {
@@ -954,6 +938,39 @@ func buildSubscriptionRequest(urlStr, headersJSON string) (*http.Request, error)
 	return req, nil
 }
 
+// subscriptionCheckRedirect 限制订阅拉取重定向，并避免跨 origin 转发非标准自定义密钥头。
+// Go 默认只剥离 Authorization/Cookie/Proxy-Authorization；X-Token 等会被跨域复制（RISK-01）。
+func subscriptionCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return fmt.Errorf("stopped after 5 redirects")
+	}
+	if err := subscriptionURLTargetCheck(req.URL.String()); err != nil {
+		return err
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	prev := via[len(via)-1]
+	if sameSubscriptionOrigin(prev.URL, req.URL) {
+		return nil
+	}
+	// 跨 origin：只保留标准库也会在敏感场景处理的最小安全头集合之外的内容——
+	// 这里主动剥离自定义头，仅保留 User-Agent（以及标准库已剥离的敏感标准头语义）。
+	ua := req.Header.Get("User-Agent")
+	req.Header = make(http.Header)
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	return nil
+}
+
+func sameSubscriptionOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
 func validateSubscriptionURLTarget(urlStr string) error {
 	u, err := url.Parse(urlStr)
 	if err != nil {
@@ -1064,48 +1081,80 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 	for result := range resultCh {
 		if result.Valid {
 			latencyMs := int(result.Latency.Milliseconds())
-			m.storage.UpdateSubscriptionProxyExitInfo(result.Proxy.Address, subID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.CFBlocked, result.Risk.AIReachability)
+			if err := m.storage.UpdateSubscriptionProxyExitInfo(result.Proxy.Address, subID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
+				log.Printf("[custom] 写回验证出口信息失败 %s: %v", result.Proxy.Address, err)
+				invalid++
+				continue
+			}
 			// 检查地理过滤
 			if result.ExitLocation != "" && isGeoBlocked(result.ExitLocation, cfg) {
-				m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID)
+				if err := m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
+					log.Printf("[custom] 地理过滤禁用节点失败 %s: %v", result.Proxy.Address, err)
+				}
 				invalid++
-			} else {
-				m.storage.EnableSubscriptionProxy(result.Proxy.Address, subID)
-				valid++
+				continue
 			}
-		} else {
-			invalid++
-			m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID)
+			if err := m.storage.EnableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
+				// 父订阅暂停 / 行不匹配 / DB 错误：不得计为可用
+				log.Printf("[custom] 启用验证通过节点失败 %s: %v", result.Proxy.Address, err)
+				invalid++
+				continue
+			}
+			valid++
+			continue
+		}
+		invalid++
+		if err := m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
+			log.Printf("[custom] 禁用验证失败节点失败 %s: %v", result.Proxy.Address, err)
 		}
 	}
 
 	// 有可用节点则更新 last_success
 	if valid > 0 && subID > 0 {
-		m.storage.UpdateSubscriptionSuccess(subID)
+		if err := m.storage.UpdateSubscriptionSuccess(subID); err != nil {
+			log.Printf("[custom] 更新订阅 last_success 失败 sub=%d: %v", subID, err)
+		}
 	}
 
 	log.Printf("[custom] 验证完成：%d 可用，%d 不可用", valid, invalid)
 	return valid
 }
 
-// GetStatus 获取订阅管理器状态
+// GetStatus 获取订阅管理器状态。
+// 任一 storage 计数失败时记录错误字段，禁止把失败伪装成 0（BUG-07）。
 func (m *Manager) GetStatus() map[string]interface{} {
-	subscriptionCount, _ := m.storage.CountBySource(storage.SourceSubscription)
-	disabled, _ := m.storage.GetDisabledCustomProxies()
-	subs, _ := m.storage.GetSubscriptions()
+	subscriptionCount, errSubCount := m.storage.CountBySource(storage.SourceSubscription)
+	disabled, errDisabled := m.storage.GetDisabledCustomProxies()
+	subs, errSubs := m.storage.GetSubscriptions()
 	singboxStatus := m.singbox.GetRuntimeStatus()
 
-	return map[string]interface{}{
+	status := map[string]interface{}{
 		"singbox_running":     singboxStatus.Running,
 		"singbox_status":      singboxStatus.Status,
 		"singbox_reason":      singboxStatus.Reason,
 		"singbox_nodes":       singboxStatus.Nodes,
 		"singbox_ready_ports": singboxStatus.ReadyPorts,
 		"singbox_total_ports": singboxStatus.TotalPorts,
-		"subscription_count":  subscriptionCount,
-		"disabled_count":      len(disabled),
-		"subscription_total":  len(subs),
 	}
+	if errSubCount != nil {
+		log.Printf("[custom] status CountBySource failed: %v", errSubCount)
+		status["subscription_count_error"] = errSubCount.Error()
+	} else {
+		status["subscription_count"] = subscriptionCount
+	}
+	if errDisabled != nil {
+		log.Printf("[custom] status GetDisabledCustomProxies failed: %v", errDisabled)
+		status["disabled_count_error"] = errDisabled.Error()
+	} else {
+		status["disabled_count"] = len(disabled)
+	}
+	if errSubs != nil {
+		log.Printf("[custom] status GetSubscriptions failed: %v", errSubs)
+		status["subscription_total_error"] = errSubs.Error()
+	} else {
+		status["subscription_total"] = len(subs)
+	}
+	return status
 }
 
 // ValidateSubscription 验证订阅能否解析出节点（不入库，仅检查）。
@@ -1181,8 +1230,22 @@ func (m *Manager) DeleteManualNode(id int64) error {
 	if proxy.Source != storage.SourceManual {
 		return fmt.Errorf("仅支持删除手工节点")
 	}
+	return m.deleteProxyWithRuntime(proxy)
+}
+
+// DeleteManagedProxy 删除任意来源节点：直连只改 DB，隧道节点同步从 sing-box 运行态移除。
+// 通用 /api/proxy/delete 必须走此路径，禁止只删 DB 留下幽灵端口（BUG-06）。
+func (m *Manager) DeleteManagedProxy(id int64) error {
+	proxy, err := m.storage.GetProxyByID(id)
+	if err != nil {
+		return fmt.Errorf("查找节点失败: %w", err)
+	}
+	return m.deleteProxyWithRuntime(proxy)
+}
+
+func (m *Manager) deleteProxyWithRuntime(proxy *storage.Proxy) error {
 	if !isLocalTunnelAddress(proxy.Address) {
-		if err := m.storage.DeleteProxyByID(id); err != nil {
+		if err := m.storage.DeleteProxyByID(proxy.ID); err != nil {
 			return fmt.Errorf("删除节点失败: %w", err)
 		}
 		return nil
@@ -1207,7 +1270,7 @@ func (m *Manager) DeleteManualNode(id int64) error {
 	if err := m.singbox.Reload(newNodes); err != nil {
 		return fmt.Errorf("sing-box 重载失败: %w", err)
 	}
-	if err := m.storage.DeleteProxyByID(id); err != nil {
+	if err := m.storage.DeleteProxyByID(proxy.ID); err != nil {
 		if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
 			return fmt.Errorf("删除节点失败: %w; 回滚运行态失败: %v", err, rbErr)
 		}

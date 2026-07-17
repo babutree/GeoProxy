@@ -1,4 +1,4 @@
-module goproxy
+module github.com/babutree/GeoProxy
 
 go 1.25.0
 

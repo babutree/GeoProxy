@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 // TestAPIKeyCreateRejectsEmptyName verifies that creating an API key with an

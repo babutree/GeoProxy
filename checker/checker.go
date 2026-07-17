@@ -4,9 +4,9 @@ import (
 	"log"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 type Checker struct {

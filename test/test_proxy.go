@@ -73,11 +73,11 @@ func envOrDefault(key, defaultValue string) string {
 }
 
 func proxyAuthUsername() string {
-	username := strings.TrimSpace(os.Getenv("GOPROXY_AUTH_USERNAME"))
-	if region := strings.TrimSpace(os.Getenv("GOPROXY_AUTH_REGION")); region != "" {
+	username := strings.TrimSpace(os.Getenv("GEOPROXY_AUTH_USERNAME"))
+	if region := strings.TrimSpace(os.Getenv("GEOPROXY_AUTH_REGION")); region != "" {
 		username += "-region-" + region
 	}
-	if session := strings.TrimSpace(os.Getenv("GOPROXY_AUTH_SESSION")); session != "" {
+	if session := strings.TrimSpace(os.Getenv("GEOPROXY_AUTH_SESSION")); session != "" {
 		username += "-session-" + session
 	}
 	return username
@@ -85,11 +85,11 @@ func proxyAuthUsername() string {
 
 func requireProxyAuth() (string, string) {
 	username := proxyAuthUsername()
-	password := os.Getenv("GOPROXY_AUTH_PASSWORD")
-	if strings.TrimSpace(os.Getenv("GOPROXY_AUTH_USERNAME")) == "" || password == "" {
+	password := os.Getenv("GEOPROXY_AUTH_PASSWORD")
+	if strings.TrimSpace(os.Getenv("GEOPROXY_AUTH_USERNAME")) == "" || password == "" {
 		fmt.Fprintln(os.Stderr, "Missing proxy credentials.")
-		fmt.Fprintln(os.Stderr, "Set GOPROXY_AUTH_USERNAME and GOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings.")
-		fmt.Fprintln(os.Stderr, "Optional: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser")
+		fmt.Fprintln(os.Stderr, "Set GEOPROXY_AUTH_USERNAME and GEOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings.")
+		fmt.Fprintln(os.Stderr, "Optional: GEOPROXY_AUTH_REGION=us GEOPROXY_AUTH_SESSION=browser")
 		os.Exit(2)
 	}
 	return username, password

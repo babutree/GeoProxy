@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
 	"golang.org/x/net/proxy"
-	"goproxy/config"
-	"goproxy/storage"
 )
 
 type Validator struct {
@@ -252,7 +252,7 @@ var aiProbeRules = map[string]aiProbeRule{
 	"openai": {
 		headers: map[string]string{
 			"Accept":     "application/json",
-			"User-Agent": "goproxy-ai-probe/1.0",
+			"User-Agent": "geoproxy-ai-probe/1.0",
 		},
 		// 401 已在 classify 中直接记可达；body 组用于偶发 200 列表响应。
 		unlockedBodyGroups: [][]string{
@@ -264,7 +264,7 @@ var aiProbeRules = map[string]aiProbeRule{
 		headers: map[string]string{
 			"Accept":            "application/json",
 			"anthropic-version": "2023-06-01",
-			"User-Agent":        "goproxy-ai-probe/1.0",
+			"User-Agent":        "geoproxy-ai-probe/1.0",
 		},
 		unlockedBodyGroups: [][]string{
 			{"authentication_error"},
@@ -275,7 +275,7 @@ var aiProbeRules = map[string]aiProbeRule{
 	"grok": {
 		headers: map[string]string{
 			"Accept":     "application/json",
-			"User-Agent": "goproxy-ai-probe/1.0",
+			"User-Agent": "geoproxy-ai-probe/1.0",
 		},
 		unlockedBodyGroups: [][]string{
 			{"object", "list", "data"},
@@ -286,7 +286,7 @@ var aiProbeRules = map[string]aiProbeRule{
 	"gemini": {
 		headers: map[string]string{
 			"Accept":     "application/json",
-			"User-Agent": "goproxy-ai-probe/1.0",
+			"User-Agent": "geoproxy-ai-probe/1.0",
 		},
 		unlockedBodyGroups: [][]string{
 			{"unregistered caller", "api key"},

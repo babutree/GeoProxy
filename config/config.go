@@ -158,7 +158,8 @@ func Load() *Config {
 	}
 
 	// 首次启动引导：config.json 尚无凭据时，生成随机凭据并落盘。
-	// 明文仅保存在 firstBoot 供日志一次性展示，不写入磁盘明文（磁盘只存 hash）。
+	// WebUI 登录密码只存 hash；代理认证密码为支持复制完整 URL 会明文写入 config.json（见 Save）。
+	// firstBoot 仅缓存明文供日志一次性展示。
 	needBootstrap := cfg.WebUIPasswordHash == "" || cfg.ProxyAuthPasswordHash == ""
 	if needBootstrap {
 		bootstrapCredentials(cfg)
@@ -208,6 +209,14 @@ func Get() *Config {
 	cfgMu.RLock()
 	defer cfgMu.RUnlock()
 	return globalCfg
+}
+
+// SetGlobal 发布配置快照到进程全局。
+// 生产路径由 Load/Save 调用；测试可用来安装/恢复快照，避免请求路径继续读旧指针。
+func SetGlobal(cfg *Config) {
+	cfgMu.Lock()
+	globalCfg = cfg
+	cfgMu.Unlock()
 }
 
 type savedConfig struct {

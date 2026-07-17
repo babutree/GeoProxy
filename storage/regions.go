@@ -166,6 +166,22 @@ func (s *Storage) GetProxyByID(id int64) (*Proxy, error) {
 	return nil, err
 }
 
+// IsSubscriptionPaused 报告父订阅是否暂停。id<=0 表示手工节点，无父订阅。
+func (s *Storage) IsSubscriptionPaused(id int64) (bool, error) {
+	if id <= 0 {
+		return false, nil
+	}
+	var status string
+	err := s.db.QueryRow(`SELECT status FROM subscriptions WHERE id = ?`, id).Scan(&status)
+	if err == sql.ErrNoRows {
+		return false, fmt.Errorf("subscription %d not found", id)
+	}
+	if err != nil {
+		return false, err
+	}
+	return status == "paused", nil
+}
+
 func normalizeProtocol(protocol string) string {
 	return strings.ToLower(strings.TrimSpace(protocol))
 }

@@ -1,8 +1,8 @@
 # Data 目录说明
 
-GoProxy 的所有运行时数据和配置存储在数据目录中。
+GeoProxy 的所有运行时数据和配置存储在数据目录中。
 
-**默认配置**（`docker-compose.yml`）：使用 Docker Named Volume `goproxy-data`，由 Docker 自动管理，数据持久化且独立于容器生命周期。
+**默认配置**（`docker-compose.yml`）：使用 bind mount，将宿主机 `${HOST_DATA_DIR:-./data}` 挂载到容器 `/app/data`。Named Volume 仅在你改写 compose 时可选。
 
 ## 📁 目录内容
 
@@ -58,17 +58,17 @@ GoProxy 的所有运行时数据和配置存储在数据目录中。
 
 ### Dokploy / 生产部署（Named Volume）
 
-**卷名称**：`goproxy-data`
+**卷名称**：`geoproxy-data`
 
 **实际位置**（Linux）：
 ```bash
-/var/lib/docker/volumes/goproxy-data/_data/
+/var/lib/docker/volumes/geoproxy-data/_data/
 ```
 
 **查看数据**：
 ```bash
 # 进入运行中的容器
-docker exec -it proxygo sh
+docker exec -it geoproxy sh
 
 # 查看数据目录
 ls -lh /app/data/
@@ -80,7 +80,7 @@ sqlite3 /app/data/proxy.db "SELECT COUNT(*) FROM proxies;"
 **备份数据**：
 ```bash
 # 从运行中的 compose 服务导出数据目录
-docker compose exec -T goproxy tar czf - -C /app/data . > goproxy-backup-$(date +%Y%m%d).tar.gz
+docker compose exec -T geoproxy tar czf - -C /app/data . > geoproxy-backup-$(date +%Y%m%d).tar.gz
 ```
 
 **恢复数据**：
@@ -89,7 +89,7 @@ docker compose exec -T goproxy tar czf - -C /app/data . > goproxy-backup-$(date 
 docker compose down
 
 # 恢复备份到 compose 管理的数据卷
-docker compose run --rm --no-deps --entrypoint sh goproxy -c "cd /app/data && tar xzf -" < goproxy-backup-20260328.tar.gz
+docker compose run --rm --no-deps --entrypoint sh geoproxy -c "cd /app/data && tar xzf -" < geoproxy-backup-20260328.tar.gz
 
 # 重启服务
 docker compose up -d
@@ -111,7 +111,7 @@ sqlite3 data/proxy.db "SELECT COUNT(*) FROM proxies;"
 **备份数据**：
 ```bash
 # 简单打包
-tar czf goproxy-backup-$(date +%Y%m%d).tar.gz data/
+tar czf geoproxy-backup-$(date +%Y%m%d).tar.gz data/
 
 # 或仅备份数据库
 cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
@@ -125,10 +125,10 @@ cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
 
 ```yaml
 volumes:
-  - goproxy-data:/app/data  # Named Volume
+  - geoproxy-data:/app/data  # Named Volume
 
 volumes:
-  goproxy-data:              # 定义卷
+  geoproxy-data:              # 定义卷
 ```
 
 **优势**：
@@ -243,7 +243,7 @@ docker compose up -d
 
 ```bash
 # 备份整个 data 目录
-tar -czf goproxy-backup-$(date +%Y%m%d).tar.gz data/
+tar -czf geoproxy-backup-$(date +%Y%m%d).tar.gz data/
 
 # 或仅备份数据库
 cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
@@ -287,3 +287,4 @@ docker compose up -d
 3. **权限问题**：确保容器有权限读写 data 目录
 4. **备份时机**：建议在服务停止时备份，避免数据不一致
 5. **迁移数据**：直接复制整个 data 目录到新服务器即可
+

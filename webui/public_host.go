@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 // resolvePublicHost picks an externally reachable host for connect views.

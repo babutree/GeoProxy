@@ -5,8 +5,10 @@
 Thumbs.db
 
 # Go build artifacts
-goproxy
+geoproxy
 proxy-pool
+/geoproxy
+/proxygo
 *.exe
 *.out
 *.test
@@ -26,6 +28,8 @@ test/test_proxy.exe
 config.json
 data/
 !data/.gitkeep
+/subscriptions/
+/shard-*/
 
 # Environment variables
 .env
@@ -49,3 +53,5 @@ docker-compose.dokploy.yml
 
 
 tmp/
+
+geoproxy.exe

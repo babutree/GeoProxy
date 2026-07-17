@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // TestBUGFIX019ReloadKeepsBuildableNodes verifies one rejected node does not

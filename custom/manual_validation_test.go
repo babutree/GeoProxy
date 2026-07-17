@@ -3,8 +3,8 @@ package custom
 import (
 	"testing"
 
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // TestAddManualDirectNodeStartsDisabledUntilValidated：

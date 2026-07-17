@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 // apiKeyRateLimiter is an in-memory per-key token bucket.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // TestAddManualTunnelNodeRollsBackRuntimeWhenDBTransactionFails:
@@ -313,6 +313,47 @@ func TestDeleteManualTunnelNodeReloadsWithoutDeletedNode(t *testing.T) {
 	}
 	if _, err := store.GetProxyByID(proxy.ID); err == nil {
 		t.Fatal("DB row still present after delete")
+	}
+}
+
+// DeleteManagedProxy 对订阅隧道节点也必须卸载运行态，不能只删 DB（BUG-06）。
+func TestDeleteManagedProxyRemovesSubscriptionTunnelRuntime(t *testing.T) {
+	store := newTestStorage(t)
+	sb := newSpyShard()
+	m := &Manager{storage: store, singbox: sb}
+
+	link := "trojan://password@sub-del.example.com:443?sni=sub-del.example.com#sub-del"
+	node, err := ParseSingleLink(link)
+	if err != nil {
+		t.Fatalf("ParseSingleLink: %v", err)
+	}
+	if err := sb.Reload([]ParsedNode{*node}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	port := sb.GetPortMap()[node.NodeKey()]
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	subID, err := store.AddSubscription("sub-del", "", writeSubscriptionFile(t, "proxies: []"), "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+	if err := store.AddProxyWithSource(addr, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource: %v", err)
+	}
+	proxy, err := store.GetProxyByAddress(addr)
+	if err != nil {
+		t.Fatalf("GetProxyByAddress: %v", err)
+	}
+	if err := store.SetProxyDualProtocol(proxy.ID, true); err != nil {
+		t.Fatalf("SetProxyDualProtocol: %v", err)
+	}
+	if err := m.DeleteManagedProxy(proxy.ID); err != nil {
+		t.Fatalf("DeleteManagedProxy: %v", err)
+	}
+	if _, ok := sb.GetPortMap()[node.NodeKey()]; ok {
+		t.Fatal("subscription tunnel still in portMap after DeleteManagedProxy")
+	}
+	if _, err := store.GetProxyByID(proxy.ID); err == nil {
+		t.Fatal("subscription proxy DB row still present after DeleteManagedProxy")
 	}
 }
 

@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // failDisableThreshold 连续失败达到该阈值即禁用节点，与代理请求路径

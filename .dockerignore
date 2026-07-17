@@ -1,6 +1,10 @@
 proxy-pool
 proxy-pool.log
+geoproxy
+proxygo
 proxy.db
 config.json
 data/
+subscriptions/
+shard-*/
 *.log

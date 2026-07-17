@@ -6,7 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 GOOS=linux go build -o proxy-pool .
+RUN CGO_ENABLED=1 GOOS=linux go build -o geoproxy .
 
 # 下载 sing-box 二进制
 ARG SINGBOX_VERSION=1.13.5
@@ -28,9 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV TZ=Asia/Shanghai
 
 WORKDIR /app
-COPY --from=builder /app/proxy-pool .
+COPY --from=builder /app/geoproxy .
 COPY --from=builder /app/sing-box /usr/local/bin/sing-box
 
 EXPOSE 7800 7801 7802
 
-CMD ["./proxy-pool"]
+CMD ["./geoproxy"]

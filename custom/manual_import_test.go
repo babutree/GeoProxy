@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func TestImportManualLinksAddsDirectAndSkipsDuplicates(t *testing.T) {

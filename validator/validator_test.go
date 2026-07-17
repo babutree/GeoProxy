@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func TestNewClampsNonPositiveConcurrency(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 func TestV1OccupancyRequiresAPIKey(t *testing.T) {

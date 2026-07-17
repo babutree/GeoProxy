@@ -15,11 +15,24 @@
 - **节点表 AI/Cloudflare**：表头与筛选用 Cloudflare / ChatGPT / Claude / Gemini / Grok；状态为畅通/阻断/未知
 - **节点状态**：`disabled` 且无 `last_check` 显示「待验证」，有验证记录或失败次数超限显示「不可用」
 - **示例凭据**：文档/默认用户名占位改为 `username`，连接示例主机改为 `YOUR-HOST-IP`
+- **DSL 文档**：README / GEO_FILTER / CLAUDE 补齐固定顺序中的 `-unlock-`
+- **部署文档**：`DATA_DIRECTORY.md` 默认数据路径改为 bind mount `./data`；README 镜像与中文免责声明对齐当前网关模型
+- **仓库卫生**：`.gitignore` / `.dockerignore` 排除 `subscriptions/`、`proxygo`、`shard-*/`；从索引移除已跟踪运行时订阅与二进制（历史清理需另授权）
 
 ### 修复
 
 - **订阅刷新保留 user_paused**：刷新 DELETE+INSERT 后按 address 回写用户停用，避免手动停用被静默撤销
 - **sticky + unlock 回归**：预绑 session 在 unlock 不匹配时 rebind，并补真 sticky 测试
+- **sticky 尊重暂停**：`user_paused` 与父订阅 `paused` 时 sticky 不得继续粘住旧节点
+- **入站配置热更新**：HTTP/SOCKS5 请求路径读 `config.Get()` 已发布快照，避免 WebUI 改密后仍用启动配置
+- **订阅验证写库错误**：Enable/Disable/Update 失败不再计 valid/recovered 假成功
+- **跨订阅 collect**：刷新 A 不再旁路 re-fetch 订阅 B 只改运行态
+- **通用删除**：`/api/proxy/delete` 走 Manager，订阅隧道节点同步卸载 sing-box
+- **状态 API**：stats/订阅名读取失败返回错误，不再把失败编码成 0/空
+- **静态资源缓存**：dashboard 资产改为 `no-cache` + ETag 再验证，HTML `no-store`，避免新 HTML 调用旧 JS
+- **订阅重定向**：限制跳数，跨 origin 不转发非标准自定义密钥头
+- **WebUI sessions**：affinity 为 nil 时返回空列表而非 panic
+- **SOCKS5 Accept**：持续错误时记录并退避，避免忙循环
 - **WebUI 深色侧栏未选项**：button 默认背景重置为透明，未选中色改用 `--muted`
 - **浅色主题命令示例框**：`.cmd`/`.code-block` 在 day 主题改为白底深字，避免偏黑突兀
 - **运行日志高度**：日志区相对视口再减约 40px，避免略超出屏幕
@@ -240,7 +253,7 @@
  - 默认关闭，开启后可保护代理服务不被未授权访问
 
 - **环境变量支持**
- - WebUI 管理密码配置（早期版本默认 `goproxy`；当前版本改为首次启动生成并落盘）
+ - WebUI 管理密码配置（早期版本默认 `GeoProxy`；当前版本改为首次启动生成并落盘）
  - `DATA_DIR`：自定义数据目录路径（默认当前目录）
  - `BLOCKED_COUNTRIES`：屏蔽特定国家的代理（如 `CN,RU,KP`）
 
@@ -293,5 +306,5 @@
 ## 相关链接
 
 - [项目仓库](https://github.com/babutree/GeoProxy)
-- [GitHub Container Registry](https://github.com/babutree/GeoProxy/pkgs/container/goproxy)
+- [GitHub Container Registry](https://github.com/babutree/GeoProxy/pkgs/container/GeoProxy)
 - [问题反馈](https://github.com/babutree/GeoProxy/issues)

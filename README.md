@@ -1,13 +1,13 @@
-# GoProxy
+# GeoProxy
 
-> Geo-aware proxy gateway for private upstream nodes. GoProxy exposes one HTTP proxy, one SOCKS5 proxy, and an authenticated WebUI while routing traffic by username DSL, region, and short-lived session affinity.
+> Geo-aware proxy gateway for private upstream nodes. GeoProxy exposes one HTTP proxy, one SOCKS5 proxy, and an authenticated WebUI while routing traffic by username DSL, region, and short-lived session affinity.
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
 
 ## What It Does
 
-GoProxy stores upstream nodes you control, validates their reachability and exit metadata, and selects an available node for each HTTP or SOCKS5 client request. Routing can be constrained by region and stabilized with a session key in the proxy username.
+GeoProxy stores upstream nodes you control, validates their reachability and exit metadata, and selects an available node for each HTTP or SOCKS5 client request. Routing can be constrained by region and stabilized with a session key in the proxy username.
 
 Supported upstream sources:
 
@@ -84,11 +84,11 @@ client's proxy-username field.
 The full username has the form (**fixed order**):
 
 ```
-<base>[-region-<cc>][-session-<id>]
+<base>[-region-<cc>][-unlock-<token>][-session-<id>]
 ```
 
 Suffixes are optional, but when present they must appear in this order:
-`region` → `session`. A wrong order fails **username parsing**, so
+`region` → `unlock` → `session`. A wrong order fails **username parsing**, so
 authentication fails even if the base password is correct.
 
 For example, `username-region-jp-session-browser` is parsed as:
@@ -112,6 +112,7 @@ credentials.
 | `username-region-us` | Use an available `us` region node. |
 | `username-session-browser` | Bind session key `browser` to one node for the configured TTL. |
 | `username-region-jp-session-app01` | `jp` region + sticky session `app01`. |
+| `username-region-jp-unlock-gpt-session-app01` | `jp` region + unlock filter `gpt` + sticky session `app01`. |
 
 > Replace `username` with the configured proxy username (default `username`, editable in
 > the WebUI Settings). If your base username is `myuser`, the strings become
@@ -272,25 +273,25 @@ nodes). This removes the stored hash so the next start regenerates and prints a
 new WebUI password:
 
 ```bash
-docker compose exec goproxy sh -c "sed -i '/webui_password_hash/d' /app/data/config.json"
-docker compose restart goproxy
-docker compose logs goproxy | grep -A6 首次启动
+docker compose exec geoproxy sh -c "sed -i '/webui_password_hash/d' /app/data/config.json"
+docker compose restart geoproxy
+docker compose logs geoproxy | grep -A6 首次启动
 ```
 
 The proxy password (used by SOCKS5/HTTP clients) is stored in clear text and can
 be read directly without a reset:
 
 ```bash
-docker compose exec goproxy cat /app/data/config.json
+docker compose exec geoproxy cat /app/data/config.json
 ```
 
 To reset **all** credentials and settings (subscription nodes in `proxy.db` are
 kept), delete the whole config file and restart:
 
 ```bash
-docker compose exec goproxy rm /app/data/config.json
-docker compose restart goproxy
-docker compose logs goproxy | grep -A6 首次启动
+docker compose exec geoproxy rm /app/data/config.json
+docker compose restart geoproxy
+docker compose logs geoproxy | grep -A6 首次启动
 ```
 
 ## Data Model
@@ -304,7 +305,7 @@ Existing legacy rows using old source values are migrated into the current `manu
 
 ## Deployment Notes
 
-This fork must be deployed from the local source tree. Do not deploy the upstream `isboyjc/goproxy` container image for this geo-gateway build. No prebuilt image is published for this fork; build it locally from this repository.
+This fork must be deployed from the local source tree. Do not deploy the upstream `isboyjc/goproxy` container image for this geo-gateway build. This repository may publish images via GitHub Actions to GHCR/Docker Hub when CI credentials are configured. Prefer building from this source tree; do not deploy the upstream isboyjc image for this geo-gateway fork.
 
 Docker Compose builds the local `Dockerfile` by default:
 
@@ -319,7 +320,7 @@ application data directory to `/app/data`. Override the host path with
 `DATA_DIR=/app/data` unless you also change the volume target.
 
 If `docker images` shows extra `<none>` entries after local rebuilds, first
-confirm the tagged final image exists with `docker image ls goproxy-geo`. The
+confirm the tagged final image exists with `docker image ls geoproxy`. The
 `<none>` entries are usually dangling build cache or superseded local image
 layers from multi-stage rebuilds, not an alternate deployable image. On a Docker
 host, inspect and clean them explicitly when needed:
@@ -386,11 +387,10 @@ This project is for learning, research, and management of user-provided upstream
 
 本项目仅供学习交流和技术研究使用。
 
-- 本项目抓取的代理均来自互联网公开资源，不保证其可用性、稳定性和安全性。
+- 本项目仅管理用户自行提供的上游节点与订阅，不抓取公共代理源。
 - 用户应自行承担使用本项目的一切风险，包括但不限于网络安全风险、法律风险等。
 - 请遵守当地法律法规，不得将本项目用于任何违法违规活动。
-- 订阅导入功能仅为方便用户管理自有代理资源，用户应确保其订阅来源合法合规。
-- 访客贡献的订阅由贡献者自行负责，项目维护者不对其内容承担任何责任。
+- 订阅导入功能仅为方便用户管理自有或获授权代理资源，用户应确保其订阅来源合法合规。
 - 本项目不提供任何形式的代理服务，不对通过本系统传输的内容负责。
 - 作者不对因使用本项目造成的任何直接或间接损失承担责任。
 

@@ -3,7 +3,7 @@ package custom
 import (
 	"testing"
 
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 // TestAddPendingSubscriptionProxyMarksDualProtocol 验证入库置位：

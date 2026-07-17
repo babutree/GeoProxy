@@ -5,13 +5,15 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/auth"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 type fakeStore struct {
-	proxies []storage.Proxy
+	proxies    []storage.Proxy
+	pausedSubs map[int64]bool
+	subErr     map[int64]error
 }
 
 type nilBoundProxyStore struct {
@@ -36,6 +38,9 @@ func (s fakeStore) GetByRegion(region string, excludes []int64) ([]storage.Proxy
 		if region != "" && proxy.Region != region {
 			continue
 		}
+		if proxy.SubscriptionID > 0 && s.pausedSubs[proxy.SubscriptionID] {
+			continue
+		}
 		out = append(out, proxy)
 	}
 	return out, nil
@@ -49,6 +54,16 @@ func (s fakeStore) GetProxyByID(id int64) (*storage.Proxy, error) {
 		}
 	}
 	return nil, errors.New("not found")
+}
+
+func (s fakeStore) IsSubscriptionPaused(id int64) (bool, error) {
+	if id <= 0 {
+		return false, nil
+	}
+	if err, ok := s.subErr[id]; ok {
+		return false, err
+	}
+	return s.pausedSubs[id], nil
 }
 
 func TestPickHonorsRequestedRegionWithoutFallback(t *testing.T) {
@@ -174,6 +189,43 @@ func TestResolveRebindsWhenStoreReturnsNilProxyWithoutError(t *testing.T) {
 	}
 	if proxy.ID != 2 {
 		t.Fatalf("Resolve() proxy ID = %d, want rebound ID 2", proxy.ID)
+	}
+}
+
+func TestResolveRejectsStickyWhenUserPaused(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "us-old:8080", Region: "us", Latency: 10, Status: "active", UserPaused: true},
+		{ID: 2, Address: "us-new:8080", Region: "us", Latency: 20, Status: "active"},
+	}}
+	sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+	sessions.SetProxy("abc", 1, "us-old:8080", "us")
+
+	proxy, err := Resolve(store, sessions, auth.ParsedUsername{Region: "us", Session: "abc"}, nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if proxy.ID != 2 {
+		t.Fatalf("Resolve() proxy ID = %d, want rebind to 2 after user_paused sticky", proxy.ID)
+	}
+}
+
+func TestResolveRejectsStickyWhenParentSubscriptionPaused(t *testing.T) {
+	store := fakeStore{
+		proxies: []storage.Proxy{
+			{ID: 1, Address: "us-old:8080", Region: "us", Latency: 10, Status: "active", Source: storage.SourceSubscription, SubscriptionID: 9},
+			{ID: 2, Address: "us-new:8080", Region: "us", Latency: 20, Status: "active"},
+		},
+		pausedSubs: map[int64]bool{9: true},
+	}
+	sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+	sessions.SetProxy("abc", 1, "us-old:8080", "us")
+
+	proxy, err := Resolve(store, sessions, auth.ParsedUsername{Region: "us", Session: "abc"}, nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if proxy.ID != 2 {
+		t.Fatalf("Resolve() proxy ID = %d, want rebind to 2 after parent subscription paused", proxy.ID)
 	}
 }
 

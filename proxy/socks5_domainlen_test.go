@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 // SOCKS5Server.dialViaProxy 出站 SOCKS5 域名长度边界。

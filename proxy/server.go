@@ -17,12 +17,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/selector"
+	"github.com/babutree/GeoProxy/storage"
 	"golang.org/x/net/proxy"
-	"goproxy/affinity"
-	"goproxy/auth"
-	"goproxy/config"
-	"goproxy/selector"
-	"goproxy/storage"
 )
 
 var (
@@ -68,31 +68,43 @@ func SessionStore(cfg *config.Config) *affinity.Store {
 }
 
 func (s *Server) Start() error {
+	cfg := s.runtimeConfig()
 	authStatus := "无认证"
-	if s.cfg.ProxyAuthEnabled {
-		authStatus = fmt.Sprintf("需认证 (用户: %s)", s.cfg.ProxyAuthUsername)
+	if cfg.ProxyAuthEnabled {
+		authStatus = fmt.Sprintf("需认证 (用户: %s)", cfg.ProxyAuthUsername)
 	}
 	log.Printf("http proxy server listening on %s [lowest latency] [%s]", s.port, authStatus)
 	return s.httpServer().ListenAndServe()
 }
 
+// runtimeConfig 读取当前已发布配置快照。
+// config.Save 会替换全局指针；请求路径不得继续使用启动时缓存的 s.cfg。
+func (s *Server) runtimeConfig() *config.Config {
+	if live := config.Get(); live != nil {
+		return live
+	}
+	return s.cfg
+}
+
 // httpServer 构造入站 HTTP/CONNECT 服务。正的 ValidateTimeout 映射为
 // ReadHeaderTimeout，防止半请求头 Slowloris 无限占用连接；0 保持不设超时。
 func (s *Server) httpServer() *http.Server {
+	cfg := s.runtimeConfig()
 	srv := &http.Server{Addr: s.port, Handler: s}
-	if timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second; timeout > 0 {
+	if timeout := time.Duration(cfg.ValidateTimeout) * time.Second; timeout > 0 {
 		srv.ReadHeaderTimeout = timeout
 	}
 	return srv
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cfg := s.runtimeConfig()
 	route := auth.ParsedUsername{}
 	// 认证检查（如果启用）
-	if s.cfg.ProxyAuthEnabled {
+	if cfg.ProxyAuthEnabled {
 		parsed, ok := s.checkAuth(r)
 		if !ok {
-			w.Header().Set("Proxy-Authenticate", `Basic realm="GoProxy"`)
+			w.Header().Set("Proxy-Authenticate", `Basic realm="GeoProxy"`)
 			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 			return
 		}
@@ -136,11 +148,11 @@ func (s *Server) checkAuth(r *http.Request) (auth.ParsedUsername, bool) {
 	password := credentials[1]
 
 	// 验证用户名和密码
-	return parsed, auth.VerifyPassword(parsed.Base, password, s.cfg.ProxyAuthUsername, s.cfg.ProxyAuthPassword, s.cfg.ProxyAuthPasswordHash)
+	return parsed, auth.VerifyPassword(parsed.Base, password, s.runtimeConfig().ProxyAuthUsername, s.runtimeConfig().ProxyAuthPassword, s.runtimeConfig().ProxyAuthPasswordHash)
 }
 
 func (s *Server) selectProxy(route auth.ParsedUsername, tried []int64) (*storage.Proxy, error) {
-	route = withDefaultRegion(route, s.cfg.DefaultRegion)
+	route = withDefaultRegion(route, s.runtimeConfig().DefaultRegion)
 	return selector.Resolve(s.storage, s.sessions, route, tried)
 }
 
@@ -188,7 +200,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 	}
 
 	var tried []int64
-	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
+	for attempt := 0; attempt <= s.runtimeConfig().MaxRetry; attempt++ {
 		p, err := s.selectProxy(route, tried)
 		if err != nil {
 			http.Error(w, proxySelectionError(route, err), http.StatusServiceUnavailable)
@@ -269,7 +281,7 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 	cleanForwardHeaders(req.Header)
 
 	client := &http.Client{
-		Timeout: time.Duration(s.cfg.ValidateTimeout) * time.Second,
+		Timeout: time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -301,7 +313,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 	}
 
 	var tried []int64
-	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
+	for attempt := 0; attempt <= s.runtimeConfig().MaxRetry; attempt++ {
 		p, err := s.selectProxy(route, tried)
 		if err != nil {
 			http.Error(w, proxySelectionError(route, err), http.StatusServiceUnavailable)
@@ -347,7 +359,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 
 // tunnelDirect 为内网/本地 CONNECT 目标建立直连隧道，不经上游节点。
 func (s *Server) tunnelDirect(w http.ResponseWriter, r *http.Request) {
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	conn, err := net.DialTimeout("tcp", r.Host, timeout)
 	if err != nil {
 		log.Printf("[tunnel] direct dial %s failed: %v", r.Host, err)
@@ -445,7 +457,7 @@ func proxySelectionError(route auth.ParsedUsername, err error) string {
 }
 
 func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	switch p.Protocol {
 	case "http":
 		conn, err := net.DialTimeout("tcp", p.Address, timeout)
@@ -572,7 +584,7 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 }
 
 func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	switch p.Protocol {
 	case "http":
 		proxyURL, err := url.Parse(fmt.Sprintf("http://%s", p.Address))

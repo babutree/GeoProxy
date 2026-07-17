@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/auth"
-	"goproxy/config"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 const unknownLatencyRank = 1 << 30
@@ -31,6 +31,8 @@ var afterFirstBindPickHook func()
 type Store interface {
 	GetByRegion(region string, excludes []int64) ([]storage.Proxy, error)
 	GetProxyByID(id int64) (*storage.Proxy, error)
+	// IsSubscriptionPaused 报告父订阅是否暂停；id<=0（手工节点）恒为 false。
+	IsSubscriptionPaused(id int64) (bool, error)
 }
 
 func Pick(store Store, region string, excludes []int64) (*storage.Proxy, error) {
@@ -230,6 +232,13 @@ func stickyBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedUs
 	if !proxyMatchesUnlock(*proxy, route.Unlock) {
 		return nil, false
 	}
+	// 父订阅暂停后节点整体不得参与选路；sticky 不得绕过该契约。
+	if proxy.SubscriptionID > 0 {
+		paused, err := store.IsSubscriptionPaused(proxy.SubscriptionID)
+		if err != nil || paused {
+			return nil, false
+		}
+	}
 	return proxy, true
 }
 
@@ -279,7 +288,7 @@ func pickLowestLatency(proxies []storage.Proxy) *storage.Proxy {
 }
 
 func proxyAvailable(proxy storage.Proxy) bool {
-	return (proxy.Status == "active" || proxy.Status == "degraded") && proxy.FailCount < 3
+	return !proxy.UserPaused && (proxy.Status == "active" || proxy.Status == "degraded") && proxy.FailCount < 3
 }
 
 func latencyRank(latency int) int {

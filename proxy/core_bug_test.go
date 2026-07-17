@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"goproxy/auth"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 // 拨号失败后会话不能继续粘滞到已失败节点。

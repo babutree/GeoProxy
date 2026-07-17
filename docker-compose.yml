@@ -1,12 +1,12 @@
 services:
-  goproxy:
+  geoproxy:
     build:
       context: .
       target: runtime
-    image: goproxy-geo:local
+    image: geoproxy:local
     pull_policy: build
 
-    container_name: ${CONTAINER_NAME:-goproxy}
+    container_name: ${CONTAINER_NAME:-geoproxy}
     restart: unless-stopped
     ports:
       - "${WEBUI_PORT:-7800}:7800"     # WebUI
@@ -17,18 +17,21 @@ services:
         source: ${HOST_DATA_DIR:-./data}
         target: /app/data
     networks:
-      - goproxy-net
+      - geoproxy-net
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - DATA_DIR=/app/data
       # 登录凭据（WebUI 密码、代理账号/密码）在首次启动时自动生成并打印到日志，
       # 存入 config.json；此处不再通过环境变量注入。用 docker compose logs 查看首次凭据。
       - SESSION_TTL_MINUTES=${SESSION_TTL_MINUTES:-10}
+      - MAX_SESSIONS_PER_PROXY=${MAX_SESSIONS_PER_PROXY:-0}
+      - PROXY_COOLDOWN_MINUTES=${PROXY_COOLDOWN_MINUTES:-0}
       - DEFAULT_REGION=${DEFAULT_REGION:-}
       - ALLOWED_COUNTRIES=${ALLOWED_COUNTRIES:-}
       - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES:-}
       - HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-5}
       - MAX_RETRY=${MAX_RETRY:-3}
+      - SINGBOX_SHARD_COUNT=${SINGBOX_SHARD_COUNT:-4}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:7800/ || exit 1"]
       interval: 30s
@@ -36,6 +39,6 @@ services:
       retries: 3
 
 networks:
-  goproxy-net:
-    name: goproxy-net
+  geoproxy-net:
+    name: geoproxy-net
     driver: bridge

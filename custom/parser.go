@@ -325,8 +325,8 @@ func extractProxiesFromNode(doc *yaml.Node) []map[string]interface{} {
 
 			// 把 proxies 段的原始 YAML 写到临时文件方便调试
 			debugData, _ := yaml.Marshal(valNode)
-			os.WriteFile("/tmp/goproxy_debug_proxies.yaml", debugData, 0644)
-			log.Printf("[custom] 调试: proxies 原始数据已写入 /tmp/goproxy_debug_proxies.yaml (%d bytes)", len(debugData))
+			os.WriteFile("/tmp/geoproxy_debug_proxies.yaml", debugData, 0644)
+			log.Printf("[custom] 调试: proxies 原始数据已写入 /tmp/geoproxy_debug_proxies.yaml (%d bytes)", len(debugData))
 
 			if valNode.Kind != yaml.SequenceNode {
 				log.Printf("[custom] proxies 字段不是列表（kind=%d tag=%s）", valNode.Kind, valNode.Tag)

@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"goproxy/config"
-	"goproxy/custom"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/custom"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 const maxSubscriptionFileContentBytes = 1 << 20

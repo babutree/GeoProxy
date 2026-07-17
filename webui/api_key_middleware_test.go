@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 func testAPIKeyHash(plain string) string {

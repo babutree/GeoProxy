@@ -11,10 +11,10 @@ import (
 	"testing"
 	"unsafe"
 
-	"goproxy/config"
-	"goproxy/custom"
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/custom"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 type failingSubscriptionFile struct {

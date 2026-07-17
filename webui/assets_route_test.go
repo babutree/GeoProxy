@@ -38,8 +38,16 @@ func TestAssetRoutesServeCSSAndJS(t *testing.T) {
 			if etag := rec.Header().Get("ETag"); etag == "" {
 				t.Fatalf("%s missing ETag header", tc.path)
 			}
-			if cc := rec.Header().Get("Cache-Control"); cc == "" {
+			cc := rec.Header().Get("Cache-Control")
+			if cc == "" {
 				t.Fatalf("%s missing Cache-Control header", tc.path)
+			}
+			// BUG-08：不得对固定资产 URL 设置可跳过再验证的新鲜窗口。
+			if strings.Contains(cc, "max-age=") && !strings.Contains(cc, "max-age=0") {
+				t.Fatalf("%s Cache-Control = %q; fixed asset URL must not be fresh-cached without revalidation", tc.path, cc)
+			}
+			if !strings.Contains(cc, "no-cache") && !strings.Contains(cc, "max-age=0") {
+				t.Fatalf("%s Cache-Control = %q, want no-cache or max-age=0 revalidation", tc.path, cc)
 			}
 			if rec.Body.String() != tc.body {
 				t.Fatalf("%s body does not match served constant (len got=%d want=%d)",

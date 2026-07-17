@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 // TestBUGFIX020LongTermDisabledFreedFromRuntime：

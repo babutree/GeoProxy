@@ -546,6 +546,34 @@ func TestParentSubscriptionPausedNotBypassedByEnableProxy(t *testing.T) {
 	}
 }
 
+// EnableSubscriptionProxy 在父订阅暂停时必须返回 error，调用方不得据此 valid++。
+func TestEnableSubscriptionProxyFailsWhenParentPaused(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("sub", "https://example.test/enable-sub.yaml", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	if err := store.AddProxyWithSource("enable-sub:8080", "http", SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+	if err := store.DisableProxy("enable-sub:8080"); err != nil {
+		t.Fatalf("DisableProxy() error = %v", err)
+	}
+	if err := store.PauseSubscription(subID); err != nil {
+		t.Fatalf("PauseSubscription() error = %v", err)
+	}
+	if err := store.EnableSubscriptionProxy("enable-sub:8080", subID); err == nil {
+		t.Fatal("EnableSubscriptionProxy() expected error while parent subscription paused, got nil")
+	}
+	proxy, err := store.GetProxyByIdentity("enable-sub:8080", SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() error = %v", err)
+	}
+	if proxy.Status != "disabled" {
+		t.Fatalf("proxy status = %q, want disabled", proxy.Status)
+	}
+}
+
 func TestCountBySubscriptionIDReturnsScanError(t *testing.T) {
 	store := newTestStorage(t)
 	if _, err := store.db.Exec(`DROP TABLE proxies`); err != nil {

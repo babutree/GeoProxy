@@ -9,13 +9,14 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/auth"
-	"goproxy/config"
-	"goproxy/selector"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/selector"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 // SOCKS5Server SOCKS5 协议服务器
@@ -36,11 +37,21 @@ func NewSOCKS5(s *storage.Storage, cfg *config.Config, port string) *SOCKS5Serve
 	}
 }
 
+// runtimeConfig 读取当前已发布配置快照。
+// config.Save 会替换全局指针；请求路径不得继续使用启动时缓存的 s.cfg。
+func (s *SOCKS5Server) runtimeConfig() *config.Config {
+	if live := config.Get(); live != nil {
+		return live
+	}
+	return s.cfg
+}
+
 // Start 启动 SOCKS5 服务器
 func (s *SOCKS5Server) Start() error {
+	cfg := s.runtimeConfig()
 	authStatus := "无认证"
-	if s.cfg.ProxyAuthEnabled {
-		authStatus = fmt.Sprintf("需认证 (用户: %s)", s.cfg.ProxyAuthUsername)
+	if cfg.ProxyAuthEnabled {
+		authStatus = fmt.Sprintf("需认证 (用户: %s)", cfg.ProxyAuthUsername)
 	}
 	log.Printf("socks5 server listening on %s [lowest latency] [%s]", s.port, authStatus)
 
@@ -50,11 +61,28 @@ func (s *SOCKS5Server) Start() error {
 	}
 	defer listener.Close()
 
+	var acceptFailures int
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			// listener 关闭是正常退出；其它持续错误退避，避免忙循环（RISK-04）。
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				log.Printf("[socks5] accept temporary error: %v", err)
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				return nil
+			}
+			acceptFailures++
+			log.Printf("[socks5] accept error: %v", err)
+			if acceptFailures >= 20 {
+				return fmt.Errorf("socks5 accept 持续失败: %w", err)
+			}
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+		acceptFailures = 0
 		go s.handleConnection(conn)
 	}
 }
@@ -62,7 +90,7 @@ func (s *SOCKS5Server) Start() error {
 // handleConnection 处理 SOCKS5 连接
 func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
-	protocolTimeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	protocolTimeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	if protocolTimeout > 0 {
 		if err := clientConn.SetDeadline(time.Now().Add(protocolTimeout)); err != nil {
 			log.Printf("[socks5] set inbound protocol deadline failed: %v", err)
@@ -99,7 +127,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	// 带重试的连接上游代理
 	// 重试机制：只使用 SOCKS5 协议的上游代理（天然支持 HTTPS）
 	tried := []int64{}
-	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
+	for attempt := 0; attempt <= s.runtimeConfig().MaxRetry; attempt++ {
 		p, err := s.selectSOCKS5Proxy(route, tried)
 		if err != nil {
 			log.Printf("[socks5] no available socks5 upstream proxy: %v", err)
@@ -150,7 +178,7 @@ func (s *SOCKS5Server) releaseFailedBinding(route auth.ParsedUsername, p *storag
 
 // socks5Direct 为内网/本地目标建立直连，不经上游节点。
 func (s *SOCKS5Server) socks5Direct(clientConn net.Conn, target string) {
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	upstreamConn, err := net.DialTimeout("tcp", target, timeout)
 	if err != nil {
 		log.Printf("[socks5] direct dial %s failed: %v", target, err)
@@ -169,7 +197,7 @@ func (s *SOCKS5Server) socks5Direct(clientConn net.Conn, target string) {
 
 // selectSOCKS5Proxy 根据使用模式选择 SOCKS5 上游代理
 func (s *SOCKS5Server) selectSOCKS5Proxy(route auth.ParsedUsername, tried []int64) (*storage.Proxy, error) {
-	route = withDefaultRegion(route, s.cfg.DefaultRegion)
+	route = withDefaultRegion(route, s.runtimeConfig().DefaultRegion)
 	return selector.Resolve(s.storage, s.sessions, route, tried)
 }
 
@@ -193,7 +221,7 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (auth.ParsedUsername, erro
 	}
 
 	// 检查是否需要认证
-	needAuth := s.cfg.ProxyAuthEnabled
+	needAuth := s.runtimeConfig().ProxyAuthEnabled
 	methods := buf[2 : 2+nmethods]
 
 	// 选择认证方式
@@ -270,7 +298,7 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
 	password := string(buf[2+ulen+1 : 2+ulen+1+plen])
 
 	// 验证用户名和密码
-	if !auth.VerifyPassword(parsed.Base, password, s.cfg.ProxyAuthUsername, s.cfg.ProxyAuthPassword, s.cfg.ProxyAuthPasswordHash) {
+	if !auth.VerifyPassword(parsed.Base, password, s.runtimeConfig().ProxyAuthUsername, s.runtimeConfig().ProxyAuthPassword, s.runtimeConfig().ProxyAuthPasswordHash) {
 		// 认证失败: [VER(1), STATUS(1)]
 		conn.Write([]byte{0x01, 0x01})
 		return auth.ParsedUsername{}, fmt.Errorf("authentication failed")
@@ -375,7 +403,7 @@ func (s *SOCKS5Server) sendSOCKS5Reply(conn net.Conn, rep byte) error {
 
 // dialViaProxy 通过上游代理连接目标
 func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, error) {
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 
 	switch p.Protocol {
 	case "http":

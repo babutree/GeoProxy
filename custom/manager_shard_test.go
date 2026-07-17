@@ -3,7 +3,7 @@ package custom
 import (
 	"testing"
 
-	"goproxy/config"
+	"github.com/babutree/GeoProxy/config"
 )
 
 // TestNewManagerBuildsShardedSingBoxWithConfiguredShardCount 验证 NewManager 接入分片架构:

@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/auth"
-	"goproxy/selector"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/selector"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func TestSessionBindingRestoresProxyIdentityWithSharedAddress(t *testing.T) {

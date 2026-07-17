@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/config"
-	"goproxy/custom"
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/custom"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 func TestBusinessAPIsRequireAuthentication(t *testing.T) {

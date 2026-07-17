@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/storage"
-	"goproxy/validator"
+	"github.com/babutree/GeoProxy/storage"
+	"github.com/babutree/GeoProxy/validator"
 )
 
 func TestNodeKeyIncludesCredentialsAndTransport(t *testing.T) {
@@ -113,17 +113,15 @@ func TestSingBoxPortMapStableAcrossMultiSubscriptionReloads(t *testing.T) {
 	}
 }
 
-func TestCollectAllTunnelNodesKeepsLoadedNodesWhenOtherSubscriptionFetchFails(t *testing.T) {
+// collect 只信任当前运行态快照：其它订阅文件不得在 collect 路径旁路入池（BUG-05）。
+func TestCollectAllTunnelNodesUsesRuntimeSnapshotOnly(t *testing.T) {
 	store := newTestStorage(t)
 	goodFile := writeSubscriptionFile(t, "trojan://password-new@new.example.com:443?sni=new.example.com#new")
-	badFile := filepath.Join(t.TempDir(), "missing.txt")
-	if _, err := store.AddSubscription("bad", "", badFile, "auto", 60, ""); err != nil {
-		t.Fatalf("AddSubscription(bad) error = %v", err)
-	}
 	if _, err := store.AddSubscription("good", "", goodFile, "auto", 60, ""); err != nil {
 		t.Fatalf("AddSubscription(good) error = %v", err)
 	}
 	oldNode := tunnelNode("old", "old.example.com", "password-old")
+	newNode := tunnelNode("new", "new.example.com", "password-new")
 	sb := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
 	sb.nodes = []ParsedNode{oldNode}
 	sb.portMap = map[string]int{oldNode.NodeKey(): testSingBoxBasePort + 1}
@@ -141,10 +139,13 @@ func TestCollectAllTunnelNodesKeepsLoadedNodesWhenOtherSubscriptionFetchFails(t 
 		keys[node.NodeKey()] = true
 	}
 	if !keys[oldNode.NodeKey()] {
-		t.Fatal("loaded old tunnel node was dropped when another subscription failed to fetch")
+		t.Fatal("runtime snapshot node was dropped")
 	}
-	if len(keys) != 2 {
-		t.Fatalf("collected tunnel nodes = %d, want old loaded + good file", len(keys))
+	if keys[newNode.NodeKey()] {
+		t.Fatal("collect path re-fetched another subscription into runtime without its own refresh")
+	}
+	if len(keys) != 1 {
+		t.Fatalf("collected tunnel nodes = %d, want only runtime snapshot", len(keys))
 	}
 }
 
@@ -297,7 +298,7 @@ func TestSingBoxRuntimeStatusExplainsNoTunnelNodesAndFailures(t *testing.T) {
 }
 
 // TestManagerStopIdempotent 覆盖 Manager.Stop 生命周期：重复 Stop 不得 panic
-//（旧实现 close(stopCh) 无 once，第二次 close 直接崩溃）。
+// （旧实现 close(stopCh) 无 once，第二次 close 直接崩溃）。
 func TestManagerStopIdempotent(t *testing.T) {
 	store := newTestStorage(t)
 	sb, spies := newSpyOrchestrator(10000, 1)

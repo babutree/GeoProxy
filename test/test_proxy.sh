@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# GoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
+# GeoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
 # 按 Ctrl+C 停止测试
-# 用法: GOPROXY_AUTH_USERNAME=username GOPROXY_AUTH_PASSWORD=... ./test_proxy.sh [端口号，默认7802]
-# 可选: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser
+# 用法: GEOPROXY_AUTH_USERNAME=username GEOPROXY_AUTH_PASSWORD=... ./test_proxy.sh [端口号，默认7802]
+# 可选: GEOPROXY_AUTH_REGION=us GEOPROXY_AUTH_SESSION=browser
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${1:-7802}"
@@ -11,21 +11,21 @@ TEST_URL="http://ip-api.com/json/?fields=countryCode,query"
 DELAY=1
 
 require_proxy_auth() {
-    if [ -z "${GOPROXY_AUTH_USERNAME:-}" ] || [ -z "${GOPROXY_AUTH_PASSWORD:-}" ]; then
+    if [ -z "${GEOPROXY_AUTH_USERNAME:-}" ] || [ -z "${GEOPROXY_AUTH_PASSWORD:-}" ]; then
         echo "Missing proxy credentials." >&2
-        echo "Set GOPROXY_AUTH_USERNAME and GOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings." >&2
-        echo "Optional: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser" >&2
+        echo "Set GEOPROXY_AUTH_USERNAME and GEOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings." >&2
+        echo "Optional: GEOPROXY_AUTH_REGION=us GEOPROXY_AUTH_SESSION=browser" >&2
         exit 2
     fi
 }
 
 proxy_auth_username() {
-    local username="$GOPROXY_AUTH_USERNAME"
-    if [ -n "${GOPROXY_AUTH_REGION:-}" ]; then
-        username="${username}-region-${GOPROXY_AUTH_REGION}"
+    local username="$GEOPROXY_AUTH_USERNAME"
+    if [ -n "${GEOPROXY_AUTH_REGION:-}" ]; then
+        username="${username}-region-${GEOPROXY_AUTH_REGION}"
     fi
-    if [ -n "${GOPROXY_AUTH_SESSION:-}" ]; then
-        username="${username}-session-${GOPROXY_AUTH_SESSION}"
+    if [ -n "${GEOPROXY_AUTH_SESSION:-}" ]; then
+        username="${username}-session-${GEOPROXY_AUTH_SESSION}"
     fi
     echo "$username"
 }
@@ -34,9 +34,9 @@ setup_curl_auth_config() {
     local old_umask
     old_umask=$(umask)
     umask 077
-    CURL_AUTH_CONFIG=$(mktemp "${TMPDIR:-/tmp}/goproxy-curl-auth.XXXXXX")
+    CURL_AUTH_CONFIG=$(mktemp "${TMPDIR:-/tmp}/GeoProxy-curl-auth.XXXXXX")
     umask "$old_umask"
-    printf 'proxy-user = "%s:%s"\n' "$(proxy_auth_username)" "$GOPROXY_AUTH_PASSWORD" > "$CURL_AUTH_CONFIG"
+    printf 'proxy-user = "%s:%s"\n' "$(proxy_auth_username)" "$GEOPROXY_AUTH_PASSWORD" > "$CURL_AUTH_CONFIG"
     trap 'rm -f "$CURL_AUTH_CONFIG"' EXIT INT TERM
 }
 

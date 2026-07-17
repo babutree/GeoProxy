@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
+GeoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
 按 Ctrl+C 停止测试
 """
 
@@ -51,10 +51,10 @@ def signal_handler(sig, frame):
 
 
 def proxy_auth_username():
-    """Build the proxy username DSL from GOPROXY_AUTH_* env vars."""
-    username = os.getenv("GOPROXY_AUTH_USERNAME", "").strip()
-    region = os.getenv("GOPROXY_AUTH_REGION", "").strip()
-    session = os.getenv("GOPROXY_AUTH_SESSION", "").strip()
+    """Build the proxy username DSL from GEOPROXY_AUTH_* env vars."""
+    username = os.getenv("GEOPROXY_AUTH_USERNAME", "").strip()
+    region = os.getenv("GEOPROXY_AUTH_REGION", "").strip()
+    session = os.getenv("GEOPROXY_AUTH_SESSION", "").strip()
     if region:
         username = f"{username}-region-{region}"
     if session:
@@ -64,12 +64,12 @@ def proxy_auth_username():
 
 def require_proxy_auth():
     """Return proxy auth credentials or exit before entering continuous mode."""
-    base_username = os.getenv("GOPROXY_AUTH_USERNAME", "").strip()
-    password = os.getenv("GOPROXY_AUTH_PASSWORD", "")
+    base_username = os.getenv("GEOPROXY_AUTH_USERNAME", "").strip()
+    password = os.getenv("GEOPROXY_AUTH_PASSWORD", "")
     if not base_username or not password:
         print("Missing proxy credentials.", file=sys.stderr)
-        print("Set GOPROXY_AUTH_USERNAME and GOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings.", file=sys.stderr)
-        print("Optional: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser", file=sys.stderr)
+        print("Set GEOPROXY_AUTH_USERNAME and GEOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings.", file=sys.stderr)
+        print("Optional: GEOPROXY_AUTH_REGION=us GEOPROXY_AUTH_SESSION=browser", file=sys.stderr)
         sys.exit(2)
     return proxy_auth_username(), password
 

@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/auth"
-	"goproxy/config"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func TestHTTPForwardingStripsProxyAuthorizationAndHopByHopHeaders(t *testing.T) {
@@ -969,6 +969,10 @@ func (s *fakeProxyStore) GetProxyByID(id int64) (*storage.Proxy, error) {
 	return &proxy, nil
 }
 
+func (s *fakeProxyStore) IsSubscriptionPaused(id int64) (bool, error) {
+	return false, nil
+}
+
 func (s *fakeProxyStore) GetProxyByAddress(address string) (*storage.Proxy, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1031,7 +1035,7 @@ func (s *fakeProxyStore) DisableProxyByID(id int64) error {
 }
 
 func proxyTestConfig(maxRetry int) *config.Config {
-	return &config.Config{
+	cfg := &config.Config{
 		ValidateTimeout:       1,
 		MaxRetry:              maxRetry,
 		SessionTTLMinutes:     1,
@@ -1040,6 +1044,9 @@ func proxyTestConfig(maxRetry int) *config.Config {
 		ProxyAuthEnabled:      false,
 		ProxyAuthPasswordHash: fmt.Sprintf("%x", sha256.Sum256([]byte("secret"))),
 	}
+	// 请求路径读 config.Get()；同步发布，避免被污染的全局默认 auth 干扰测试。
+	config.SetGlobal(cfg)
+	return cfg
 }
 
 func emptyRoute() auth.ParsedUsername {

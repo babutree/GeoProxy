@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/affinity"
-	"goproxy/auth"
-	"goproxy/config"
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/config"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 func setProxyCooldownMinutes(t *testing.T, minutes int) {

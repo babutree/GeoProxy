@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"goproxy/storage"
+	"github.com/babutree/GeoProxy/storage"
 )
 
 // proxyMatchesUnlock returns true when the proxy satisfies every required unlock filter.
