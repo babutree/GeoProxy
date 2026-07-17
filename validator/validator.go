@@ -650,10 +650,13 @@ var httpsTestTargets = []string{
 
 // checkHTTPSConnect 通过 HTTP 代理实际访问一个随机 HTTPS 网站，验证 CONNECT 隧道是否可用
 // 首次失败会换一个目标重试一次，避免目标网站偶尔抽风导致误杀
-func checkHTTPSConnect(proxyAddr string, timeout time.Duration) bool {
+func checkHTTPSConnect(proxyAddr, username, password string, timeout time.Duration) bool {
 	proxyURL, err := url.Parse(fmt.Sprintf("http://%s", proxyAddr))
 	if err != nil {
 		return false
+	}
+	if username != "" || password != "" {
+		proxyURL.User = url.UserPassword(username, password)
 	}
 
 	client := &http.Client{
@@ -727,9 +730,9 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 
 	switch p.Protocol {
 	case "http":
-		client, err = newHTTPClient(p.Address, v.timeout)
+		client, err = newHTTPClient(p.Address, p.Username, p.Password, v.timeout)
 	case "socks5":
-		client, err = newSOCKS5Client(p.Address, v.timeout)
+		client, err = newSOCKS5Client(p.Address, p.Username, p.Password, v.timeout)
 	default:
 		log.Printf("unknown protocol %s for %s", p.Protocol, p.Address)
 		return false, 0, "", "", UnknownRisk()
@@ -765,7 +768,7 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 
 	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
 	if p.Protocol == "http" {
-		if !checkHTTPSConnect(p.Address, v.timeout) {
+		if !checkHTTPSConnect(p.Address, p.Username, p.Password, v.timeout) {
 			return false, latency, exitIP, exitLocation, UnknownRisk()
 		}
 	}
@@ -820,10 +823,15 @@ func (v *Validator) validateConnectivity(client *http.Client) (time.Duration, bo
 	return 0, false
 }
 
-func newHTTPClient(address string, timeout time.Duration) (*http.Client, error) {
+func newHTTPClient(address, username, password string, timeout time.Duration) (*http.Client, error) {
 	proxyURL, err := url.Parse(fmt.Sprintf("http://%s", address))
 	if err != nil {
 		return nil, err
+	}
+	// 认证 http 代理：把凭据放进 proxyURL.User，http.Transport 会据此发出
+	// Proxy-Authorization 头。凭据仅存于内存中的 URL，绝不写入日志。
+	if username != "" || password != "" {
+		proxyURL.User = url.UserPassword(username, password)
 	}
 	return &http.Client{
 		Transport: &http.Transport{
@@ -833,8 +841,12 @@ func newHTTPClient(address string, timeout time.Duration) (*http.Client, error) 
 	}, nil
 }
 
-func newSOCKS5Client(address string, timeout time.Duration) (*http.Client, error) {
-	dialer, err := proxy.SOCKS5("tcp", address, nil, proxy.Direct)
+func newSOCKS5Client(address, username, password string, timeout time.Duration) (*http.Client, error) {
+	var auth *proxy.Auth
+	if username != "" || password != "" {
+		auth = &proxy.Auth{User: username, Password: password}
+	}
+	dialer, err := proxy.SOCKS5("tcp", address, auth, proxy.Direct)
 	if err != nil {
 		return nil, err
 	}

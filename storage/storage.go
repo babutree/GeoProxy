@@ -44,6 +44,10 @@ type Proxy struct {
 	// {"openai":0,"claude":1,"grok":-1,"gemini":0}。值语义：-1未探测 0可达 1不可达。
 	// 空字符串表示整体未探测。
 	AIReachability string `json:"ai_reachability"`
+	// Username/Password 是上游 http/socks 代理的认证凭据（若节点需要认证）。
+	// 拨号/验证时注入到出站握手；空串表示无需认证。凭据绝不写入日志或错误串。
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // Subscription 订阅信息
@@ -119,7 +123,9 @@ func (s *Storage) initSchema() error {
 			starred        INTEGER NOT NULL DEFAULT 0,
 			cf_blocked     INTEGER NOT NULL DEFAULT -1,
 			dual_protocol  INTEGER NOT NULL DEFAULT 0,
-			ai_reachability TEXT NOT NULL DEFAULT ''
+			ai_reachability TEXT NOT NULL DEFAULT '',
+			proxy_username TEXT NOT NULL DEFAULT '',
+			proxy_password TEXT NOT NULL DEFAULT ''
 		)
 	`)
 	if err != nil {

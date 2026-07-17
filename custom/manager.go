@@ -87,6 +87,10 @@ type subscriptionProxyEntry struct {
 	addr  string
 	proto string
 	dual  bool
+	// username/password 是直连 http/socks 节点的上游认证凭据（拨号时注入，绝不入日志）。
+	// tunnel 节点走本机 mixed 端口无需认证，留空。
+	username string
+	password string
 }
 
 type disabledProbeTarget struct {
@@ -445,7 +449,8 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	for _, node := range directNodes {
 		addr := node.DirectAddress()
 		proto := node.DirectProtocol()
-		proxyEntries = append(proxyEntries, subscriptionProxyEntry{addr: addr, proto: proto})
+		user, pass := node.DirectCredentials()
+		proxyEntries = append(proxyEntries, subscriptionProxyEntry{addr: addr, proto: proto, username: user, password: pass})
 	}
 	if len(directNodes) > 0 {
 		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
@@ -657,15 +662,17 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 			userPaused = 1
 		}
 		res, err := tx.Exec(
-			`INSERT INTO proxies (address, protocol, source, subscription_id, region_source, status, dual_protocol, user_paused)
-			 VALUES (?, ?, ?, ?, 'auto', 'disabled', ?, ?)
+			`INSERT INTO proxies (address, protocol, source, subscription_id, region_source, status, dual_protocol, user_paused, proxy_username, proxy_password)
+			 VALUES (?, ?, ?, ?, 'auto', 'disabled', ?, ?, ?, ?)
 			 ON CONFLICT(address, source, subscription_id) DO UPDATE SET
 				protocol = excluded.protocol,
 				region_source = CASE WHEN proxies.region_source = '' THEN excluded.region_source ELSE proxies.region_source END,
 				status = 'disabled',
 				dual_protocol = excluded.dual_protocol,
-				user_paused = excluded.user_paused`,
-			entry.addr, entry.proto, storage.SourceSubscription, subID, entry.dual, userPaused,
+				user_paused = excluded.user_paused,
+				proxy_username = excluded.proxy_username,
+				proxy_password = excluded.proxy_password`,
+			entry.addr, entry.proto, storage.SourceSubscription, subID, entry.dual, userPaused, entry.username, entry.password,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("新增订阅代理 %s 失败: %w", entry.addr, err)
@@ -681,6 +688,8 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 			SubscriptionID: subID,
 			DualProtocol:   entry.dual,
 			UserPaused:     userPaused == 1,
+			Username:       entry.username,
+			Password:       entry.password,
 		})
 	}
 
@@ -1332,7 +1341,8 @@ func (m *Manager) AddManualNode(link, region, note string) error {
 	if node.IsDirect() {
 		addr := node.DirectAddress()
 		proto := node.DirectProtocol()
-		if err := m.storage.AddManualProxy(addr, proto, region, note); err != nil {
+		user, pass := node.DirectCredentials()
+		if err := m.storage.AddManualProxyWithCredentials(addr, proto, region, note, user, pass); err != nil {
 			return fmt.Errorf("存储直连节点失败: %w", err)
 		}
 		proxy, err := m.storage.GetProxyByIdentity(addr, storage.SourceManual, 0)
@@ -1396,7 +1406,8 @@ func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResu
 			result.Skipped++
 			continue
 		}
-		toAdd = append(toAdd, storage.Proxy{Address: addr, Protocol: node.DirectProtocol()})
+		user, pass := node.DirectCredentials()
+		toAdd = append(toAdd, storage.Proxy{Address: addr, Protocol: node.DirectProtocol(), Username: user, Password: pass})
 		result.AddedAddrs = append(result.AddedAddrs, addr)
 	}
 	if len(toAdd) == 0 {

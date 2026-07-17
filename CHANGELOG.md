@@ -13,6 +13,10 @@
 - **主题令牌**：生产 CSS 改为 `data-theme="space"|"day"`（对齐设计稿）；兼容旧 localStorage `light`/`dark`
 - **总览节点分布**：动画分布图替换世界地图；按地域与延迟档聚合，连线表示 session 绑定；可暂停
 - **节点表 AI/Cloudflare**：表头与筛选用 Cloudflare / ChatGPT / Claude / Gemini / Grok；状态为畅通/阻断/未知
+- **节点名称/来源列去重**：名称列不再回退显示订阅名（来源列已展示），无备注时显示脱敏地址
+- **备注编辑对订阅节点开放**：名称列可点击编辑备注（订阅节点亦可），region/删除仍限手工节点
+- **轨道分布动画丝滑化**：卫星改为单一 `transform` 合成层动画（消除逐帧 left/top/width/height 布局抖动）；引力透镜由椭圆改为平滑鹅卵石轮廓
+- **节点表列宽**：收紧 ip-api 标记与 Cloudflare 列间距；AI 解锁四标记强制单行不再挤成 2×2
 - **节点状态**：`disabled` 且无 `last_check` 显示「待验证」，有验证记录或失败次数超限显示「不可用」
 - **示例凭据**：文档/默认用户名占位改为 `username`，连接示例主机改为 `YOUR-HOST-IP`
 - **DSL 文档**：README / GEO_FILTER / CLAUDE 补齐固定顺序中的 `-unlock-`
@@ -21,6 +25,13 @@
 
 ### 修复
 
+- **带认证的 http/socks 节点**：解析、存储（`proxy_username`/`proxy_password` 列）、拨号（HTTP CONNECT Basic / SOCKS5 RFC1929）与验证全链路注入上游凭据；此前凭据被丢弃导致认证节点永远「待验证」且「测试」无效。凭据绝不写入日志或错误串
+- **节点复制携带凭据**：直连节点「复制」在存有账密时生成 `scheme://user:pass@host:port`，不再丢失认证信息
+- **shadowsocksr 诚实跳过**：ssr 改为解析阶段按节点显式跳过（sing-box 1.13 无原生支持），不再「解析通过却在构建必然失败」导致计数虚高、节点永远待验证
+- **reality 缺指纹兜底**：含 `reality-opts` 但缺 `client-fingerprint` 的节点补默认 utls 指纹，避免 sing-box check 拒绝
+- **带认证的 http/socks 节点**：解析、存储、拨号与验证全链路支持 `user:pass@host:port` 上游凭据（此前凭据被静默丢弃，导致认证代理永远「待验证」、测试无反应、复制丢失账密）；凭据仅存于 DB 与内存握手，绝不写入日志/错误串
+- **订阅节点类型覆盖对齐**：`parseClashProxy` 支持类型与 `buildOutbound` 严格对齐；`shadowsocksr`（sing-box 1.13 无原生支持）改为解析阶段明确按节点跳过，消除「解析通过却构建必失败」的计数虚高与永久待验证
+- **Reality 缺省指纹**：含 `reality-opts` 但缺 `client-fingerprint` 的 vless 节点自动补默认 utls 指纹，避免 sing-box 拒绝
 - **订阅刷新保留 user_paused**：刷新 DELETE+INSERT 后按 address 回写用户停用，避免手动停用被静默撤销
 - **sticky + unlock 回归**：预绑 session 在 unlock 不匹配时 rebind，并补真 sticky 测试
 - **sticky 尊重暂停**：`user_paused` 与父订阅 `paused` 时 sticky 不得继续粘住旧节点

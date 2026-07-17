@@ -260,13 +260,13 @@ func TestManualNodeRejectsSubscriptionSourceMutations(t *testing.T) {
 		t.Fatalf("AddProxyWithSource() error = %v", err)
 	}
 
+	// region/delete 仍严格限手工节点：订阅节点这两条路径必须 403。
 	for _, tc := range []struct {
 		name string
 		path string
 		body string
 	}{
 		{"region", "/api/manual-node/region", `{"address":"198.51.100.10:8080","region":"jp"}`},
-		{"note", "/api/manual-node/note", `{"address":"198.51.100.10:8080","note":"blocked"}`},
 		{"delete", "/api/manual-node/delete", `{"address":"198.51.100.10:8080"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -281,12 +281,27 @@ func TestManualNodeRejectsSubscriptionSourceMutations(t *testing.T) {
 		})
 	}
 
+	// 备注编辑对任意来源开放：订阅节点也允许编辑备注（仅放宽备注这一非破坏性路径）。
+	t.Run("note", func(t *testing.T) {
+		req := authenticatedJSONRequest(http.MethodPost, "/api/manual-node/note", `{"address":"198.51.100.10:8080","note":"blocked"}`)
+		rec := httptest.NewRecorder()
+
+		server.routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("note status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+	})
+
 	proxy, err := server.storage.GetProxyByAddress("198.51.100.10:8080")
 	if err != nil {
 		t.Fatalf("GetProxyByAddress() error = %v", err)
 	}
 	if proxy.Source != storage.SourceSubscription {
 		t.Fatalf("source = %q, want %q", proxy.Source, storage.SourceSubscription)
+	}
+	if proxy.Note != "blocked" {
+		t.Fatalf("note = %q, want %q (subscription note edit should persist)", proxy.Note, "blocked")
 	}
 }
 

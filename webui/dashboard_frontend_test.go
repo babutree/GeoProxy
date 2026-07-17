@@ -419,9 +419,11 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 		// 直连 vs 网关分支：dual_protocol 或回环本地地址才走网关 DSL。
 		"function isGatewayNode(p){",
 		"function isDirectNode(p){return !isGatewayNode(p)}",
-		// 直连复制：scheme://host:port，无 userinfo。
+		// 直连复制：有 username 则拼 scheme://user:pass@addr，否则 scheme://addr（无 userinfo）。
 		"if(isDirectNode(p)){",
-		"const url=scheme+'://'+addr",
+		"const u=String(p.username||'')",
+		"const url=u?(scheme+'://'+encodeProxyUserInfo(u)+':'+encodeProxyUserInfo(String(p.password||''))+'@'+addr):(scheme+'://'+addr)",
+		"navigator.clipboard.writeText(url).then(()=>showToast('已复制直连地址'))",
 		// 网关复制：仍用 DSL + 密码（空则 PASSWORD 占位）。
 		"const rawPass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''",
 		"const pass=rawPass||'PASSWORD'",

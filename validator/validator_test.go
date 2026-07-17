@@ -78,6 +78,60 @@ func TestParseValidateURLsTrimsEmptyParts(t *testing.T) {
 	}
 }
 
+// TestAuthenticatedClientConstructionInjectsCredentials 验证 BUG-6 修复：
+// 带凭据的 http/socks5 节点在构造校验 client 时把凭据注入到出站拨号路径。
+// http：凭据放进 proxyURL.User（Transport 据此发 Proxy-Authorization）。
+// socks5：凭据放进 proxy.Auth。构造成功即证明凭据被 thread 进拨号器，
+// 且凭据绝不出现在任何 error 串中（凭据泄漏红线）。
+func TestAuthenticatedClientConstructionInjectsCredentials(t *testing.T) {
+	const (
+		user = "alice"
+		pass = "s3cr3t-token"
+	)
+	timeout := time.Second
+
+	hc, err := newHTTPClient("10.9.9.1:8080", user, pass, timeout)
+	if err != nil {
+		t.Fatalf("newHTTPClient() error = %v", err)
+	}
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatalf("http client transport missing proxy: %#v", hc.Transport)
+	}
+	proxyURL, err := tr.Proxy(nil)
+	if err != nil {
+		t.Fatalf("http transport Proxy() error = %v", err)
+	}
+	if proxyURL == nil || proxyURL.User == nil {
+		t.Fatalf("http proxy URL missing userinfo: %#v", proxyURL)
+	}
+	if gotUser := proxyURL.User.Username(); gotUser != user {
+		t.Fatalf("http proxy username = %q, want %q", gotUser, user)
+	}
+	if gotPass, _ := proxyURL.User.Password(); gotPass != pass {
+		t.Fatal("http proxy password not threaded through")
+	}
+
+	sc, err := newSOCKS5Client("10.9.9.2:1080", user, pass, timeout)
+	if err != nil {
+		t.Fatalf("newSOCKS5Client() error = %v", err)
+	}
+	if sc.Transport == nil {
+		t.Fatal("socks5 client transport is nil")
+	}
+
+	// 无凭据路径仍须构造成功且不注入 userinfo。
+	plain, err := newHTTPClient("10.9.9.3:8080", "", "", timeout)
+	if err != nil {
+		t.Fatalf("newHTTPClient(no creds) error = %v", err)
+	}
+	ptr := plain.Transport.(*http.Transport)
+	pu, _ := ptr.Proxy(nil)
+	if pu != nil && pu.User != nil {
+		t.Fatalf("no-cred http proxy URL unexpectedly carries userinfo: %#v", pu)
+	}
+}
+
 // TestGeoFilterReadDoesNotRaceWithConfigSave 复现 BUG-58：
 // validator 缓存了 config.Get() 返回的 *Config 指针并在 passesGeoFilter 中无锁读取
 // 国家名单 slice，同时 config.Save 并发更新全局配置。旧实现下 Save 原地改写

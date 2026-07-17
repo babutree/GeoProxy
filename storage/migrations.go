@@ -55,6 +55,8 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 		{name: "cf_blocked", sql: `ALTER TABLE proxies ADD COLUMN cf_blocked INTEGER NOT NULL DEFAULT -1`},
 		{name: "dual_protocol", sql: `ALTER TABLE proxies ADD COLUMN dual_protocol INTEGER NOT NULL DEFAULT 0`},
 		{name: "ai_reachability", sql: `ALTER TABLE proxies ADD COLUMN ai_reachability TEXT NOT NULL DEFAULT ''`},
+		{name: "proxy_username", sql: `ALTER TABLE proxies ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`},
+		{name: "proxy_password", sql: `ALTER TABLE proxies ADD COLUMN proxy_password TEXT NOT NULL DEFAULT ''`},
 	}
 
 	for _, column := range columns {
@@ -166,7 +168,9 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 			starred         INTEGER NOT NULL DEFAULT 0,
 			cf_blocked      INTEGER NOT NULL DEFAULT -1,
 			dual_protocol   INTEGER NOT NULL DEFAULT 0,
-			ai_reachability TEXT NOT NULL DEFAULT ''
+			ai_reachability TEXT NOT NULL DEFAULT '',
+			proxy_username  TEXT NOT NULL DEFAULT '',
+			proxy_password  TEXT NOT NULL DEFAULT ''
 		)`); err != nil {
 		return fmt.Errorf("create proxies_new: %w", err)
 	}
@@ -174,11 +178,11 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 		INSERT INTO proxies_new (
 			id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password
 		)
 		SELECT id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password
 		FROM proxies`); err != nil {
 		return fmt.Errorf("copy proxies_new: %w", err)
 	}

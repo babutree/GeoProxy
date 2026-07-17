@@ -92,13 +92,18 @@ func TestImportManualLinksExtractsURLWithLeadingOrInlineAnnotation(t *testing.T)
 	}
 }
 
-func TestImportManualLinksSupportsUserinfoWithoutStoringCredentials(t *testing.T) {
+// TestImportManualLinksPersistsCredentialsWithoutLeaking 反映新契约（BUG-6）：
+// 认证 http/socks5 节点的凭据必须被持久化（拨号需要），但绝不出现在
+// 入库地址、错误串或结果字段中。凭据值仅存于 proxy_username/proxy_password 列。
+func TestImportManualLinksPersistsCredentialsWithoutLeaking(t *testing.T) {
 	store := newTestStorage(t)
 	m := &Manager{storage: store}
 
+	const secretUser = "u53rn4m3"
+	const secretPass = "p4ssw0rd"
 	text := strings.Join([]string{
-		"socks5://user:pass@10.1.0.1:1080",
-		"http://user:pass@10.1.0.2:8080",
+		"socks5://" + secretUser + ":" + secretPass + "@10.1.0.1:1080",
+		"http://" + secretUser + ":" + secretPass + "@10.1.0.2:8080",
 	}, "\n")
 	r, err := m.ImportManualLinks(text, "", "")
 	if err != nil {
@@ -120,12 +125,53 @@ func TestImportManualLinksSupportsUserinfoWithoutStoringCredentials(t *testing.T
 		if p.Protocol != protocol {
 			t.Fatalf("%s protocol=%q, want %q", addr, p.Protocol, protocol)
 		}
+		// 新契约：凭据被持久化以便拨号。
+		if p.Username != secretUser || p.Password != secretPass {
+			t.Fatalf("%s credentials not persisted (username/password mismatch)", addr)
+		}
 	}
-	for _, leaked := range []string{"user", "pass", "@"} {
+
+	// 地址与结果字段绝不含凭据片段（避免日志/UI 泄漏）。
+	for _, leaked := range []string{secretUser, secretPass, "@"} {
 		for _, addr := range r.AddedAddrs {
 			if strings.Contains(addr, leaked) {
-				t.Fatalf("added address %q leaked credential fragment %q", addr, leaked)
+				t.Fatalf("added address leaked credential fragment")
 			}
+		}
+	}
+	// 错误串（若有）也绝不含凭据。
+	for _, e := range r.Errors {
+		if strings.Contains(e, secretUser) || strings.Contains(e, secretPass) {
+			t.Fatalf("error string leaked credential fragment")
+		}
+	}
+}
+
+// TestAuthenticatedNodesRoundTripCredentialsToValidatorClient 验证认证 socks5/http
+// 节点的凭据从 parse→store→validator 客户端构建全程贯通（离线，不发起真实网络）。
+func TestAuthenticatedNodesRoundTripCredentialsToValidatorClient(t *testing.T) {
+	const secretUser = "dialer"
+	const secretPass = "s3cr3t"
+
+	for _, link := range []string{
+		"socks5://" + secretUser + ":" + secretPass + "@10.2.0.1:1080",
+		"http://" + secretUser + ":" + secretPass + "@10.2.0.2:8080",
+	} {
+		node, err := ParseSingleLink(link)
+		if err != nil {
+			t.Fatalf("ParseSingleLink error = %v", err)
+		}
+		if !node.IsDirect() {
+			t.Fatalf("expected direct node for %s", node.DirectProtocol())
+		}
+		u, p := node.DirectCredentials()
+		if u != secretUser || p != secretPass {
+			t.Fatal("parsed credentials mismatch")
+		}
+		// DirectAddress 必须只含 host:port，无凭据。
+		addr := node.DirectAddress()
+		if strings.Contains(addr, secretUser) || strings.Contains(addr, secretPass) || strings.Contains(addr, "@") {
+			t.Fatalf("DirectAddress leaked credentials")
 		}
 	}
 }

@@ -123,13 +123,15 @@ func (s *Server) apiManualNodeNote(w http.ResponseWriter, r *http.Request) {
 		Address string `json:"address"`
 		Note    string `json:"note"`
 	}
-	proxy, ok := s.requireManualNodeRequest(w, r, &req, &req.ID, &req.Address)
+	// 备注编辑对任意来源开放：订阅节点也允许编辑备注（UpdateProxyNoteByID 本身来源无关）。
+	// 仅放宽备注这一路径，region/delete 仍严格限手工节点。
+	proxy, ok := s.requireNoteEditableRequest(w, r, &req, &req.ID, &req.Address)
 	if !ok {
 		return
 	}
 	if err := s.storage.UpdateProxyNoteByID(proxy.ID, req.Note); err != nil {
-		log.Printf("[webui] update manual node note %q failed: %v", req.Address, err)
-		jsonError(w, "failed to update manual node note", http.StatusInternalServerError)
+		log.Printf("[webui] update node note %q failed: %v", req.Address, err)
+		jsonError(w, "failed to update node note", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "updated"})
@@ -158,7 +160,18 @@ func (s *Server) apiManualNodeDelete(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
 
+// requireNoteEditableRequest 与 requireManualNodeRequest 一致地解析并定位节点，
+// 但不施加“仅手工节点”来源限制——备注编辑对任意来源（含订阅节点）开放。
+// 仅供备注这一非破坏性更新使用；region/delete 仍须走 requireManualNodeRequest。
+func (s *Server) requireNoteEditableRequest(w http.ResponseWriter, r *http.Request, dst interface{}, id *int64, address *string) (*storage.Proxy, bool) {
+	return s.lookupProxyRequest(w, r, dst, id, address, false)
+}
+
 func (s *Server) requireManualNodeRequest(w http.ResponseWriter, r *http.Request, dst interface{}, id *int64, address *string) (*storage.Proxy, bool) {
+	return s.lookupProxyRequest(w, r, dst, id, address, true)
+}
+
+func (s *Server) lookupProxyRequest(w http.ResponseWriter, r *http.Request, dst interface{}, id *int64, address *string, manualOnly bool) (*storage.Proxy, bool) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return nil, false
@@ -192,7 +205,7 @@ func (s *Server) requireManualNodeRequest(w http.ResponseWriter, r *http.Request
 		jsonError(w, "failed to lookup manual node", http.StatusInternalServerError)
 		return nil, false
 	}
-	if proxy.Source != storage.SourceManual {
+	if manualOnly && proxy.Source != storage.SourceManual {
 		jsonError(w, "manual nodes only", http.StatusForbidden)
 		return nil, false
 	}

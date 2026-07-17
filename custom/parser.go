@@ -22,6 +22,10 @@ type ParsedNode struct {
 	Server string                 // 远程服务器地址
 	Port   int                    // 远程服务器端口
 	Raw    map[string]interface{} // 原始配置字段（用于生成 sing-box 配置）
+	// Username/Password 是直连 http/socks5 代理的认证凭据（若链接含 userinfo）。
+	// 仅直连节点使用；拨号/验证时注入握手。凭据绝不写入日志或错误串。
+	Username string
+	Password string
 }
 
 // NodeKey 节点去重 key
@@ -84,6 +88,22 @@ func (n *ParsedNode) DirectProtocol() string {
 		return "socks5"
 	}
 	return "http"
+}
+
+// DirectCredentials 返回直连代理的认证凭据（用户名、密码）。
+// 优先取显式字段（纯文本行解析）；否则回退 Raw（Clash/sing-box 解析的 http/socks 节点）。
+// 无认证时返回空串。凭据仅用于拨号/验证握手，绝不写入日志或错误串。
+func (n *ParsedNode) DirectCredentials() (string, string) {
+	user, pass := n.Username, n.Password
+	if user == "" && pass == "" && n.Raw != nil {
+		if v, ok := n.Raw["username"].(string); ok {
+			user = v
+		}
+		if v, ok := n.Raw["password"].(string); ok {
+			pass = v
+		}
+	}
+	return user, pass
 }
 
 // Parse 解析订阅内容。
@@ -419,15 +439,19 @@ func parseClashProxy(proxy map[string]interface{}) (*ParsedNode, error) {
 	switch typ {
 	case "ss":
 		typ = "shadowsocks"
-	case "ssr":
-		typ = "shadowsocksr"
+	case "ssr", "shadowsocksr":
+		// sing-box 1.13 无原生 shadowsocksr 出站支持。此前 ssr 能过解析却在
+		// buildOutbound 无对应 case 而必然构建失败（parse-passes-build-fails），
+		// 导致计数虚高、节点永远"待验证"。此处在解析阶段就明确按每节点跳过，
+		// 使计数诚实、错误可解释。
+		return nil, fmt.Errorf("跳过 shadowsocksr 节点 %q：sing-box 不支持该协议", name)
 	}
 
-	// 支持的类型
+	// 支持的类型（与 buildOutbound 的 switch 严格对齐，避免 parse 通过但 build 失败）。
 	supported := map[string]bool{
 		"vmess": true, "vless": true, "trojan": true,
-		"shadowsocks": true, "shadowsocksr": true,
-		"hysteria": true, "hysteria2": true, "tuic": true,
+		"shadowsocks": true,
+		"hysteria":    true, "hysteria2": true, "tuic": true,
 		"anytls": true,
 		"http":   true, "socks5": true,
 	}
@@ -473,18 +497,20 @@ func parsePlain(data []byte) ([]ParsedNode, error) {
 			continue
 		}
 
-		protocol, host, port, err := parseDirectPlainLine(line)
+		protocol, host, port, username, password, err := parseDirectPlainLine(line)
 		if err != nil {
 			continue
 		}
 		addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 		nodes = append(nodes, ParsedNode{
-			Name:   addr,
-			Type:   protocol,
-			Server: host,
-			Port:   port,
-			Raw:    map[string]interface{}{"type": protocol, "server": host, "port": port},
+			Name:     addr,
+			Type:     protocol,
+			Server:   host,
+			Port:     port,
+			Username: username,
+			Password: password,
+			Raw:      map[string]interface{}{"type": protocol, "server": host, "port": port},
 		})
 	}
 
@@ -492,8 +518,11 @@ func parsePlain(data []byte) ([]ParsedNode, error) {
 	return nodes, nil
 }
 
-func parseDirectPlainLine(line string) (string, string, int, error) {
-	protocol := "http"
+// parseDirectPlainLine 解析直连（http/socks5）行，返回协议、主机、端口及可选的认证凭据。
+// 凭据来自 URL userinfo（user:pass@host:port）；无 userinfo 时 username/password 为空串。
+// 凭据用于拨号握手，绝不写入日志/错误串（调用方须用 redactedProxyLinkForError 等脱敏）。
+func parseDirectPlainLine(line string) (protocol, host string, port int, username, password string, err error) {
+	protocol = "http"
 	addr := line
 	lower := strings.ToLower(line)
 
@@ -505,33 +534,40 @@ func parseDirectPlainLine(line string) (string, string, int, error) {
 	case strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "https://"):
 		protocol = "http"
 	default:
-		return splitDirectHostPort(protocol, addr)
+		host, port, err = splitDirectHostPort(addr)
+		return protocol, host, port, "", "", err
 	}
 
 	u, err := url.Parse(line)
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, "", "", err
 	}
 	if u.Hostname() == "" || u.Port() == "" {
-		return "", "", 0, fmt.Errorf("missing host or port")
+		return "", "", 0, "", "", fmt.Errorf("missing host or port")
 	}
-	port, err := strconv.Atoi(u.Port())
+	port, err = strconv.Atoi(u.Port())
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, "", "", err
 	}
-	return protocol, u.Hostname(), port, nil
+	if u.User != nil {
+		username = u.User.Username()
+		if pw, ok := u.User.Password(); ok {
+			password = pw
+		}
+	}
+	return protocol, u.Hostname(), port, username, password, nil
 }
 
-func splitDirectHostPort(protocol, addr string) (string, string, int, error) {
+func splitDirectHostPort(addr string) (string, int, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "", "", 0, err
+		return "", 0, err
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return "", "", 0, err
+		return "", 0, err
 	}
-	return protocol, host, port, nil
+	return host, port, nil
 }
 
 // parseProxyLinks 解析协议链接格式（vmess://, trojan://, ss://, vless:// 等）

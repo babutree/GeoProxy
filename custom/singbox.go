@@ -633,7 +633,8 @@ func applyTLS(raw map[string]interface{}, out map[string]interface{}) {
 		}
 	}
 
-	if fp := getStr(raw, "client-fingerprint"); fp != "" {
+	fp := getStr(raw, "client-fingerprint")
+	if fp != "" {
 		tlsConfig["utls"] = map[string]interface{}{
 			"enabled":     true,
 			"fingerprint": fp,
@@ -646,6 +647,14 @@ func applyTLS(raw map[string]interface{}, out map[string]interface{}) {
 			"enabled":    true,
 			"public_key": getStr(realityOpts, "public-key"),
 			"short_id":   getStr(realityOpts, "short-id"),
+		}
+		// sing-box reality 出站要求 utls 指纹；源配置常省略 client-fingerprint。
+		// 缺失时补一个合理默认（chrome），否则 sing-box 会拒绝该 reality 出站。
+		if fp == "" {
+			tlsConfig["utls"] = map[string]interface{}{
+				"enabled":     true,
+				"fingerprint": "chrome",
+			}
 		}
 	}
 

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -418,8 +419,14 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 				return nil, err
 			}
 		}
-		// 发送 CONNECT 请求
-		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		// 发送 CONNECT 请求。若节点带认证凭据，附加 Proxy-Authorization 头（Basic）。
+		// 凭据仅在握手帧中使用，绝不写入日志。
+		if p.Username != "" || p.Password != "" {
+			cred := base64.StdEncoding.EncodeToString([]byte(p.Username + ":" + p.Password))
+			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n", target, target, cred)
+		} else {
+			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		}
 		proxiedConn, err := readHTTPConnectResponse(conn)
 		if err != nil {
 			conn.Close()
@@ -445,21 +452,10 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 			}
 		}
 
-		// SOCKS5 握手（无认证）
-		if _, err := proxyConn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		// SOCKS5 握手（无认证或 RFC1929 用户名/密码认证）。凭据绝不写入日志。
+		if err := socks5ClientHandshake(proxyConn, p.Username, p.Password); err != nil {
 			proxyConn.Close()
 			return nil, err
-		}
-
-		handshake := make([]byte, 2)
-		if _, err := io.ReadFull(proxyConn, handshake); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		if handshake[0] != 0x05 || handshake[1] != 0x00 {
-			proxyConn.Close()
-			return nil, fmt.Errorf("socks5 handshake failed")
 		}
 
 		// 发送 CONNECT 请求

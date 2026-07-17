@@ -456,6 +456,60 @@ func proxySelectionError(route auth.ParsedUsername, err error) string {
 	return "no available proxy"
 }
 
+// socks5ClientHandshake 执行出站 SOCKS5 认证协商（RFC1928 + RFC1929）。
+// 无凭据时只提供 no-auth；有凭据时同时提供 no-auth 与 user/pass，按上游选择的方法处理。
+// 凭据仅在握手帧中传输，绝不写入日志或错误串。
+func socks5ClientHandshake(conn net.Conn, username, password string) error {
+	if username != "" || password != "" {
+		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
+			return err
+		}
+	} else {
+		if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+			return err
+		}
+	}
+
+	handshake := make([]byte, 2)
+	if _, err := io.ReadFull(conn, handshake); err != nil {
+		return err
+	}
+	if handshake[0] != 0x05 {
+		return fmt.Errorf("socks5 handshake failed")
+	}
+	switch handshake[1] {
+	case 0x00:
+		return nil
+	case 0x02:
+		return socks5UserPassAuth(conn, username, password)
+	default:
+		return fmt.Errorf("socks5 handshake failed")
+	}
+}
+
+// socks5UserPassAuth 执行 RFC1929 用户名/密码子协商。凭据绝不写入日志。
+func socks5UserPassAuth(conn net.Conn, username, password string) error {
+	if len(username) > 255 || len(password) > 255 {
+		return fmt.Errorf("socks5 credential too long")
+	}
+	req := []byte{0x01}
+	req = append(req, byte(len(username)))
+	req = append(req, []byte(username)...)
+	req = append(req, byte(len(password)))
+	req = append(req, []byte(password)...)
+	if _, err := conn.Write(req); err != nil {
+		return err
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return err
+	}
+	if resp[1] != 0x00 {
+		return fmt.Errorf("socks5 authentication failed")
+	}
+	return nil
+}
+
 func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	switch p.Protocol {
@@ -470,8 +524,14 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 				return nil, err
 			}
 		}
-		// 发送 CONNECT 请求给上游 HTTP 代理
-		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host)
+		// 发送 CONNECT 请求给上游 HTTP 代理。若节点带认证凭据，附加
+		// Proxy-Authorization 头（Basic）。凭据仅在握手帧中使用，绝不写入日志。
+		if p.Username != "" || p.Password != "" {
+			cred := base64.StdEncoding.EncodeToString([]byte(p.Username + ":" + p.Password))
+			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n", host, host, cred)
+		} else {
+			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host)
+		}
 		reader := bufio.NewReader(conn)
 		resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 		if err != nil {
@@ -511,19 +571,9 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 			}
 		}
 
-		if _, err := proxyConn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		if err := socks5ClientHandshake(proxyConn, p.Username, p.Password); err != nil {
 			proxyConn.Close()
 			return nil, err
-		}
-
-		handshake := make([]byte, 2)
-		if _, err := io.ReadFull(proxyConn, handshake); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-		if handshake[0] != 0x05 || handshake[1] != 0x00 {
-			proxyConn.Close()
-			return nil, fmt.Errorf("socks5 handshake failed")
 		}
 
 		targetHost, port, err := net.SplitHostPort(host)
@@ -591,12 +641,19 @@ func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
 		if err != nil {
 			return nil, err
 		}
+		if p.Username != "" || p.Password != "" {
+			proxyURL.User = url.UserPassword(p.Username, p.Password)
+		}
 		return &http.Client{
 			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 			Timeout:   timeout,
 		}, nil
 	case "socks5":
-		dialer, err := proxy.SOCKS5("tcp", p.Address, nil, proxy.Direct)
+		var socksAuth *proxy.Auth
+		if p.Username != "" || p.Password != "" {
+			socksAuth = &proxy.Auth{User: p.Username, Password: p.Password}
+		}
+		dialer, err := proxy.SOCKS5("tcp", p.Address, socksAuth, proxy.Direct)
 		if err != nil {
 			return nil, err
 		}
