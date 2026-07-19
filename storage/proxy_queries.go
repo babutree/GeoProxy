@@ -12,7 +12,7 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 		`SELECT ` + proxyColumns + `
 		 FROM proxies
 		 WHERE status = 'active' AND user_paused = 0 AND fail_count < 3
-		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
+		   AND ` + selectableSubscriptionScopeSQL + `
 		 ORDER BY
 		   CASE quality_grade
 		     WHEN 'S' THEN 1
@@ -67,7 +67,7 @@ func (s *Storage) GetAllFiltered(sourceFilter string) ([]Proxy, error) {
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
-		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`
+		   AND ` + selectableSubscriptionScopeSQL
 	var args []interface{}
 	if sourceFilter != "" {
 		query += ` AND source = ?`
@@ -173,7 +173,7 @@ func (s *Storage) GetRandomByProtocolExcludeFiltered(protocol string, excludes [
 
 	var available []Proxy
 	for _, p := range proxies {
-		if p.Protocol == protocol && !excludeMap[p.Address] {
+		if proxySupportsInboundProtocol(p, protocol) && !excludeMap[p.Address] {
 			available = append(available, p)
 		}
 	}
@@ -204,7 +204,7 @@ func (s *Storage) GetLowestLatencyByProtocolExcludeFiltered(protocol string, exc
 	}
 
 	for _, p := range proxies {
-		if p.Protocol == protocol && !excludeMap[p.Address] {
+		if proxySupportsInboundProtocol(p, protocol) && !excludeMap[p.Address] {
 			proxy := p
 			return &proxy, nil
 		}
@@ -213,17 +213,12 @@ func (s *Storage) GetLowestLatencyByProtocolExcludeFiltered(protocol string, exc
 	return nil, fmt.Errorf("no %s proxy available", protocol)
 }
 
-// GetBatchForHealthCheck 获取一批需要健康检查的代理
-func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Proxy, error) {
+// GetBatchForHealthCheck 按最久未检查优先获取一批可用代理。
+func (s *Storage) GetBatchForHealthCheck(batchSize int) ([]Proxy, error) {
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
-		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`
-
-	if skipSGrade {
-		query += ` AND quality_grade != 'S'`
-	}
-
+		   AND ` + selectableSubscriptionScopeSQL
 	query += ` ORDER BY 
 		COALESCE(last_check, '1970-01-01') ASC,
 		quality_grade DESC
@@ -248,12 +243,14 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Prox
 
 // GetByProtocol 按协议获取代理列表
 func (s *Storage) GetByProtocol(protocol string) ([]Proxy, error) {
+	protocolWhere, args := inboundProtocolSQL(protocol)
 	rows, err := s.db.Query(
 		`SELECT `+proxyColumns+`
 		 FROM proxies
-		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND protocol = ?
-		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
-		 ORDER BY latency ASC`, protocol,
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND `+protocolWhere+`
+		   AND `+selectableSubscriptionScopeSQL+`
+		 ORDER BY latency ASC`, args...,
 	)
 	if err != nil {
 		return nil, err

@@ -25,7 +25,7 @@ func (s *Storage) CountBySubscriptionID(subID int64) (active int, disabled int, 
 	err = s.db.QueryRow(
 		`SELECT COUNT(*) FROM proxies
 		 WHERE subscription_id = ? AND status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
-		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
+		   AND `+selectableSubscriptionScopeSQL,
 		subID,
 	).Scan(&active)
 	if err != nil {

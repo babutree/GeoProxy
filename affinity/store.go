@@ -15,38 +15,38 @@ type Binding struct {
 type Store struct {
 	mu       sync.RWMutex
 	bindings map[string]Binding
-	// reverse maps proxy_id -> set of session_ids currently bound (non-expired).
-	// Kept in sync with bindings by SetProxy/Remove/Get-expiry/GC.
+	// reverse 将 proxy_id 映射到当前绑定且未过期的 session_id 集合。
+	// SetProxy/Remove/Get 过期处理/GC 会同步维护该索引。
 	reverse map[int64]map[string]struct{}
-	// cooldown maps proxy_id -> cooldown_until (exclusive end time).
-	// Written on new session first-bind; sticky hits do not consult this map.
+	// cooldown 将 proxy_id 映射到 cooldown_until（不包含结束时刻）。
+	// 新会话首次绑定时写入；粘性命中不会查询该映射。
 	cooldown map[int64]time.Time
 	ttl      time.Duration
 	now      func() time.Time
 
-	// firstBindMu serializes first-bind / rebind check-then-write so capacity and
-	// cooldown decisions cannot interleave between concurrent sessions.
+	// firstBindMu 串行化首次绑定/重新绑定的检查后写入流程，
+	// 防止并发会话的容量与冷却决策相互穿插。
 	firstBindMu sync.Mutex
 
-	// GC lifecycle fields, guarded by mu.
+	// GC 生命周期字段，由 mu 保护。
 	gcStarted bool
 	stopCh    chan struct{}
 	doneCh    chan struct{}
 }
 
-// BeginFirstBind locks the first-bind critical section. Call EndFirstBind when done.
-// Sticky Get paths must not hold this lock.
+// BeginFirstBind 锁定首次绑定临界区；完成后必须调用 EndFirstBind。
+// 粘性 Get 路径不得持有此锁。
 func (s *Store) BeginFirstBind() {
 	s.firstBindMu.Lock()
 }
 
-// EndFirstBind releases the first-bind critical section.
+// EndFirstBind 释放首次绑定临界区。
 func (s *Store) EndFirstBind() {
 	s.firstBindMu.Unlock()
 }
 
-// SessionBinding is a read-only snapshot of a single active session binding,
-// suitable for exposing to a WebUI session-monitor panel.
+// SessionBinding 是单个活动会话绑定的只读快照，
+// 可供 WebUI 会话监控面板展示。
 type SessionBinding struct {
 	SessionID   string
 	ProxyID     int64
@@ -129,10 +129,9 @@ func (s *Store) RemoveIfProxyID(sessionID string, expectedProxyID int64) bool {
 	return true
 }
 
-// SetCooldown records that proxyID must not receive new session first-binds
-// until the given absolute time. Sticky sessions are unaffected. Callers that
-// want CD disabled should simply skip calling this method (or use config CD=0
-// on the selector read path).
+// SetCooldown 记录 proxyID 在指定绝对时刻之前不得接收新的首次绑定。
+// 粘性会话不受影响。需要禁用 CD 的调用方应直接跳过调用
+// （或在选择器读取路径配置 CD=0）。
 func (s *Store) SetCooldown(proxyID int64, until time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -142,8 +141,8 @@ func (s *Store) SetCooldown(proxyID int64, until time.Time) {
 	s.cooldown[proxyID] = until
 }
 
-// InCooldown reports whether proxyID is still within a recorded cooldown window
-// (now < until). Expired entries are pruned lazily.
+// InCooldown 报告 proxyID 是否仍处于记录的冷却窗口（now < until）；
+// 过期条目会被惰性清理。
 func (s *Store) InCooldown(proxyID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -158,7 +157,7 @@ func (s *Store) InCooldown(proxyID int64) bool {
 	return true
 }
 
-// CooldownRemaining returns time left until proxyID leaves cooldown, or 0.
+// CooldownRemaining 返回 proxyID 离开冷却期前的剩余时间；已离开则返回 0。
 func (s *Store) CooldownRemaining(proxyID int64) time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -174,8 +173,8 @@ func (s *Store) CooldownRemaining(proxyID int64) time.Duration {
 	return rem
 }
 
-// CountByProxy returns the number of non-expired sessions currently bound to proxyID.
-// It purges any reverse-index entries whose forward binding is missing or expired.
+// CountByProxy 返回当前绑定到 proxyID 的未过期会话数。
+// 它会清理正向绑定缺失或已过期的反向索引条目。
 func (s *Store) CountByProxy(proxyID int64) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -234,9 +233,9 @@ func (s *Store) expired(binding Binding) bool {
 	return s.ttl > 0 && s.now().Sub(binding.LastActive) >= s.ttl
 }
 
-// StartGC starts a background goroutine that scans bindings every interval and
-// deletes expired ones. Subsequent calls are ignored while a GC goroutine is
-// already running (call Stop first to restart). It is a no-op for interval <= 0.
+// StartGC 启动后台 goroutine，按 interval 扫描并删除过期绑定。
+// GC goroutine 已运行时会忽略后续调用（需先调用 Stop 才能重启）；
+// interval <= 0 时不执行任何操作。
 func (s *Store) StartGC(interval time.Duration) {
 	if interval <= 0 {
 		return
@@ -273,10 +272,9 @@ func (s *Store) gcLoop(interval time.Duration, stopCh, doneCh chan struct{}) {
 	}
 }
 
-// collectExpired removes every expired binding in a single locked pass and
-// prunes cooldown entries whose deadline has passed. Cooldown pruning does not
-// depend on the proxy ever being queried again, so entries for proxies that
-// have permanently left the pool are reclaimed instead of leaking.
+// collectExpired 在一次加锁过程中删除所有过期绑定，
+// 并清理超过截止时刻的冷却条目。冷却清理不依赖代理再次被查询，
+// 因此已永久离开池的代理条目也能回收，避免泄漏。
 func (s *Store) collectExpired() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -295,9 +293,8 @@ func (s *Store) collectExpired() {
 	}
 }
 
-// Stop gracefully stops the GC goroutine. It is safe to call once even if
-// StartGC was never called, and safe to call after a prior Stop; it never
-// panics and does not leak the goroutine.
+// Stop 平稳停止 GC goroutine。即使从未调用 StartGC 或此前已调用 Stop，
+// 再次调用也安全；既不会 panic，也不会泄漏 goroutine。
 func (s *Store) Stop() {
 	s.mu.Lock()
 	if !s.gcStarted {
@@ -315,9 +312,8 @@ func (s *Store) Stop() {
 	<-doneCh
 }
 
-// List returns a snapshot of all active (non-expired) bindings. It is
-// read-only: it does not refresh LastActive and does not delete expired
-// entries. Expired bindings are skipped.
+// List 返回所有活动（未过期）绑定的快照。该操作只读：
+// 不会刷新 LastActive，也不会删除过期条目；过期绑定会被跳过。
 func (s *Store) List() []SessionBinding {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -338,8 +334,8 @@ func (s *Store) List() []SessionBinding {
 	return result
 }
 
-// Count returns the number of active (non-expired) bindings. It is read-only:
-// it does not refresh LastActive and does not delete expired entries.
+// Count 返回活动（未过期）绑定的数量。该操作只读：
+// 不会刷新 LastActive，也不会删除过期条目。
 func (s *Store) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -353,8 +349,7 @@ func (s *Store) Count() int {
 	return count
 }
 
-// TTL returns the configured session time-to-live. The UI can combine this
-// with SessionBinding.LastActive to compute a countdown.
+// TTL 返回配置的会话存活时间；UI 可结合 SessionBinding.LastActive 计算倒计时。
 func (s *Store) TTL() time.Duration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -367,9 +362,9 @@ func (s *Store) SetTTL(ttl time.Duration) {
 	s.ttl = ttl
 }
 
-// RemainingTTL returns how long until the given binding expires, based on the
-// store's clock. It returns 0 once the binding is at or past expiry, and 0 when
-// no TTL is configured (ttl <= 0). This is read-only.
+// RemainingTTL 根据存储时钟返回指定绑定距过期的剩余时间。
+// 绑定已到期或超过过期时间时返回 0；未配置 TTL（ttl <= 0）时也返回 0。
+// 该操作只读。
 func (s *Store) RemainingTTL(binding SessionBinding) time.Duration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -383,7 +378,7 @@ func (s *Store) RemainingTTL(binding SessionBinding) time.Duration {
 	return remaining
 }
 
-// Now returns the store's clock instant (injectable in tests).
+// Now 返回存储时钟的当前时刻（测试中可注入）。
 func (s *Store) Now() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -52,10 +52,9 @@ func (s *Server) apiAPIKeyCreate(w http.ResponseWriter, r *http.Request) {
 		jsonDecodeError(w, err)
 		return
 	}
-	// Reject empty or whitespace-only names before generating or saving
-	// any secret. Returning here guarantees no key material is created on the
-	// reject path, and the error message is a fixed string that never echoes
-	// caller input or any generated secret.
+	// 生成或保存密钥前先拒绝空名称或纯空白名称。
+	// 此处提前返回可确保拒绝路径不会创建任何密钥材料；错误信息使用固定字符串，
+	// 绝不回显调用方输入或生成的密钥。
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		jsonError(w, "name is required", http.StatusBadRequest)
@@ -63,13 +62,13 @@ func (s *Server) apiAPIKeyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	plain, err := newAPIKeySecret()
 	if err != nil {
-		log.Printf("[webui] generate api key failed: %v", err)
+		log.Printf("[webui] 生成 API Key 失败: %v", err)
 		jsonError(w, "failed to create api key", http.StatusInternalServerError)
 		return
 	}
 	id, err := newAPIKeySecret()
 	if err != nil {
-		log.Printf("[webui] generate api key id failed: %v", err)
+		log.Printf("[webui] 生成 API Key ID 失败: %v", err)
 		jsonError(w, "failed to create api key", http.StatusInternalServerError)
 		return
 	}
@@ -92,7 +91,7 @@ func (s *Server) apiAPIKeyCreate(w http.ResponseWriter, r *http.Request) {
 	newCfg.ReadOnlyAPIKeys = newKeys
 
 	if err := configSave(&newCfg); err != nil {
-		log.Printf("[webui] save api key failed: %v", err)
+		log.Printf("[webui] 保存 API Key 失败: %v", err)
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
@@ -145,7 +144,7 @@ func (s *Server) apiAPIKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	newCfg.ReadOnlyAPIKeys = keys
 	if err := configSave(&newCfg); err != nil {
-		log.Printf("[webui] revoke api key failed: %v", err)
+		log.Printf("[webui] 撤销 API Key 失败: %v", err)
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
@@ -192,7 +191,7 @@ func (s *Server) apiAPIKeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	newCfg.ReadOnlyAPIKeys = out
 	if err := configSave(&newCfg); err != nil {
-		log.Printf("[webui] delete api key failed: %v", err)
+		log.Printf("[webui] 删除 API Key 失败: %v", err)
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}

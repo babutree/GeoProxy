@@ -36,7 +36,7 @@ func TestSessionBindingRestoresProxyIdentityWithSharedAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProxyByIdentity(subscription) error = %v", err)
 	}
-	if err := store.UpdateSubscriptionProxyExitInfo(sub.Address, sub.SubscriptionID, "203.0.113.10", "US Ashburn", 25, -1, "", -1, ""); err != nil {
+	if err := store.UpdateSubscriptionProxyExitInfo(sub.Address, sub.SubscriptionID, "203.0.113.10", "US Ashburn", 25, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateSubscriptionProxyExitInfo() error = %v", err)
 	}
 	sub, err = store.GetProxyByIdentity("shared:8080", storage.SourceSubscription, subID)

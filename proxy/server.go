@@ -73,7 +73,7 @@ func (s *Server) Start() error {
 	if cfg.ProxyAuthEnabled {
 		authStatus = fmt.Sprintf("需认证 (用户: %s)", cfg.ProxyAuthUsername)
 	}
-	log.Printf("http proxy server listening on %s [lowest latency] [%s]", s.port, authStatus)
+	log.Printf("[proxy] HTTP 代理服务器监听 %s [%s]", s.port, authStatus)
 	return s.httpServer().ListenAndServe()
 }
 
@@ -224,6 +224,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		// 转发请求（使用完整 URL，上游代理通过 client transport 设置）
 		req, err := http.NewRequest(r.Method, r.URL.String(), forwardBody(buffered, stream, replayable))
 		if err != nil {
+			client.CloseIdleConnections()
 			continue
 		}
 		// 超限流式 body 长度未知，显式标记为分块传输，避免被当作 0 长度。
@@ -235,7 +236,8 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[proxy] %s via %s failed", r.RequestURI, p.Address)
+			client.CloseIdleConnections()
+			log.Printf("[proxy] 请求 %s 通过节点 %s 失败", r.RequestURI, p.Address)
 			recordProxyFailure(s.storage, p)
 			s.releaseFailedBinding(route, p)
 			if !replayable {
@@ -245,7 +247,6 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 			}
 			continue
 		}
-		defer resp.Body.Close()
 
 		// 写回响应
 		for k, vv := range resp.Header {
@@ -255,11 +256,13 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		}
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
+		_ = resp.Body.Close()
+		client.CloseIdleConnections()
 		s.storage.RecordProxyUseByID(p.ID, true)
 		if resp.StatusCode == 429 {
-			log.Printf("[proxy] ⚠️  429 %s via %s (protocol=%s)", r.RequestURI, p.Address, p.Protocol)
+			log.Printf("[proxy] 节点返回 429 request=%s proxy=%s protocol=%s", r.RequestURI, p.Address, p.Protocol)
 		} else {
-			log.Printf("[proxy] %s via %s -> %d", r.RequestURI, p.Address, resp.StatusCode)
+			log.Printf("[proxy] 请求完成 request=%s proxy=%s status=%d", r.RequestURI, p.Address, resp.StatusCode)
 		}
 		return
 	}
@@ -288,7 +291,7 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[proxy] %s direct (bypass upstream) failed: %v", r.RequestURI, err)
+		log.Printf("[proxy] 直连请求失败 request=%s: %v", r.RequestURI, err)
 		http.Error(w, "direct request failed", http.StatusBadGateway)
 		return
 	}
@@ -301,7 +304,7 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
-	log.Printf("[proxy] %s direct (bypass upstream) -> %d", r.RequestURI, resp.StatusCode)
+	log.Printf("[proxy] 直连请求完成 request=%s status=%d", r.RequestURI, resp.StatusCode)
 }
 
 // handleTunnel 处理 HTTPS CONNECT 隧道（带自动重试）
@@ -324,33 +327,13 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 
 		conn, err := s.dialViaProxy(p, r.Host)
 		if err != nil {
-			log.Printf("[tunnel] dial %s via %s failed", r.Host, p.Address)
+			log.Printf("[tunnel] 通过节点 %s 拨号 %s 失败: %v", p.Address, r.Host, err)
 			recordProxyFailure(s.storage, p)
 			s.releaseFailedBinding(route, p)
 			continue
 		}
 
-		s.storage.RecordProxyUseByID(p.ID, true)
-
-		// 告知客户端隧道建立
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			conn.Close()
-			http.Error(w, "hijack not supported", http.StatusInternalServerError)
-			return
-		}
-		clientConn, _, err := hijacker.Hijack()
-		if err != nil {
-			conn.Close()
-			return
-		}
-
-		fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		log.Printf("[tunnel] %s via %s established", r.Host, p.Address)
-
-		// 双向转发
-		go transfer(conn, clientConn)
-		go transfer(clientConn, conn)
+		s.relayHTTPConnect(w, conn, r.Host, p, route)
 		return
 	}
 
@@ -362,25 +345,11 @@ func (s *Server) tunnelDirect(w http.ResponseWriter, r *http.Request) {
 	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	conn, err := net.DialTimeout("tcp", r.Host, timeout)
 	if err != nil {
-		log.Printf("[tunnel] direct dial %s failed: %v", r.Host, err)
+		log.Printf("[tunnel] 直连拨号 %s 失败: %v", r.Host, err)
 		http.Error(w, "direct dial failed", http.StatusBadGateway)
 		return
 	}
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		conn.Close()
-		http.Error(w, "hijack not supported", http.StatusInternalServerError)
-		return
-	}
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		conn.Close()
-		return
-	}
-	fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	log.Printf("[tunnel] %s direct (bypass upstream)", r.Host)
-	go transfer(conn, clientConn)
-	go transfer(clientConn, conn)
+	s.relayHTTPConnect(w, conn, r.Host, nil, auth.ParsedUsername{})
 }
 
 // maxReplayBodyBytes 限制为“可重放”而缓存进内存的请求体上限。
@@ -557,8 +526,8 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 				return nil, fmt.Errorf("socks5 domain too long: %d bytes (max 255)", len(targetHost))
 			}
 		}
-		// Manual SOCKS5 handshake so ValidateTimeout can bound the silent-upstream case
-		// (golang.org/x/net/proxy has no per-handshake SetDeadline).
+		// 手动执行 SOCKS5 握手，使 ValidateTimeout 能限制无响应上游；
+		// golang.org/x/net/proxy 不提供握手阶段的独立 SetDeadline。
 		dialer := &net.Dialer{Timeout: timeout}
 		proxyConn, err := dialer.Dial("tcp", p.Address)
 		if err != nil {
@@ -635,6 +604,7 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 
 func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
 	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
+	// 每次转发尝试都创建独立客户端；调用方须在尝试结束后释放其空闲连接。
 	switch p.Protocol {
 	case "http":
 		proxyURL, err := url.Parse(fmt.Sprintf("http://%s", p.Address))
@@ -666,8 +636,143 @@ func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
 	}
 }
 
-func transfer(dst io.WriteCloser, src io.ReadCloser) {
-	defer dst.Close()
-	defer src.Close()
-	io.Copy(dst, src)
+const defaultHTTPConnectRelayIdleTimeout = defaultSOCKS5RelayIdleTimeout
+
+// relayHTTPConnect 完成 Hijack 后的 HTTP CONNECT 数据面。
+// Hijack 返回的 Reader 可能已缓存请求头之后的首包，必须把它交给 relay；
+// 成功记账只在首个上游字节实际写到客户端后触发，避免把握手成功冒充数据面成功。
+func (s *Server) relayHTTPConnect(
+	w http.ResponseWriter,
+	upstreamConn net.Conn,
+	target string,
+	selected *storage.Proxy,
+	route auth.ParsedUsername,
+) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		_ = upstreamConn.Close()
+		if selected != nil {
+			s.releaseFailedBinding(route, selected)
+		}
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		log.Printf("[tunnel] 目标 %s 不支持 Hijack", target)
+		return
+	}
+
+	clientConn, hijackedRW, err := hijacker.Hijack()
+	if err != nil {
+		_ = upstreamConn.Close()
+		if clientConn != nil {
+			_ = clientConn.Close()
+		}
+		if selected != nil {
+			s.releaseFailedBinding(route, selected)
+		}
+		log.Printf("[tunnel] Hijack 目标 %s 失败: %v", target, err)
+		return
+	}
+	if clientConn == nil || hijackedRW == nil || hijackedRW.Reader == nil || hijackedRW.Writer == nil {
+		_ = upstreamConn.Close()
+		if clientConn != nil {
+			_ = clientConn.Close()
+		}
+		if selected != nil {
+			s.releaseFailedBinding(route, selected)
+		}
+		log.Printf("[tunnel] Hijack 目标 %s 返回空连接或缓冲读写器", target)
+		return
+	}
+
+	const establishedResponse = "HTTP/1.1 200 Connection Established\r\n\r\n"
+	n, err := hijackedRW.WriteString(establishedResponse)
+	if err == nil && n != len(establishedResponse) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		_ = upstreamConn.Close()
+		_ = clientConn.Close()
+		if selected != nil {
+			s.releaseFailedBinding(route, selected)
+		}
+		log.Printf("[tunnel] 写入 CONNECT 成功响应失败 target=%s: %v", target, err)
+		return
+	}
+	if err := hijackedRW.Flush(); err != nil {
+		_ = upstreamConn.Close()
+		_ = clientConn.Close()
+		if selected != nil {
+			s.releaseFailedBinding(route, selected)
+		}
+		log.Printf("[tunnel] 刷新 CONNECT 成功响应失败 target=%s: %v", target, err)
+		return
+	}
+
+	if selected != nil {
+		log.Printf("[tunnel] 已通过节点 %s 建立 %s", selected.Address, target)
+	} else {
+		log.Printf("[tunnel] 已直连建立 %s（绕过上游）", target)
+	}
+
+	// 用 bufferedConn 保留 Hijack Reader 中已经预读的首包；Write 仍使用底层
+	// TCP 连接，响应已 Flush，不会把后续数据滞留在 HTTP writer 缓冲中。
+	bufferedClientConn := &bufferedConn{Conn: clientConn, reader: hijackedRW.Reader}
+	var recordSuccess sync.Once
+	onUpstreamWrite := func() {
+		if selected == nil {
+			return
+		}
+		recordSuccess.Do(func() {
+			if err := s.storage.RecordProxyUseByID(selected.ID, true); err != nil {
+				log.Printf("[tunnel] 记录节点成功使用失败 id=%d: %v", selected.ID, err)
+			}
+		})
+	}
+	idleTimeout := s.httpConnectRelayIdleTimeout()
+	result := relaySOCKS5(bufferedClientConn, upstreamConn, idleTimeout, onUpstreamWrite)
+	logHTTPConnectRelayResult(target, idleTimeout, result)
+	if selected != nil && result.upstreamToClientBytes == 0 {
+		// 无有效上游数据不记成功；释放本次粘滞绑定，避免后续请求继续命中
+		// 已建立但未完成有效转发的节点。
+		s.releaseFailedBinding(route, selected)
+	}
+}
+
+func (s *Server) httpConnectRelayIdleTimeout() time.Duration {
+	if cfg := s.runtimeConfig(); cfg != nil && cfg.ValidateTimeout > 0 {
+		return time.Duration(cfg.ValidateTimeout) * time.Second
+	}
+	return defaultHTTPConnectRelayIdleTimeout
+}
+
+func logHTTPConnectRelayResult(target string, idleTimeout time.Duration, result socks5RelayResult) {
+	logHTTPConnectRelayDirection(target, "客户端->上游", result.clientToUpstreamBytes, result.clientToUpstreamErr, result.clientToUpstreamTimedOut, result.clientToUpstreamCanceled, idleTimeout)
+	logHTTPConnectRelayDirection(target, "上游->客户端", result.upstreamToClientBytes, result.upstreamToClientErr, result.upstreamToClientTimedOut, result.upstreamToClientCanceled, idleTimeout)
+	if result.clientToUpstreamDeadline != nil {
+		log.Printf("[tunnel] relay deadline 异常 target=%s direction=客户端->上游 idle=%s: %v", target, idleTimeout, result.clientToUpstreamDeadline)
+	}
+	if result.upstreamToClientDeadline != nil {
+		log.Printf("[tunnel] relay deadline 异常 target=%s direction=上游->客户端 idle=%s: %v", target, idleTimeout, result.upstreamToClientDeadline)
+	}
+	if result.coordinationErr != nil {
+		log.Printf("[tunnel] relay 协调异常 target=%s: %v", target, result.coordinationErr)
+	}
+}
+
+func logHTTPConnectRelayDirection(
+	target string,
+	direction string,
+	bytes int64,
+	err error,
+	timedOut bool,
+	canceled bool,
+	idleTimeout time.Duration,
+) {
+	if err == nil || canceled {
+		return
+	}
+	if timedOut {
+		log.Printf("[tunnel] relay 空闲超时 target=%s direction=%s bytes=%d idle=%s", target, direction, bytes, idleTimeout)
+		return
+	}
+	log.Printf("[tunnel] relay 转发异常 target=%s direction=%s bytes=%d: %v", target, direction, bytes, err)
 }

@@ -70,10 +70,15 @@ var (
 	subscriptionProxyLinkPattern   = regexp.MustCompile(`(?i)\b(?:ss|ssr|vmess|vless|trojan|hysteria|hysteria2|tuic)://[^\s"'<>]+`)
 )
 
+type proxyValidator interface {
+	ValidateOne(storage.Proxy) (bool, time.Duration, string, string, validator.RiskInfo)
+	ValidateStream([]storage.Proxy) <-chan validator.Result
+}
+
 // Manager 订阅管理器
 type Manager struct {
 	storage   *storage.Storage
-	validator *validator.Validator
+	validator proxyValidator
 	singbox   singBoxShard
 	stopCh    chan struct{}
 	stopOnce  sync.Once
@@ -95,6 +100,38 @@ type subscriptionProxyEntry struct {
 	nodeKey string
 }
 
+// normalizeSubscriptionProxyEntries 在任何持久化前归一化同批代理。
+// 完全相同的项稳定保留首次出现；共享稳定 key 或 address 但配置不同则显式拒绝。
+func normalizeSubscriptionProxyEntries(entries []subscriptionProxyEntry) ([]subscriptionProxyEntry, error) {
+	normalized := make([]subscriptionProxyEntry, 0, len(entries))
+	byNodeKey := make(map[string]int, len(entries))
+	byAddress := make(map[string]int, len(entries))
+	for inputIndex, entry := range entries {
+		if entry.nodeKey != "" {
+			if normalizedIndex, ok := byNodeKey[entry.nodeKey]; ok {
+				if normalized[normalizedIndex] != entry {
+					return nil, fmt.Errorf("订阅代理批次 node_key 冲突：第 %d 项与第 %d 项配置不一致", normalizedIndex+1, inputIndex+1)
+				}
+				continue
+			}
+		}
+		if normalizedIndex, ok := byAddress[entry.addr]; ok {
+			if normalized[normalizedIndex] != entry {
+				return nil, fmt.Errorf("订阅代理批次 address 冲突：第 %d 项与第 %d 项配置不一致", normalizedIndex+1, inputIndex+1)
+			}
+			continue
+		}
+
+		normalizedIndex := len(normalized)
+		normalized = append(normalized, entry)
+		byAddress[entry.addr] = normalizedIndex
+		if entry.nodeKey != "" {
+			byNodeKey[entry.nodeKey] = normalizedIndex
+		}
+	}
+	return normalized, nil
+}
+
 type disabledProbeTarget struct {
 	proxy         storage.Proxy
 	tunnelNodeKey string
@@ -102,9 +139,9 @@ type disabledProbeTarget struct {
 
 // NewManager 创建订阅管理器
 func NewManager(store *storage.Storage, v *validator.Validator, cfg *config.Config) *Manager {
-	dataDir := ""
-	if d := os.Getenv("DATA_DIR"); d != "" {
-		dataDir = d
+	dataDir, err := config.DataDir()
+	if err != nil {
+		panic(fmt.Sprintf("解析运行时数据目录失败: %v", err))
 	}
 
 	return &Manager{
@@ -303,20 +340,15 @@ func (m *Manager) probeDisabled() {
 			// 检查地理过滤：恢复前确认不在屏蔽列表中
 			if exitLocation != "" && isGeoBlocked(exitLocation, cfg) {
 				log.Printf("[custom] 代理 %s 验证通过但被地理过滤 (%s)，保持禁用", proxy.Address, exitLocation)
-				if err := m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability); err != nil {
+				if err := m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.FlagsKnown, risk.CFBlocked, risk.AIReachability); err != nil {
 					log.Printf("[custom] 写回地理过滤出口信息失败 %s: %v", proxy.Address, err)
 				}
 				m.refreshMu.Unlock()
 				continue
 			}
-			if err := m.storage.EnableSubscriptionProxy(proxy.Address, proxy.SubscriptionID); err != nil {
+			if err := m.storage.RecoverSubscriptionProxyWithExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.FlagsKnown, risk.CFBlocked, risk.AIReachability); err != nil {
 				m.refreshMu.Unlock()
-				log.Printf("[custom] 启用探测恢复节点失败 %s: %v", proxy.Address, err)
-				continue
-			}
-			if err := m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability); err != nil {
-				m.refreshMu.Unlock()
-				log.Printf("[custom] 写回探测恢复出口信息失败 %s: %v", proxy.Address, err)
+				log.Printf("[custom] 原子写回探测恢复结果失败 %s: %v", proxy.Address, err)
 				continue
 			}
 			m.refreshMu.Unlock()
@@ -395,6 +427,17 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	var allProxies []storage.Proxy
 	// 端口合并：每个 tunnel 节点只暴露一个 mixed 本地入站（单端口同时服务 SOCKS5 与 HTTP），
 	// 作为单条代理入库。协议登记为 socks5（mixed 端口接受 SOCKS5 连接，代理拨号路径按 socks5 处理）。
+	var directEntries []subscriptionProxyEntry
+	for _, node := range directNodes {
+		addr := node.DirectAddress()
+		proto := node.DirectProtocol()
+		user, pass := node.DirectCredentials()
+		directEntries = append(directEntries, subscriptionProxyEntry{addr: addr, proto: proto, username: user, password: pass, nodeKey: node.NodeKey()})
+	}
+	directEntries, err = normalizeSubscriptionProxyEntries(directEntries)
+	if err != nil {
+		return fmt.Errorf("归一化订阅代理失败: %w", err)
+	}
 	var proxyEntries []subscriptionProxyEntry
 
 	oldNodes := append([]ParsedNode(nil), m.singbox.GetNodes()...)
@@ -448,14 +491,9 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	}
 
 	// 处理可直接使用的 HTTP/SOCKS5 节点。新节点先保持 disabled，验证通过后才进入 active 选路。
-	for _, node := range directNodes {
-		addr := node.DirectAddress()
-		proto := node.DirectProtocol()
-		user, pass := node.DirectCredentials()
-		proxyEntries = append(proxyEntries, subscriptionProxyEntry{addr: addr, proto: proto, username: user, password: pass, nodeKey: node.NodeKey()})
-	}
-	if len(directNodes) > 0 {
-		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
+	proxyEntries = append(proxyEntries, directEntries...)
+	if len(directEntries) > 0 {
+		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directEntries))
 	}
 
 	allProxies, err = m.replaceSubscriptionProxies(subID, proxyEntries)
@@ -468,7 +506,7 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 		return fmt.Errorf("替换订阅代理失败: %w", err)
 	}
 	if len(tunnelNodes) > 0 {
-		log.Printf("[custom] 📥 %d 个加密节点入站（单 mixed 端口，SOCKS5/HTTP 共用）通过 sing-box 转换入池", len(proxyEntries)-len(directNodes))
+		log.Printf("[custom] 📥 %d 个加密节点入站（单 mixed 端口，SOCKS5/HTTP 共用）通过 sing-box 转换入池", len(proxyEntries)-len(directEntries))
 	}
 
 	// 验证新入池的代理
@@ -574,26 +612,52 @@ func (m *Manager) collectAllTunnelNodesExcludingSubscription(excludedSubID int64
 
 func (m *Manager) subscriptionTunnelRuntimeKeys(subID int64, nodes []ParsedNode, portMap map[string]int) (map[string]bool, error) {
 	rows, err := m.storage.GetDB().Query(
-		`SELECT address FROM proxies WHERE subscription_id = ? AND source = ?`, subID, storage.SourceSubscription,
+		`SELECT address, node_key FROM proxies WHERE subscription_id = ? AND source = ?`, subID, storage.SourceSubscription,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	runtimeKeys := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		runtimeKeys[node.NodeKey()] = true
+	}
 	keys := make(map[string]bool)
+	keyAddresses := make(map[string]string)
 	for rows.Next() {
-		var addr string
-		if err := rows.Scan(&addr); err != nil {
+		var addr, nodeKey string
+		if err := rows.Scan(&addr, &nodeKey); err != nil {
 			return nil, err
 		}
-		key := nodeKeyForLocalAddress(nodes, portMap, addr)
+		key := strings.TrimSpace(nodeKey)
+		if key != "" {
+			if !runtimeKeys[key] {
+				continue
+			}
+		} else {
+			// 旧数据没有 node_key 时仅按当前运行态地址兼容映射。
+			key = nodeKeyForLocalAddress(nodes, portMap, addr)
+		}
 		if key != "" {
 			keys[key] = true
+			keyAddresses[key] = addr
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for key := range keys {
+		otherOwner, err := m.storage.HasOtherSubscriptionProxyOwner(key, keyAddresses[key], subID)
+		if err != nil {
+			return nil, fmt.Errorf("检查订阅 NodeKey owner 失败: %w", err)
+		}
+		if otherOwner {
+			delete(keys, key)
+		}
 	}
 	return keys, nil
 }
@@ -613,11 +677,21 @@ func nodesExcludingKeys(nodes []ParsedNode, keys map[string]bool) []ParsedNode {
 }
 
 func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscriptionProxyEntry) ([]storage.Proxy, error) {
+	entries, err := normalizeSubscriptionProxyEntries(entries)
+	if err != nil {
+		return nil, err
+	}
+
 	tx, err := m.storage.GetDB().Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	var subscriptionStatus string
+	if err := tx.QueryRow(`SELECT status FROM subscriptions WHERE id = ?`, subID).Scan(&subscriptionStatus); err != nil {
+		return nil, fmt.Errorf("读取订阅状态失败: %w", err)
+	}
 
 	// 刷新前快照 user_paused：优先按 node_key 回写（端口可变时 address 会变），兼容旧数据回退 address。
 	pausedByKey := map[string]bool{}
@@ -659,28 +733,46 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 		incomingAddrs[entry.addr] = true
 	}
 	oldRows, err := tx.Query(
-		`SELECT id, address, node_key FROM proxies WHERE subscription_id = ? AND source = ?`,
+		`SELECT id, address, node_key, protocol, status, user_paused, fail_count,
+		        CASE WHEN last_check IS NULL THEN 0 ELSE 1 END,
+		        exit_ip, exit_location, latency, dual_protocol, proxy_username, proxy_password
+		   FROM proxies WHERE subscription_id = ? AND source = ?`,
 		subID, storage.SourceSubscription,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("读取订阅旧代理失败: %w", err)
 	}
 	type oldProxyRow struct {
-		id   int64
-		addr string
-		key  string
+		id           int64
+		addr         string
+		key          string
+		proto        string
+		status       string
+		userPaused   int
+		failCount    int
+		hasLastCheck int
+		exitIP       string
+		exitLocation string
+		latency      int
+		dual         bool
+		username     string
+		password     string
 	}
 	var staleIDs []int64
-	keyToID := map[string]int64{}
+	keyToOld := map[string]oldProxyRow{}
 	for oldRows.Next() {
 		var r oldProxyRow
-		if err := oldRows.Scan(&r.id, &r.addr, &r.key); err != nil {
+		if err := oldRows.Scan(
+			&r.id, &r.addr, &r.key, &r.proto, &r.status, &r.userPaused,
+			&r.failCount, &r.hasLastCheck, &r.exitIP, &r.exitLocation, &r.latency,
+			&r.dual, &r.username, &r.password,
+		); err != nil {
 			oldRows.Close()
 			return nil, fmt.Errorf("扫描订阅旧代理失败: %w", err)
 		}
 		if r.key != "" {
 			if incomingKeys[r.key] {
-				keyToID[r.key] = r.id
+				keyToOld[r.key] = r
 				continue
 			}
 			staleIDs = append(staleIDs, r.id)
@@ -707,14 +799,20 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 	// 先把「有 key 且命中旧行」的节点全部改到临时 address，再写最终 port，
 	// 避免同批端口对调时逐条 final 撞 UNIQUE(address,source,subscription_id)。
 	type keyedUpdate struct {
-		id         int64
+		index          int
+		id             int64
+		entry          subscriptionProxyEntry
+		userPaused     int
+		preserveActive bool
+	}
+	type pendingInsert struct {
+		index      int
 		entry      subscriptionProxyEntry
 		userPaused int
 	}
 	var keyed []keyedUpdate
-	var inserts []subscriptionProxyEntry
-	pausedFlags := make([]int, 0, len(entries))
-	for _, entry := range entries {
+	var inserts []pendingInsert
+	for entryIndex, entry := range entries {
 		userPaused := 0
 		// 有稳定身份时只按 node_key 回写暂停，禁止 address 回退。
 		if entry.nodeKey != "" {
@@ -725,42 +823,63 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 			userPaused = 1
 		}
 		if entry.nodeKey != "" {
-			if id, ok := keyToID[entry.nodeKey]; ok {
-				keyed = append(keyed, keyedUpdate{id: id, entry: entry, userPaused: userPaused})
+			if old, ok := keyToOld[entry.nodeKey]; ok {
+				// 仅保留具有明确最近成功记录、仍可选且路由配置逐字段未变的旧节点。
+				// last_check 存在且 fail_count=0 表示最新持久化检查没有未清零失败；
+				// 任一身份字段变化都必须先禁用，等待本轮验证重新建立信任。
+				preserveActive := subscriptionStatus == "active" &&
+					old.status == "active" && old.userPaused == 0 &&
+					old.failCount == 0 && old.hasLastCheck == 1 &&
+					old.exitIP != "" && old.exitLocation != "" && old.latency > 0 &&
+					old.addr == entry.addr && old.proto == entry.proto &&
+					old.dual == entry.dual && old.username == entry.username &&
+					old.password == entry.password && old.key == entry.nodeKey
+				keyed = append(keyed, keyedUpdate{
+					index: entryIndex, id: old.id, entry: entry,
+					userPaused: userPaused, preserveActive: preserveActive,
+				})
 				continue
 			}
 		}
-		inserts = append(inserts, entry)
-		pausedFlags = append(pausedFlags, userPaused)
+		inserts = append(inserts, pendingInsert{index: entryIndex, entry: entry, userPaused: userPaused})
 	}
 
 	for _, ku := range keyed {
 		tmpAddr := fmt.Sprintf("rebind-%d.invalid:0", ku.id)
+		status := "disabled"
+		if ku.preserveActive {
+			status = "active"
+		}
 		if _, err := tx.Exec(
-			`UPDATE proxies SET address = ?, protocol = ?, status = 'disabled', dual_protocol = ?,
+			`UPDATE proxies SET address = ?, protocol = ?, status = ?, dual_protocol = ?,
 				user_paused = ?, proxy_username = ?, proxy_password = ?, node_key = ?,
 				region_source = CASE WHEN region_source = '' THEN 'auto' ELSE region_source END
 			 WHERE id = ?`,
-			tmpAddr, ku.entry.proto, ku.entry.dual, ku.userPaused, ku.entry.username, ku.entry.password, ku.entry.nodeKey, ku.id,
+			tmpAddr, ku.entry.proto, status, ku.entry.dual, ku.userPaused,
+			ku.entry.username, ku.entry.password, ku.entry.nodeKey, ku.id,
 		); err != nil {
 			return nil, fmt.Errorf("预更新订阅代理 node_key=%s 失败: %w", ku.entry.nodeKey, err)
 		}
 	}
-	proxies := make([]storage.Proxy, 0, len(entries))
+	proxies := make([]storage.Proxy, len(entries))
 	for _, ku := range keyed {
 		if _, err := tx.Exec(`UPDATE proxies SET address = ? WHERE id = ?`, ku.entry.addr, ku.id); err != nil {
 			return nil, fmt.Errorf("更新订阅代理 node_key=%s 失败: %w", ku.entry.nodeKey, err)
 		}
-		proxies = append(proxies, storage.Proxy{
-			ID: ku.id, Address: ku.entry.addr, Protocol: ku.entry.proto, Status: "disabled",
+		status := "disabled"
+		if ku.preserveActive {
+			status = "active"
+		}
+		proxies[ku.index] = storage.Proxy{
+			ID: ku.id, Address: ku.entry.addr, Protocol: ku.entry.proto, Status: status,
 			Source: storage.SourceSubscription, SubscriptionID: subID,
 			DualProtocol: ku.entry.dual, UserPaused: ku.userPaused == 1,
 			Username: ku.entry.username, Password: ku.entry.password, NodeKey: ku.entry.nodeKey,
-		})
+		}
 	}
-	for i, entry := range inserts {
-		userPaused := pausedFlags[i]
-		insertRes, err := tx.Exec(
+	for _, insert := range inserts {
+		entry := insert.entry
+		_, err := tx.Exec(
 			`INSERT INTO proxies (address, protocol, source, subscription_id, region_source, status, dual_protocol, user_paused, proxy_username, proxy_password, node_key)
 			 VALUES (?, ?, ?, ?, 'auto', 'disabled', ?, ?, ?, ?, ?)
 			 ON CONFLICT(address, source, subscription_id) DO UPDATE SET
@@ -772,20 +891,25 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 				proxy_username = excluded.proxy_username,
 				proxy_password = excluded.proxy_password,
 				node_key = CASE WHEN excluded.node_key != '' THEN excluded.node_key ELSE proxies.node_key END`,
-			entry.addr, entry.proto, storage.SourceSubscription, subID, entry.dual, userPaused, entry.username, entry.password, entry.nodeKey,
+			entry.addr, entry.proto, storage.SourceSubscription, subID, entry.dual, insert.userPaused, entry.username, entry.password, entry.nodeKey,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("新增订阅代理 %s 失败: %w", entry.addr, err)
 		}
-		if _, err := insertRes.RowsAffected(); err != nil {
-			return nil, err
+		// Exec 结果不能完整表达最终实体身份；按完整唯一身份读取 ID。
+		var proxyID int64
+		if err := tx.QueryRow(
+			`SELECT id FROM proxies WHERE address = ? AND source = ? AND subscription_id = ?`,
+			entry.addr, storage.SourceSubscription, subID,
+		).Scan(&proxyID); err != nil {
+			return nil, fmt.Errorf("读取订阅代理 %s 身份失败: %w", entry.addr, err)
 		}
-		proxies = append(proxies, storage.Proxy{
-			Address: entry.addr, Protocol: entry.proto, Status: "disabled",
+		proxies[insert.index] = storage.Proxy{
+			ID: proxyID, Address: entry.addr, Protocol: entry.proto, Status: "disabled",
 			Source: storage.SourceSubscription, SubscriptionID: subID,
-			DualProtocol: entry.dual, UserPaused: userPaused == 1,
+			DualProtocol: entry.dual, UserPaused: insert.userPaused == 1,
 			Username: entry.username, Password: entry.password, NodeKey: entry.nodeKey,
-		})
+		}
 	}
 
 	subRes, err := tx.Exec(`UPDATE subscriptions SET last_fetch = CURRENT_TIMESTAMP, proxy_count = ? WHERE id = ?`, len(entries), subID)
@@ -1185,8 +1309,22 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 	for result := range resultCh {
 		if result.Valid {
 			latencyMs := int(result.Latency.Milliseconds())
-			if err := m.storage.UpdateSubscriptionProxyExitInfo(result.Proxy.Address, subID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
+			// 旧节点在暂存阶段可能仍为 active。先撤销旧信任，再做出口
+			// 写回与地理/父订阅判断，确保任何后续失败都不会留下 active。
+			if result.Proxy.Status == "active" {
+				if err := m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
+					log.Printf("[custom] 暂存节点预禁用失败 %s: %v", result.Proxy.Address, err)
+					invalid++
+					continue
+				}
+			}
+			if err := m.storage.UpdateSubscriptionProxyExitInfo(result.Proxy.Address, subID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.FlagsKnown, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
 				log.Printf("[custom] 写回验证出口信息失败 %s: %v", result.Proxy.Address, err)
+				// 预禁用后写回仍失败时再次禁用，覆盖并发恢复或非标准调用，
+				// 不能让本轮未落地的成功结果沿用 active。
+				if disableErr := m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID); disableErr != nil {
+					log.Printf("[custom] 写回失败后禁用节点失败 %s: %v", result.Proxy.Address, disableErr)
+				}
 				invalid++
 				continue
 			}
@@ -1198,9 +1336,26 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 				invalid++
 				continue
 			}
-			if err := m.storage.EnableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
-				// 父订阅暂停 / 行不匹配 / DB 错误：不得计为可用
-				log.Printf("[custom] 启用验证通过节点失败 %s: %v", result.Proxy.Address, err)
+			parentPaused, err := m.storage.IsSubscriptionPaused(subID)
+			if err != nil || parentPaused {
+				log.Printf("[custom] 验证通过但父订阅不可用 %s: paused=%v err=%v", result.Proxy.Address, parentPaused, err)
+				invalid++
+				continue
+			}
+			current, err := m.storage.GetProxyByIdentity(result.Proxy.Address, storage.SourceSubscription, subID)
+			if err != nil {
+				log.Printf("[custom] 读取验证通过节点状态失败 %s: %v", result.Proxy.Address, err)
+				invalid++
+				continue
+			}
+			if current.Status == "disabled" {
+				if err := m.storage.EnableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
+					log.Printf("[custom] 启用验证通过节点失败 %s: %v", result.Proxy.Address, err)
+					invalid++
+					continue
+				}
+			} else if current.Status != "active" {
+				log.Printf("[custom] 验证通过节点状态不可恢复 %s: %s", result.Proxy.Address, current.Status)
 				invalid++
 				continue
 			}
@@ -1241,19 +1396,19 @@ func (m *Manager) GetStatus() map[string]interface{} {
 		"singbox_total_ports": singboxStatus.TotalPorts,
 	}
 	if errSubCount != nil {
-		log.Printf("[custom] status CountBySource failed: %v", errSubCount)
+		log.Printf("[custom] 状态 CountBySource 查询失败: %v", errSubCount)
 		status["subscription_count_error"] = errSubCount.Error()
 	} else {
 		status["subscription_count"] = subscriptionCount
 	}
 	if errDisabled != nil {
-		log.Printf("[custom] status GetDisabledCustomProxies failed: %v", errDisabled)
+		log.Printf("[custom] 状态 GetDisabledCustomProxies 查询失败: %v", errDisabled)
 		status["disabled_count_error"] = errDisabled.Error()
 	} else {
 		status["disabled_count"] = len(disabled)
 	}
 	if errSubs != nil {
-		log.Printf("[custom] status GetSubscriptions failed: %v", errSubs)
+		log.Printf("[custom] 状态 GetSubscriptions 查询失败: %v", errSubs)
 		status["subscription_total_error"] = errSubs.Error()
 	} else {
 		status["subscription_total"] = len(subs)
@@ -1324,8 +1479,8 @@ func (m *Manager) GetSingBox() singBoxShard {
 	return m.singbox
 }
 
-// DeleteManualNode removes a manual proxy by id.
-// Direct nodes are DB-only. Tunnel nodes also leave the sing-box runtime.
+// DeleteManualNode 按 id 删除手工代理。
+// 直连节点只删除数据库记录；隧道节点还会退出 sing-box 运行态。
 func (m *Manager) DeleteManualNode(id int64) error {
 	proxy, err := m.storage.GetProxyByID(id)
 	if err != nil {
@@ -1360,31 +1515,46 @@ func (m *Manager) deleteProxyWithRuntime(proxy *storage.Proxy) error {
 
 	oldNodes := append([]ParsedNode(nil), m.singbox.GetNodes()...)
 	removeKey := nodeKeyForLocalAddress(oldNodes, m.singbox.GetPortMap(), proxy.Address)
-	newNodes := make([]ParsedNode, 0, len(oldNodes))
-	for _, n := range oldNodes {
-		if removeKey != "" && n.NodeKey() == removeKey {
-			continue
-		}
-		// Also drop by matching local port when key resolution fails.
-		if removeKey == "" && localAddrMatches(m.singbox.GetPortMap(), n.NodeKey(), proxy.Address) {
-			continue
-		}
-		newNodes = append(newNodes, n)
+	if removeKey == "" {
+		removeKey = strings.TrimSpace(proxy.NodeKey)
 	}
-	if err := m.singbox.Reload(newNodes); err != nil {
-		return fmt.Errorf("sing-box 重载失败: %w", err)
+	otherOwner, err := m.storage.HasOtherProxyOwner(removeKey, proxy.Address, proxy.ID)
+	if err != nil {
+		return fmt.Errorf("检查节点运行态 owner 失败: %w", err)
+	}
+	runtimeChanged := false
+	if !otherOwner {
+		newNodes := make([]ParsedNode, 0, len(oldNodes))
+		for _, n := range oldNodes {
+			if removeKey != "" && n.NodeKey() == removeKey {
+				continue
+			}
+			// 稳定 key 解析失败时，兼容按本地端口移除旧运行态。
+			if removeKey == "" && localAddrMatches(m.singbox.GetPortMap(), n.NodeKey(), proxy.Address) {
+				continue
+			}
+			newNodes = append(newNodes, n)
+		}
+		if len(newNodes) != len(oldNodes) {
+			if err := m.singbox.Reload(newNodes); err != nil {
+				return fmt.Errorf("sing-box 重载失败: %w", err)
+			}
+			runtimeChanged = true
+		}
 	}
 	if err := m.storage.DeleteProxyByID(proxy.ID); err != nil {
-		if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
-			return fmt.Errorf("删除节点失败: %w; 回滚运行态失败: %v", err, rbErr)
+		if runtimeChanged {
+			if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+				return fmt.Errorf("删除节点失败: %w; 回滚运行态失败: %v", err, rbErr)
+			}
 		}
 		return fmt.Errorf("删除节点失败: %w", err)
 	}
 	return nil
 }
 
-// DeleteSubscription deletes a subscription and removes its tunnel nodes from sing-box runtime.
-// Runtime is changed first; if DB deletion fails, runtime is compensated back to the old node set.
+// DeleteSubscription 删除订阅，并从 sing-box 运行态移除其隧道节点。
+// 先变更运行态；数据库删除失败时，将运行态补偿恢复为旧节点集合。
 func (m *Manager) DeleteSubscription(id int64) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
@@ -1413,7 +1583,7 @@ func (m *Manager) DeleteSubscription(id int64) error {
 	return nil
 }
 
-// ManualImportResult summarizes batch import of direct manual proxies.
+// ManualImportResult 汇总直连手工代理的批量导入结果。
 type ManualImportResult struct {
 	Total      int      `json:"total"`
 	Added      int      `json:"added"`
@@ -1451,10 +1621,10 @@ func (m *Manager) AddManualNode(link, region, note string) error {
 	return m.addManualTunnelNode(node, region, note)
 }
 
-// ImportManualLinks parses multi-line proxy text and upserts direct nodes.
-// Each line may contain leading/trailing/inline annotations; the first
-// socks5/socks4/http/https URL token is extracted. Tunnel links fail in batch.
-// Existing identical address+source manual rows are counted as skipped.
+// ImportManualLinks 解析多行代理文本，并插入或更新直连节点。
+// 每行可在开头、结尾或中间包含注记；函数提取第一个
+// socks5/socks4/http/https URL 令牌；批量导入不支持隧道链接。
+// address+source 相同的已有手工代理计为跳过。
 func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResult, error) {
 	var result ManualImportResult
 	seen := map[string]bool{}
@@ -1496,7 +1666,7 @@ func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResu
 			continue
 		}
 		seen[key] = true
-		// Skip if already present as manual.
+		// 已存在相同手工代理时跳过。
 		if existing, err := m.storage.GetProxyByIdentity(addr, storage.SourceManual, 0); err == nil && existing != nil {
 			result.Skipped++
 			continue
@@ -1548,6 +1718,7 @@ func (m *Manager) validateManualProxies(proxies []storage.Proxy) {
 			latencyMs,
 			result.Risk.IPAPIIsScore,
 			result.Risk.Flags,
+			result.Risk.FlagsKnown,
 			result.Risk.CFBlocked,
 			result.Risk.AIReachability,
 		); err != nil {
@@ -1570,8 +1741,8 @@ func (m *Manager) validateManualProxies(proxies []storage.Proxy) {
 	log.Printf("[custom] 手工节点验证完成：%d 可用，%d 不可用", valid, invalid)
 }
 
-// extractProxyLinkFromLine finds the first direct-proxy URL token in a free-form line.
-// Supports leading, trailing, or mid-line annotations around the URL.
+// extractProxyLinkFromLine 从自由格式行中提取第一个直连代理 URL 令牌。
+// 支持 URL 前后或行中存在注记。
 func extractProxyLinkFromLine(line string) string {
 	line = strings.TrimSpace(line)
 	if line == "" || strings.HasPrefix(line, "#") {
@@ -1592,9 +1763,9 @@ func extractProxyLinkFromLine(line string) string {
 	if best < 0 {
 		return ""
 	}
-	// Keep original casing for the remainder; scheme match used lower only for index.
+	// 保留剩余文本的原始大小写；lower 仅用于定位 scheme。
 	rest := line[best+len(bestScheme):]
-	// URL token ends at whitespace or common separators used in annotated dumps.
+	// URL 令牌在空白符或注记转储常用分隔符处结束。
 	end := len(rest)
 	for i, r := range rest {
 		if unicode.IsSpace(r) || r == '|' || r == ',' || r == ';' {
@@ -1606,7 +1777,7 @@ func extractProxyLinkFromLine(line string) string {
 	if token == "" {
 		return ""
 	}
-	// Drop trailing junk that sometimes sticks without space: ] ) >
+	// 移除无空格粘连在末尾的常见杂字符：] ) >
 	token = strings.TrimRight(token, ")]}>\"'")
 	return bestScheme + token
 }
@@ -1619,7 +1790,7 @@ func truncateForError(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// DeleteManualNodes deletes multiple manual proxies by id, using DeleteManualNode.
+// DeleteManualNodes 使用 DeleteManualNode 按 id 批量删除手工代理。
 func (m *Manager) DeleteManualNodes(ids []int64) (deleted int, errs []string) {
 	for _, id := range ids {
 		if err := m.DeleteManualNode(id); err != nil {
@@ -1870,7 +2041,7 @@ func nodeKeyForLocalAddress(nodes []ParsedNode, portMap map[string]int, address 
 			return n.NodeKey()
 		}
 	}
-	// Fallback: match port only.
+	// 回退：仅按端口匹配。
 	_, portStr, err := net.SplitHostPort(address)
 	if err != nil {
 		return ""

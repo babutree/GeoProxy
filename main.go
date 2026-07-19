@@ -22,7 +22,7 @@ func main() {
 	cfg := config.Load()
 
 	// 首次启动会自动生成随机凭据，仅在此处一次性打印明文。
-	// 之后重启不再显示，用户须用这些凭据登录 WebUI 后自行修改。
+	// 之后重启不再显示；代理认证凭据可在系统设置修改，WebUI 登录密码遗失时按 README 重置。
 	if boot := config.FirstBootCredentials(); boot != nil {
 		logFirstBootCredentials(boot)
 	}
@@ -33,7 +33,7 @@ func main() {
 	// 初始化存储
 	store, err := storage.New(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("init storage: %v", err)
+		log.Fatalf("[main] 初始化存储失败: %v", err)
 	}
 	defer store.Close()
 
@@ -79,18 +79,19 @@ func main() {
 	// 启动 HTTP 代理入口
 	go func() {
 		if err := httpServer.Start(); err != nil {
-			log.Fatalf("http proxy server: %v", err)
+			log.Fatalf("[main] HTTP 代理服务失败: %v", err)
 		}
 	}()
 
 	// 启动 SOCKS5 代理入口（阻塞）
 	if err := socks5Server.Start(); err != nil {
-		log.Fatalf("socks5 proxy server: %v", err)
+		log.Fatalf("[main] SOCKS5 代理服务失败: %v", err)
 	}
 }
 
 // logFirstBootCredentials 在首次启动时一次性打印自动生成的凭据。
-// 这些明文仅此一次出现在日志中；重启后不再显示。用户应尽快登录 WebUI 修改。
+// 这些明文仅此一次出现在日志中；重启后不再显示。代理认证凭据可在系统设置修改，
+// WebUI 登录密码不在系统设置修改，遗失时按 README 重置。
 func logFirstBootCredentials(boot *config.FirstBootInfo) {
 	log.Println("[main] ============================================================")
 	log.Println("[main] 首次启动：已自动生成登录凭据（仅显示这一次，请立即保存）")
@@ -101,6 +102,7 @@ func logFirstBootCredentials(boot *config.FirstBootInfo) {
 		log.Printf("[main]   代理认证用户名 : %s", boot.ProxyAuthUsername)
 		log.Printf("[main]   代理认证密码   : %s", boot.ProxyAuthPassword)
 	}
-	log.Println("[main]   登录 WebUI 后可在“系统设置”中修改这些凭据。")
+	log.Println("[main]   代理认证用户名/密码可在 WebUI“系统设置”中修改。")
+	log.Println("[main]   WebUI 登录密码不在“系统设置”中修改；遗失时请按 README 的重置流程处理。")
 	log.Println("[main] ============================================================")
 }

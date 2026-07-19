@@ -9,24 +9,25 @@ import (
 
 const maxSessionLength = 64
 
-// ParsedUsername is the routing DSL carried in proxy auth username.
-// Syntax: <base>[-region-<cc>][-unlock-<token>][-session-<id>][-node-<addr|key-<nodeKey>>]
-// unlock token: gpt|openai|chatgpt|claude|gemini|grok|cf|all
-// all => openai+claude+grok+gemini+cf (AND).
+// ParsedUsername 表示代理认证用户名承载的选路 DSL。
+// 语法：<base>[-region-<cc>][-unlock-<token>][-node-<host:port|key-<base64url(nodeKey)>>][-session-<id>]
+// 后缀必须按 region → unlock → node → session 的固定顺序出现。
+// unlock 令牌：gpt|openai|chatgpt|claude|gemini|grok|cf|all。
+// all 展开为 openai+claude+grok+gemini+cf，并要求全部满足（AND）。
 type ParsedUsername struct {
 	Base    string
 	Region  string
 	Session string
-	// Unlock is the normalized list of required unlock signals (openai/claude/grok/gemini/cf).
+	// Unlock 是规范化后的必要解锁信号列表（openai/claude/grok/gemini/cf）。
 	Unlock []string
-	// Node pins routing. Forms:
+	// Node 用于锁定选路；解析后的形态如下：
 	//   - host:port          当前拨号入口（兼容旧复制；隧道本地端口可能被重分配）
-	//   - key-<nodeKey>      稳定配置身份（推荐；刷新后端口变仍命中同一上游配置）
-	// Not an observed exit IP. Chained/realm upstreams may still change public exit.
+	//   - key-<nodeKey>      稳定配置身份（推荐；线上令牌为 key-<base64url(nodeKey)>）
+	// 该值不是观测到的最终出口 IP；链式/realm 上游仍可能改变公网出口。
 	Node string
 }
 
-// maxNodeLength caps the pinned node token length (host:port or key-<nodeKey>).
+// maxNodeLength 限制锁定节点令牌的长度（host:port 或 key-<nodeKey>）。
 const maxNodeLength = 255
 const nodeKeyPrefix = "key-"
 
@@ -104,7 +105,7 @@ func firstMarker(positions ...int) int {
 		}
 	}
 	if end < 0 {
-		// last arg is default length when no markers
+		// 未找到 marker 时，最后一个参数是默认长度。
 		return positions[len(positions)-1]
 	}
 	return end

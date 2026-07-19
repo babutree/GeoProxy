@@ -34,7 +34,7 @@ func (s *Server) apiManualNodeImport(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.customMgr.ImportManualLinks(req.Text, req.Region, req.Note)
 	if err != nil {
-		log.Printf("[webui] import manual nodes failed: %v", err)
+		log.Printf("[webui] 导入手工节点失败: %v", err)
 		jsonError(w, "failed to import manual nodes", http.StatusBadRequest)
 		return
 	}
@@ -93,7 +93,7 @@ func (s *Server) apiManualNodeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.customMgr.AddManualNode(req.Link, req.Region, req.Note); err != nil {
-		log.Printf("[webui] add manual node failed: %v", err)
+		log.Printf("[webui] 添加手工节点失败: %v", err)
 		jsonError(w, "failed to add manual node", http.StatusBadRequest)
 		return
 	}
@@ -113,7 +113,7 @@ func (s *Server) apiManualNodeRegion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.storage.UpdateProxyRegionByID(proxy.ID, req.Region, true); err != nil {
-		log.Printf("[webui] update node region %q failed: %v", req.Address, err)
+		log.Printf("[webui] 更新节点 %q 地域失败: %v", req.Address, err)
 		jsonError(w, "failed to update node region", http.StatusInternalServerError)
 		return
 	}
@@ -133,7 +133,7 @@ func (s *Server) apiManualNodeNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.storage.UpdateProxyNoteByID(proxy.ID, req.Note); err != nil {
-		log.Printf("[webui] update node note %q failed: %v", req.Address, err)
+		log.Printf("[webui] 更新节点 %q 备注失败: %v", req.Address, err)
 		jsonError(w, "failed to update node note", http.StatusInternalServerError)
 		return
 	}
@@ -151,12 +151,12 @@ func (s *Server) apiManualNodeDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.customMgr != nil {
 		if err := s.customMgr.DeleteManualNode(proxy.ID); err != nil {
-			log.Printf("[webui] delete manual node %q failed: %v", req.Address, err)
+			log.Printf("[webui] 删除手工节点 %q 失败: %v", req.Address, err)
 			jsonError(w, "failed to delete manual node", http.StatusInternalServerError)
 			return
 		}
 	} else if err := s.storage.DeleteProxyByID(proxy.ID); err != nil {
-		log.Printf("[webui] delete manual node %q failed: %v", req.Address, err)
+		log.Printf("[webui] 删除手工节点 %q 失败: %v", req.Address, err)
 		jsonError(w, "failed to delete manual node", http.StatusInternalServerError)
 		return
 	}
@@ -195,16 +195,16 @@ func (s *Server) lookupProxyRequest(w http.ResponseWriter, r *http.Request, dst 
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrAmbiguousProxyAddress) || strings.Contains(err.Error(), "ambiguous") {
-			log.Printf("[webui] manual node address %q ambiguous: %v", *address, err)
+			log.Printf("[webui] 手工节点地址 %q 不唯一: %v", *address, err)
 			jsonError(w, "ambiguous proxy address; use id", http.StatusConflict)
 			return nil, false
 		}
 		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "not found") {
-			log.Printf("[webui] manual node id=%d address=%q not found: %v", *id, *address, err)
+			log.Printf("[webui] 未找到手工节点 id=%d address=%q: %v", *id, *address, err)
 			jsonError(w, "manual node not found", http.StatusNotFound)
 			return nil, false
 		}
-		log.Printf("[webui] manual node id=%d address=%q lookup failed: %v", *id, *address, err)
+		log.Printf("[webui] 查询手工节点 id=%d address=%q 失败: %v", *id, *address, err)
 		jsonError(w, "failed to lookup manual node", http.StatusInternalServerError)
 		return nil, false
 	}

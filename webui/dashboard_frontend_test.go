@@ -363,6 +363,47 @@ func TestDashboardProtocolBadgesShowMixedNodeDualLabels(t *testing.T) {
 	}
 }
 
+// TestDashboardProtocolFilterUsesInboundCapabilities 以完整 predicate 及分支片段锁定
+// 可审计真值表；仓库当前没有 JS runtime，本测试不冒充浏览器行为测试。
+func TestDashboardProtocolFilterUsesInboundCapabilities(t *testing.T) {
+	const predicate = `function nodeSupportsInboundProtocol(p,protocol){const wanted=String(protocol||'').trim().toLowerCase();if(!wanted)return true;const actual=String((p&&p.protocol)||'').trim().toLowerCase();const dual=!!(p&&(p.dual_protocol===true||p.dual_protocol===1));if(dual)return wanted==='http'||wanted==='socks5';return actual===wanted}`
+	t.Run("predicate definition", func(t *testing.T) {
+		if !strings.Contains(dashboardBundle, predicate) {
+			t.Fatalf("dashboard missing auditable inbound-protocol predicate %q", predicate)
+		}
+	})
+
+	truthTableEvidence := []struct {
+		name     string
+		evidence string
+	}{
+		{name: "empty filter matches all", evidence: "if(!wanted)return true"},
+		{name: "dual marker is bool true or numeric one", evidence: "const dual=!!(p&&(p.dual_protocol===true||p.dual_protocol===1))"},
+		{name: "dual matches only http and socks5", evidence: "if(dual)return wanted==='http'||wanted==='socks5'"},
+		{name: "pure nodes match their stored protocol only", evidence: "return actual===wanted"},
+	}
+	for _, tt := range truthTableEvidence {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, tt.evidence) {
+				t.Fatalf("dashboard missing protocol truth-table evidence %q", tt.evidence)
+			}
+		})
+	}
+
+	t.Run("renderProxies uses predicate", func(t *testing.T) {
+		const usage = "let rows=allProxies.filter(p=>nodeSupportsInboundProtocol(p,protocol)&&(!region||regionOf(p)===region))"
+		if !strings.Contains(dashboardBundle, usage) {
+			t.Fatalf("renderProxies missing inbound-protocol predicate usage %q", usage)
+		}
+	})
+
+	t.Run("legacy exact predicate removed", func(t *testing.T) {
+		if strings.Contains(dashboardBundle, "(!protocol||p.protocol===protocol)") {
+			t.Fatal("renderProxies still uses exact stored-protocol predicate")
+		}
+	})
+}
+
 // TestDashboardNodeOrbit 验证总览节点分布图：按可用地域+延迟档聚合，session 画连线，rAF 动画。
 func TestDashboardNodeOrbit(t *testing.T) {
 	checks := []string{
@@ -426,14 +467,21 @@ func TestDashboardNodeOrbit(t *testing.T) {
 func TestDashboardCopyProxyCredPrefersStableNodeKey(t *testing.T) {
 	checks := []string{
 		"const nkey=String(p.node_key||'').trim()",
+		"function encodeNodeKeyPin(nkey)",
 		"btoa(unescape(encodeURIComponent(nkey)))",
+		"const pin='key-'+encodeNodeKeyPin(nkey)",
 		"const user=base+'-node-'+pin",
+		"无法复制：该网关节点缺少稳定 NodeKey，请刷新订阅或重新导入节点后重试",
 		"锁定节点身份，非出口IP",
 	}
 	for _, check := range checks {
 		if !strings.Contains(dashboardBundle, check) {
 			t.Fatalf("copyProxyCred missing stable identity pin %q", check)
 		}
+	}
+
+	if strings.Contains(dashboardBundle, "):addr; const user=base+'-node-'+pin") {
+		t.Fatal("copyProxyCred must not fall back to a temporary gateway address when node_key is empty")
 	}
 }
 
@@ -531,11 +579,11 @@ func TestDashboardHasSettingsEntry(t *testing.T) {
 	}
 }
 
-// TestDashboardAIReachabilityColumnAndBadges 验证 AI 解锁列（openai/claude/grok/gemini）：
-// 表头 AI 解锁；colspan 14；aiBadges 渲染正规短标签（ChatGPT/Claude/Grok/Gemini），绿畅通/红阻断/灰未知。
+// TestDashboardAIReachabilityColumnAndBadges 验证 AI 解锁列沿用已发布的短标签样式，
+// 并用绿色、红色、淡灰色分别表达畅通、阻断、未探测。
 func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 	checks := []string{
-		// AI 解锁表头（Orbit 正规名）。
+		`AI 解锁：ChatGPT / Claude / Grok / Gemini（绿色畅通 / 红色阻断 / 淡灰未探测）`,
 		`<span class="tx">AI 解锁</span>`,
 		// 两处 colspan 为 14（加载中 + 无匹配节点，含勾选列）。
 		"<td colspan=\"14\" class=\"empty\">加载中</td>",
@@ -544,17 +592,18 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 		"function aiBadges(",
 		// 行渲染引用 ai_reachability 字段。
 		"aiBadges(p.ai_reachability)",
-		// AI 列 body 用 ✓/✗/– 标记取代坏掉的品牌 SVG。
-		"const glyph=n===0?'✓':(n===1?'✗':'–')",
-		// 四服务短标签（设计稿风格：GPT/Cld/Grk/Gem，title 保全称）。
-		"['openai','GPT','ChatGPT']",
-		// 四服务紧凑标记容器。
+		"const defs=[['openai','GPT','ChatGPT'],['claude','Cld','Claude'],['grok','Grk','Grok'],['gemini','Gem','Gemini']]",
+		"const glyph=state==='unlocked'?'✓':(state==='blocked'?'✗':'–')",
 		`'<span class="ai-marks">'`,
 		"<span class=\"ai-mark '+cls+'\"",
-	}
-	// 回归防护：不得再残留坏掉的 AI 品牌图标函数 aiIconSVG。
-	if strings.Contains(dashboardBundle, "function aiIconSVG(") {
-		t.Fatal("dashboardHTML still defines broken brand aiIconSVG; AI column should render ✓/✗/– marks")
+		`.ai-mark.ok{color:var(--ok)`,
+		`.ai-mark.bad{color:var(--danger)`,
+		`--ai-unprobed:#6f7a96`,
+		`--ai-unprobed:#9aa4ba`,
+		`.ai-mark.na{color:var(--ai-unprobed)`,
+		`.filter-toggle{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border-radius:999px`,
+		`.filter-toggle[data-sel^="ai-"][data-state="unk"]{border-color:color-mix(in srgb,var(--ai-unprobed) 50%,var(--line));color:var(--ai-unprobed)`,
+		`const FILTER_CYCLE={'':'全部','unlocked':'畅通','blocked':'阻断','unprobed':'未探测','unknown':'未知'};`,
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -574,6 +623,44 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 		if strings.Contains(dashboardBundle, unsafe) {
 			t.Fatalf("dashboardHTML still has stale colspan %q (should be 14 with selection column)", unsafe)
 		}
+	}
+	if strings.Contains(dashboardBundle, "function aiIconSVG(") {
+		t.Fatal("AI 解锁样式偏离已发布的短标签合同")
+	}
+}
+
+func TestDashboardAdvancedFilterControls(t *testing.T) {
+	checks := []string{
+		`id="protocol-filter"`,
+		`id="region-filter"`,
+		`id="status-filter"`,
+		`id="source-filter"`,
+		`id="purity-filter"`,
+		`<option value="clean">低风险`,
+		`<option value="caution">中风险`,
+		`<option value="risky">高风险`,
+		`<option value="unprobed">未探测`,
+		`id="cf-filter"`,
+		`id="ai-openai-filter"`,
+		`id="ai-claude-filter"`,
+		`id="ai-grok-filter"`,
+		`id="ai-gemini-filter"`,
+		`id="latency-min"`,
+		`id="latency-max"`,
+		`id="keyword-filter"`,
+		"function purityStateOf(",
+	}
+	for _, check := range checks {
+		if !strings.Contains(dashboardBundle, check) {
+			t.Fatalf("dashboard missing advanced-filter contract %q", check)
+		}
+	}
+}
+
+func TestDashboardMobileFilterControlsKeepIntrinsicHitTargets(t *testing.T) {
+	const mobileFilterRule = "@media(max-width:720px){.toolbar.filters > .filter-toggle{flex:0 0 auto;min-width:max-content"
+	if !strings.Contains(dashboardBundle, mobileFilterRule) {
+		t.Fatalf("dashboard 缺少移动端筛选按钮稳定命中区域合同 %q", mobileFilterRule)
 	}
 }
 
@@ -721,10 +808,9 @@ func TestDashboardOpenAPITab(t *testing.T) {
 	}
 }
 
-// TestDashboardOrbitThemeTokens 锁定生产 CSS 主题 token 与 AI 短标签。
+// TestDashboardOrbitThemeTokens 锁定主题结构，不强制切换到另一套具体配色。
 func TestDashboardOrbitThemeTokens(t *testing.T) {
 	checks := []string{
-		"#04060e",
 		"#3b8dff",
 		"#2fbf87",
 		"--q-s:",

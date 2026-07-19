@@ -5,11 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -368,6 +372,73 @@ func TestLoginRateLimitLocksRepeatedFailures(t *testing.T) {
 	otherClient := serveLogin(t, server, "correct", "198.51.100.11:12345", false)
 	if otherClient.Code != http.StatusFound {
 		t.Fatalf("other client status = %d, want %d; body=%s", otherClient.Code, http.StatusFound, otherClient.Body.String())
+	}
+}
+
+// TestWebUIPasswordComparisonUsesConstantTimePrimitive 锁定登录密码比较的
+// 安全原语：行为测试无法可靠区分恒定时间与普通比较，因此检查生产函数
+// 明确调用 crypto/subtle.ConstantTimeCompare。
+func TestWebUIPasswordComparisonUsesConstantTimePrimitive(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller() failed")
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(testFile), "server.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse server.go: %v", err)
+	}
+	var matcher *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "webUIPasswordMatches" {
+			matcher = fn
+			break
+		}
+	}
+	if matcher == nil {
+		t.Fatal("webUIPasswordMatches helper is missing")
+	}
+	constantTimeCall := false
+	ast.Inspect(matcher.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "ConstantTimeCompare" {
+			if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "subtle" {
+				constantTimeCall = true
+			}
+		}
+		return true
+	})
+	if !constantTimeCall {
+		t.Fatal("webUIPasswordMatches must call subtle.ConstantTimeCompare")
+	}
+}
+
+func TestWebUIPasswordMatchesRejectsMalformedOrWrongLengthHash(t *testing.T) {
+	validHash := sha256Hex("correct")
+	tests := []struct {
+		name     string
+		password string
+		hash     string
+		want     bool
+	}{
+		{name: "valid", password: "correct", hash: validHash, want: true},
+		{name: "wrong password", password: "wrong", hash: validHash},
+		{name: "empty hash", password: "correct", hash: ""},
+		{name: "short hash", password: "correct", hash: validHash[:len(validHash)-2]},
+		{name: "long hash", password: "correct", hash: validHash + "00"},
+		{name: "non hex hash", password: "correct", hash: strings.Repeat("z", len(validHash))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := webUIPasswordMatches(tt.password, tt.hash); got != tt.want {
+				t.Fatalf("webUIPasswordMatches() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -926,7 +997,7 @@ func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProxyByIdentity() error = %v", err)
 	}
-	if err := server.storage.UpdateProxyExitInfo(proxy.ID, "133.242.1.2", "JP", 312, 0, "", 0, ""); err != nil {
+	if err := server.storage.UpdateProxyExitInfo(proxy.ID, "133.242.1.2", "JP", 312, 0, "", true, 0, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 	server.affinity.SetProxy("app01", proxy.ID, "127.0.0.1:31001", "jp")
@@ -1400,10 +1471,10 @@ func TestSubscriptionsAPIReportsPausedCount(t *testing.T) {
 	}
 }
 
-// TestLoginClientKeyPrefersForwardedForFirstSegment 覆盖 BUG-57：
-// 存在 X-Forwarded-For 时按其首段计数（反代场景下区分真实客户端），
-// 不存在时回退到 RemoteAddr 的 host。
-func TestLoginClientKeyPrefersForwardedForFirstSegment(t *testing.T) {
+// TestLoginClientKeyTrustsOnlyLoopbackProxyBoundary 覆盖 BUGFIX-042：
+// 仅 loopback 直接对端可提供 XFF，并从右向左取最近的合法 IP；
+// 非可信 IPv4/IPv6 直接对端一律回退到 RemoteAddr 的 host。
+func TestLoginClientKeyTrustsOnlyLoopbackProxyBoundary(t *testing.T) {
 	cases := []struct {
 		name       string
 		xff        string
@@ -1411,28 +1482,64 @@ func TestLoginClientKeyPrefersForwardedForFirstSegment(t *testing.T) {
 		want       string
 	}{
 		{
-			name:       "xff multi segment uses first",
+			name:       "trusted loopback xff uses nearest client from right",
 			xff:        "198.51.100.7, 10.0.0.1, 10.0.0.2",
-			remoteAddr: "10.0.0.9:5555",
-			want:       "198.51.100.7",
+			remoteAddr: "127.0.0.1:5555",
+			want:       "10.0.0.2",
 		},
 		{
-			name:       "xff single segment",
+			name:       "trusted loopback xff single segment",
 			xff:        "203.0.113.42",
-			remoteAddr: "10.0.0.9:5555",
+			remoteAddr: "[::1]:5555",
 			want:       "203.0.113.42",
 		},
 		{
-			name:       "no xff falls back to remoteaddr host",
-			xff:        "",
+			name:       "trusted loopback xff supports ipv6 client",
+			xff:        "198.51.100.7, not-an-ip, 2001:db8::7",
+			remoteAddr: "127.0.0.1:5555",
+			want:       "2001:db8::7",
+		},
+		{
+			name:       "trusted loopback skips malformed rightmost value",
+			xff:        "198.51.100.7, 2001:db8::8, not-an-ip",
+			remoteAddr: "[::1]:5555",
+			want:       "2001:db8::8",
+		},
+		{
+			name:       "trusted loopback handles long malformed prefix",
+			xff:        strings.Repeat("x", 64<<10) + ", 203.0.113.77",
+			remoteAddr: "127.0.0.1:5555",
+			want:       "203.0.113.77",
+		},
+		{
+			name:       "direct peer ignores forged xff",
+			xff:        "198.51.100.7, 10.0.0.1",
 			remoteAddr: "192.0.2.50:44321",
 			want:       "192.0.2.50",
 		},
 		{
-			name:       "empty xff falls back to remoteaddr host",
-			xff:        "   ",
+			name:       "private non loopback peer ignores forged xff",
+			xff:        "198.51.100.8",
+			remoteAddr: "10.0.0.9:5555",
+			want:       "10.0.0.9",
+		},
+		{
+			name:       "ipv6 non loopback peer ignores forged xff",
+			xff:        "198.51.100.9",
+			remoteAddr: "[2001:db8::9]:5555",
+			want:       "2001:db8::9",
+		},
+		{
+			name:       "invalid xff falls back to remoteaddr host",
+			xff:        "not-an-ip",
 			remoteAddr: "192.0.2.51:1",
 			want:       "192.0.2.51",
+		},
+		{
+			name:       "empty xff falls back to remoteaddr host",
+			xff:        "   ",
+			remoteAddr: "192.0.2.52:1",
+			want:       "192.0.2.52",
 		},
 	}
 	for _, tc := range cases {
@@ -1449,14 +1556,25 @@ func TestLoginClientKeyPrefersForwardedForFirstSegment(t *testing.T) {
 	}
 }
 
-// TestLoginRateLimitDistinguishesForwardedForClients 端到端验证 BUG-57：
-// 反代之后，不同真实客户端（不同 XFF 首段）即使 RemoteAddr 相同也应被独立限速，
+func TestLoginClientKeyUsesRightmostForwardedHeaderField(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/login", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Add("X-Forwarded-For", "198.51.100.7")
+	req.Header.Add("X-Forwarded-For", "203.0.113.78")
+
+	if got := loginClientKey(req); got != "203.0.113.78" {
+		t.Fatalf("loginClientKey() = %q, want rightmost header field %q", got, "203.0.113.78")
+	}
+}
+
+// TestLoginRateLimitDistinguishesForwardedForClients 端到端验证可信反代边界：
+// loopback 反代之后，不同真实客户端即使 RemoteAddr 相同也应被独立限速，
 // 一个被锁定不影响另一个。
 func TestLoginRateLimitDistinguishesForwardedForClients(t *testing.T) {
 	server := newTestServer(t)
 	server.cfg.WebUIPasswordHash = sha256Hex("correct")
 
-	const proxyRemote = "10.0.0.9:5555" // 所有请求经同一反代，RemoteAddr 相同。
+	const proxyRemote = "127.0.0.1:5555" // 同机可信反代，RemoteAddr 相同。
 
 	for i := 0; i < maxLoginFailures; i++ {
 		rec := serveLoginXFF(t, server, "wrong", proxyRemote, "198.51.100.20")
@@ -1475,6 +1593,25 @@ func TestLoginRateLimitDistinguishesForwardedForClients(t *testing.T) {
 	other := serveLoginXFF(t, server, "correct", proxyRemote, "198.51.100.21")
 	if other.Code != http.StatusFound {
 		t.Fatalf("other XFF client status = %d, want %d; body=%s", other.Code, http.StatusFound, other.Body.String())
+	}
+}
+
+// TestLoginRateLimitIgnoresForgedForwardedForDirectClient 回归 BUGFIX-042：
+// 直接暴露时攻击者轮换 XFF 不能为每次尝试创建新的限速桶。
+func TestLoginRateLimitIgnoresForgedForwardedForDirectClient(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.WebUIPasswordHash = sha256Hex("correct")
+	const directRemote = "198.51.100.30:5555"
+
+	for i := 0; i < maxLoginFailures; i++ {
+		rec := serveLoginXFF(t, server, "wrong", directRemote, fmt.Sprintf("203.0.113.%d", i+1))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("failure %d status = %d, want %d", i+1, rec.Code, http.StatusOK)
+		}
+	}
+	locked := serveLoginXFF(t, server, "correct", directRemote, "203.0.113.99")
+	if locked.Code != http.StatusTooManyRequests {
+		t.Fatalf("direct client with rotated XFF status = %d, want %d", locked.Code, http.StatusTooManyRequests)
 	}
 }
 

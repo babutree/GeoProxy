@@ -76,9 +76,14 @@ type Storage struct {
 }
 
 const (
-	SourceManual       = "manual"
-	SourceSubscription = "subscription"
-	legacySourceCustom = "custom"
+	SourceManual                   = "manual"
+	SourceSubscription             = "subscription"
+	legacySourceCustom             = "custom"
+	selectableSubscriptionScopeSQL = `(proxies.source != 'subscription' OR EXISTS (
+		SELECT 1 FROM subscriptions
+		WHERE subscriptions.id = proxies.subscription_id
+		  AND subscriptions.status != 'paused'
+	))`
 )
 
 func New(dbPath string) (*Storage, error) {
@@ -289,7 +294,7 @@ func (s *Storage) migrateLocationColumn() error {
 		return tx.Commit()
 	}
 
-	log.Println("[storage] migrating: renaming location to exit_location")
+	log.Println("[storage] 正在迁移：将 location 重命名为 exit_location")
 	if err := addProxyColumnIfMissing(tx, "exit_location", `ALTER TABLE proxies ADD COLUMN exit_location TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}

@@ -26,6 +26,7 @@ type SingBoxProcess struct {
 	binPath    string
 	configDir  string
 	configFile string
+	initErr    error
 	basePort   int
 	portOffset int            // 端口范围偏移；已加载节点保持原端口，新节点从当前范围后续端口追加
 	portMap    map[string]int // nodeKey → 本地 mixed 端口（单端口同时服务 SOCKS5 与 HTTP）
@@ -38,9 +39,8 @@ type SingBoxProcess struct {
 	assembly   assemblyDiagnostics
 }
 
-// assemblyDiagnostics records the outcome of one in-memory configuration
-// assembly. Rejections are safe to omit from a commit; allocation failures are
-// not, because they mean an otherwise buildable target did not reach runtime.
+// assemblyDiagnostics 记录一次内存配置组装的结果。rejected 节点可在提交时安全忽略；
+// segmentFull 不可忽略，因为它表示原本可构建的目标未能进入运行态。
 type assemblyDiagnostics struct {
 	accepted    []ParsedNode
 	rejected    []assemblyRejectedNode
@@ -100,29 +100,46 @@ const portRangeSize = 5000
 
 // NewSingBoxProcess 创建 sing-box 进程管理器
 func NewSingBoxProcess(binPath, dataDir string, basePort int) *SingBoxProcess {
-	if dataDir == "" {
-		// 没设置 DATA_DIR 时，使用当前工作目录下的 singbox/
-		wd, _ := os.Getwd()
-		dataDir = wd
+	s := &SingBoxProcess{
+		binPath:  binPath,
+		basePort: basePort,
+		portMap:  make(map[string]int),
+		status:   SingBoxStatusNoTunnelNodes,
+		reason:   SingBoxStatusNoTunnelNodes,
 	}
-	configDir, _ := filepath.Abs(filepath.Join(dataDir, "singbox"))
-	os.MkdirAll(configDir, 0755)
+	if strings.TrimSpace(dataDir) == "" {
+		s.initErr = fmt.Errorf("sing-box 数据目录不能为空")
+		s.status = SingBoxStatusFailed
+		s.reason = "data_dir_invalid"
+		return s
+	}
 
-	return &SingBoxProcess{
-		binPath:    binPath,
-		configDir:  configDir,
-		configFile: filepath.Join(configDir, "config.json"),
-		basePort:   basePort,
-		portMap:    make(map[string]int),
-		status:     SingBoxStatusNoTunnelNodes,
-		reason:     SingBoxStatusNoTunnelNodes,
+	configDir, err := filepath.Abs(filepath.Join(dataDir, "singbox"))
+	if err != nil {
+		s.initErr = fmt.Errorf("解析 sing-box 数据目录 %q 失败: %w", dataDir, err)
+		s.status = SingBoxStatusFailed
+		s.reason = "data_dir_invalid"
+		return s
 	}
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		s.initErr = fmt.Errorf("创建 sing-box 数据目录 %q 失败: %w", configDir, err)
+		s.status = SingBoxStatusFailed
+		s.reason = "data_dir_unavailable"
+		return s
+	}
+	s.configDir = configDir
+	s.configFile = filepath.Join(configDir, "config.json")
+	return s
 }
 
 // Reload 重新加载节点配置并重启 sing-box
 func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.initErr != nil {
+		s.setStatusLocked(SingBoxStatusFailed, s.reason, 0)
+		return s.initErr
+	}
 
 	// 过滤出需要 sing-box 转换的节点
 	var tunnelNodes []ParsedNode
@@ -246,15 +263,14 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	return nil
 }
 
-// incompletePortAllocationError preserves the strict fallback for callers
-// without assembler evidence: a build failure is explicit, any other missing
-// port remains unknown rather than being guessed as a full segment.
+// incompletePortAllocationError 为缺少组装器证据的调用方保留严格回退：
+// buildOutbound 失败会被明确分类，其余端口缺失保持 unknown，不臆测为 segmentFull。
 func incompletePortAllocationError(nodes []ParsedNode, portMap map[string]int) error {
 	return incompletePortAllocationErrorWithDiagnostics(nodes, portMap, assemblyDiagnostics{})
 }
 
-// incompletePortAllocationErrorWithDiagnostics distinguishes explicit build
-// rejections, allocator-proven segment exhaustion, and unknown missing ports.
+// incompletePortAllocationErrorWithDiagnostics 区分明确的 buildOutbound 拒绝、
+// 分配器已证实的 segmentFull，以及原因未知的端口缺失。
 func incompletePortAllocationErrorWithDiagnostics(nodes []ParsedNode, portMap map[string]int, diagnostics assemblyDiagnostics) error {
 	var missing []ParsedNode
 	for _, n := range nodes {
@@ -401,8 +417,8 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 	return config, portMap
 }
 
-// assembleConfigWithDiagnostics produces the configuration together with the
-// exact acceptance and allocation decisions made by this assembler.
+// assembleConfigWithDiagnostics 同时返回配置，以及本次组装器作出的精确接纳、
+// 拒绝和端口分配诊断。
 func (s *SingBoxProcess) assembleConfigWithDiagnostics(nodes []ParsedNode) (map[string]interface{}, map[string]int, assemblyDiagnostics) {
 	oldPortMap := make(map[string]int, len(s.portMap))
 	for key, port := range s.portMap {
@@ -466,7 +482,8 @@ func (s *SingBoxProcess) assembleConfigWithDiagnostics(nodes []ParsedNode) (map[
 
 		mixedPort := allocPort(key, oldPortMap)
 		if mixedPort == 0 {
-			// 分片端口段已满：跳过该节点（不生成入站/出站/路由，不占端口），与 buildOutbound 失败同一处理。
+			// 分片端口段已满：记录为 segmentFull 并由上层 fail-closed；不同于
+			// buildOutbound 失败归入 rejected 后允许其余可构建节点继续。
 			log.Printf("[custom] 分片端口段已满，跳过节点 %s (%s)", node.Name, node.Type)
 			diagnostics.segmentFull = append(diagnostics.segmentFull, node)
 			continue
@@ -1118,9 +1135,8 @@ func (s *SingBoxProcess) GetPortMap() map[string]int {
 	return result
 }
 
-// GetAssemblyDiagnostics returns a snapshot of the latest configuration
-// assembly so orchestrators can distinguish rejected nodes from incomplete
-// allocation without inferring reasons from a missing port.
+// GetAssemblyDiagnostics 返回最近一次配置组装诊断的快照，供编排层区分明确拒绝
+// 与未完成的端口分配，无需仅凭端口缺失反推原因。
 func (s *SingBoxProcess) GetAssemblyDiagnostics() assemblyDiagnostics {
 	s.mu.Lock()
 	defer s.mu.Unlock()

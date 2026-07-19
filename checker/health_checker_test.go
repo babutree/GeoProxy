@@ -49,20 +49,12 @@ type countingStore struct {
 	updates    int
 }
 
-func (s *countingStore) GetQualityDistribution() (map[string]int, error) {
-	return map[string]int{}, nil
-}
-
-func (s *countingStore) CountAll() (int, error) {
-	return len(s.batch), nil
-}
-
-func (s *countingStore) GetBatchForHealthCheck(int, bool) ([]storage.Proxy, error) {
+func (s *countingStore) GetBatchForHealthCheck(int) ([]storage.Proxy, error) {
 	s.batchCalls.Add(1)
 	return s.batch, nil
 }
 
-func (s *countingStore) UpdateProxyExitInfo(int64, string, string, int, float64, string, int, string) error {
+func (s *countingStore) UpdateProxyExitInfo(int64, string, string, int, float64, string, bool, int, string) error {
 	s.mu.Lock()
 	s.updates++
 	s.mu.Unlock()
@@ -72,6 +64,23 @@ func (s *countingStore) UpdateProxyExitInfo(int64, string, string, int, float64,
 func (s *countingStore) RecordProxyUseByID(int64, bool) error { return nil }
 
 func (s *countingStore) RecordProxyFailureByID(int64, int) error { return nil }
+
+// TestRunOnceChecksSGradeNode 覆盖 BUG-024：健康检查必须处理批次中的 S 级节点，
+// 不能依据质量分布把它们永久排除。
+func TestRunOnceChecksSGradeNode(t *testing.T) {
+	store := &countingStore{
+		batch: []storage.Proxy{{ID: 1, Address: "s-grade:8080", Protocol: "http", QualityGrade: "S", Status: "active"}},
+	}
+	v := &slowValidator{}
+	cfg := &config.Config{HealthCheckBatchSize: 1, HealthIntervalMinutes: 1}
+	hc := newHealthCheckerForTest(store, v, cfg)
+
+	hc.RunOnce()
+
+	if got := v.calls.Load(); got != 1 {
+		t.Fatalf("ValidateStream calls=%d, want 1", got)
+	}
+}
 
 // TestRunOnceSkipsWhenAlreadyRunning 复现：两次重叠 RunOnce 会并发跑完探测；
 // 期望后发 RunOnce 在已有检查进行中时直接跳过，避免 fail 计数/禁用双写。

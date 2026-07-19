@@ -14,14 +14,14 @@ func (s *Storage) AddProxy(address, protocol string) error {
 		address, protocol,
 	)
 	if err != nil {
-		log.Printf("[storage] AddProxy %s error: %v", address, err)
+		log.Printf("[storage] AddProxy %s 失败: %v", address, err)
 		return err
 	}
 
 	// 检查是否真的插入了
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
-		log.Printf("[storage] AddProxy %s ignored (already exists or constraint)", address)
+		log.Printf("[storage] AddProxy %s 已忽略（节点已存在或违反约束）", address)
 	}
 	return nil
 }
@@ -43,7 +43,7 @@ func (s *Storage) AddProxies(proxies []Proxy) error {
 
 	for _, p := range proxies {
 		if _, err := stmt.Exec(p.Address, p.Protocol); err != nil {
-			log.Printf("insert proxy %s error: %v", p.Address, err)
+			log.Printf("[storage] 插入代理 %s 失败: %v", p.Address, err)
 			return err
 		}
 	}
@@ -71,7 +71,7 @@ func (s *Storage) AddProxyWithSource(address, protocol, source string, subscript
 		address, protocol, source, subID,
 	)
 	if err != nil {
-		log.Printf("[storage] AddProxyWithSource %s error: %v", address, err)
+		log.Printf("[storage] AddProxyWithSource %s 失败: %v", address, err)
 		return err
 	}
 	return nil

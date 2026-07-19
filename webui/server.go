@@ -109,28 +109,44 @@ func clearSessionCookie(r *http.Request) *http.Cookie {
 
 // loginClientKey 计算登录限速的客户端标识键。
 //
-// 口径与 cookieSecure 一致：信任前置反向代理设置的 XFF 头。当存在 X-Forwarded-For 时，
-// 取其第一段（最靠近客户端的地址）作为限速键，否则回退到 r.RemoteAddr 的 host。
-// 这样部署在反代之后时，不会因所有请求的 RemoteAddr 都是反代地址而把全网用户锁进同一个桶。
-//
-// 安全说明：XFF 可被客户端伪造。但这里是登录“限速”而非“鉴权”——伪造 XFF 只会让攻击者
-// 被独立计数到一个自己控制的键上，无法借此绕过针对真实来源的锁定，也无法冒充他人身份。
-// 若未部署可信反代却直接暴露，攻击者可通过轮换伪造 XFF 规避限速；此为已知权衡，需靠前置
-// 可信反代正确设置 XFF 来保证。
+// 当前没有可配置的可信反代列表，因此只把 loopback 直接对端视为明确可信边界。
+// 对该边界内的 XFF 从右向左取最近的合法 IP，避免信任客户端可追加的最左值；
+// 其他直接对端一律忽略 XFF，防止攻击者轮换伪造头绕过限速。
 func loginClientKey(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// XFF 形如 "client, proxy1, proxy2"；第一段是最原始的客户端地址。
-		first := xff
-		if idx := strings.IndexByte(xff, ','); idx >= 0 {
-			first = xff[:idx]
-		}
-		if first = strings.TrimSpace(first); first != "" {
-			return first
+	remoteHost := remoteAddressHost(r.RemoteAddr)
+	if isLoopbackRemote(r.RemoteAddr) {
+		if forwardedIP := rightmostForwardedIP(r.Header.Values("X-Forwarded-For")); forwardedIP != "" {
+			return forwardedIP
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	return remoteHost
+}
+
+func rightmostForwardedIP(values []string) string {
+	for valueIndex := len(values) - 1; valueIndex >= 0; valueIndex-- {
+		value := values[valueIndex]
+		end := len(value)
+		for end > 0 {
+			start := end - 1
+			for start >= 0 && value[start] != ',' {
+				start--
+			}
+			if ip := net.ParseIP(strings.TrimSpace(value[start+1 : end])); ip != nil {
+				return ip.String()
+			}
+			if start < 0 {
+				break
+			}
+			end = start
+		}
+	}
+	return ""
+}
+
+func remoteAddressHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil || host == "" {
-		return r.RemoteAddr
+		return remoteAddr
 	}
 	return host
 }
@@ -215,15 +231,15 @@ func (s *Server) Start() {
 	// 添加日志中间件；跳过前端高频轮询端点与容器健康探活，避免访问日志自我膨胀刷屏。
 	loggedMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isNoiseRequest(r) {
-			log.Printf("[webui] %s %s | RemoteAddr: %s", r.Method, r.URL.Path, r.RemoteAddr)
+			log.Printf("[webui] %s %s | 远端地址: %s", r.Method, r.URL.Path, r.RemoteAddr)
 		}
 		mux.ServeHTTP(w, r)
 	})
 
-	log.Printf("WebUI listening on %s", cfg.WebUIPort)
+	log.Printf("[webui] 服务监听 %s", cfg.WebUIPort)
 	go func() {
 		if err := http.ListenAndServe(cfg.WebUIPort, loggedMux); err != nil {
-			log.Fatalf("webui: %v", err)
+			log.Fatalf("[webui] 服务启动失败: %v", err)
 		}
 	}()
 }
@@ -265,11 +281,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/assets/dashboard.css", s.handleAssetCSS)
 	mux.HandleFunc("/assets/dashboard.js", s.handleAssetJS)
 
-	// Public API: only authentication state, with no business data.
+	// 公共 API：只返回认证状态，不包含业务数据。
 	mux.HandleFunc("/api/auth/check", s.apiAuthCheck)
 	mux.HandleFunc("/api/public-ip", s.authMiddleware(s.apiPublicIP))
 
-	// Business APIs require login. There is no guest/read-only role.
+	// 业务 API 必须登录；系统没有访客或只读角色。
 	mux.HandleFunc("/api/stats", s.authMiddleware(s.apiStats))
 	mux.HandleFunc("/api/proxies", s.authMiddleware(s.apiProxies))
 	mux.HandleFunc("/api/logs", s.authMiddleware(s.apiLogs))
@@ -299,13 +315,13 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/manual-node/note", s.authMiddleware(s.apiManualNodeNote))
 	mux.HandleFunc("/api/manual-node/delete", s.authMiddleware(s.apiManualNodeDelete))
 
-	// API Key management (session + CSRF only; never accept API Key for privilege escalation).
+	// API Key 管理仅接受 session + CSRF，绝不允许用 API Key 提权。
 	mux.HandleFunc("/api/apikeys", s.authMiddleware(s.apiAPIKeysList))
 	mux.HandleFunc("/api/apikey/create", s.authMiddleware(s.apiAPIKeyCreate))
 	mux.HandleFunc("/api/apikey/revoke", s.authMiddleware(s.apiAPIKeyRevoke))
 	mux.HandleFunc("/api/apikey/delete", s.authMiddleware(s.apiAPIKeyDelete))
 
-	// Read-only external API (API Key auth).
+	// 只读外部 API 使用 API Key 鉴权。
 	mux.HandleFunc("/api/v1/ping", s.apiKeyMiddleware(s.apiV1Ping))
 	mux.HandleFunc("/api/v1/nodes", s.apiKeyMiddleware(s.apiV1Nodes))
 	mux.HandleFunc("/api/v1/occupancy", s.apiKeyMiddleware(s.apiV1Occupancy))
@@ -476,8 +492,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	password := r.FormValue("password")
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
-	if hash != s.configSnapshot().WebUIPasswordHash {
+	if !webUIPasswordMatches(password, s.configSnapshot().WebUIPasswordHash) {
 		recordLoginFailure(r, now)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, loginHTMLWithError)
@@ -487,6 +502,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	token := newSession()
 	http.SetCookie(w, sessionCookie(r, token))
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func webUIPasswordMatches(password, encodedHash string) bool {
+	if len(encodedHash) != sha256.Size*2 {
+		return false
+	}
+	expected := make([]byte, sha256.Size)
+	n, err := hex.Decode(expected, []byte(encodedHash))
+	if err != nil || n != sha256.Size {
+		return false
+	}
+	actual := sha256.Sum256([]byte(password))
+	return subtle.ConstantTimeCompare(actual[:], expected) == 1
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

@@ -6,45 +6,45 @@ package webui
 
 const dashboardCSS = `/* Orbit SSOT tokens+layout from docs/orbit-dashboard.html */
 
-/* ===================== 设计令牌:深空主题() ===================== */
+/* ===================== 设计令牌：中性石墨主题（Orbit 蓝仅作信号） ===================== */
 :root[data-theme="space"]{
- --space-0:#04060e; --space-1:#080d1a; --space-2:#0e1626; --space-3:#152036;
- --panel:rgba(14,22,38,.55); --panel-solid:#0e1626; --panel-2:rgba(20,32,54,.62);
- --ink:#eaf1ff; --ink-2:#8fa3c4; --muted:#6f819f;
- --line:rgba(90,160,255,.16); --hairline:rgba(90,160,255,.09);
+ --space-0:#111315; --space-1:#17191c; --space-2:#1c2024; --space-3:#252a2f;
+ --panel:rgba(28,32,36,.96); --panel-solid:#1c2024; --panel-2:#23282d;
+ --ink:#f1f3f5; --ink-2:#c3c8ce; --muted:#9098a1;
+ --line:rgba(226,232,240,.14); --hairline:rgba(226,232,240,.08);
  --accent:#3b8dff; --accent-ink:#fff;
  --q-s:#7cc4ff; --q-a:#3b8dff; --q-b:#1f56c8; --q-c:#5a6480;
- --ok:#2fbf87; --warn:#f5b544; --danger:#ff5c7a; --gray:#6f7a96;
+ --ok:#2fbf87; --warn:#f5b544; --danger:#ff5c7a; --gray:#7d858d; --ai-unprobed:#6f7a96;
  --sun-core:#fff; --sun-halo:#9ccaff; --sun-energy:#3b8dff;
  --glow-s:0 0 12px rgba(124,196,255,.6),0 0 34px rgba(124,196,255,.28);
  --glow-a:0 0 12px rgba(59,141,255,.55),0 0 34px rgba(59,141,255,.24);
  --glow-b:0 0 12px rgba(31,86,200,.5),0 0 30px rgba(31,86,200,.2);
  --glow-c:0 0 10px rgba(90,100,128,.4),0 0 22px rgba(90,100,128,.16);
  --glow-ok:0 0 10px rgba(47,191,135,.6);
- --sh-md:0 12px 40px rgba(0,0,0,.55),0 2px 8px rgba(0,0,0,.4);
- --sh-lg:0 30px 80px rgba(0,0,0,.65);
- --radius:16px; --ease:cubic-bezier(.16,1,.3,1);
+ --sh-md:0 1px 2px rgba(0,0,0,.28);
+ --sh-lg:0 12px 32px rgba(0,0,0,.42);
+ --radius:8px; --ease:cubic-bezier(.16,1,.3,1);
  --t-micro:150ms; --t-panel:280ms;
- --bg-canvas:radial-gradient(120% 120% at 50% 0%,#0b1226 0%,#070c18 46%,#04060e 100%);
+ --bg-canvas:#111315;
 }
-/* light tokens */
+/* 日间主题同样使用中性冷灰，避免把功能区染成单一强调色。 */
 :root[data-theme="day"]{
- --space-0:#eef3fb; --space-1:#f6f9fe; --space-2:#fff; --space-3:#e9f0fb;
- --panel:#fff; --panel-solid:#fff; --panel-2:#f4f8ff;
- --ink:#0f1b2e; --ink-2:#3a4a63; --muted:#5f6f8c;
- --line:#e2e9f4; --hairline:rgba(30,60,110,.06);
+ --space-0:#f3f4f6; --space-1:#f8f9fa; --space-2:#fff; --space-3:#e5e7eb;
+ --panel:#fff; --panel-solid:#fff; --panel-2:#f6f7f8;
+ --ink:#181b1f; --ink-2:#41484f; --muted:#68717a;
+ --line:#d9dde2; --hairline:rgba(31,35,40,.08);
  --accent:#1d6fe0; --accent-ink:#fff;
  --q-s:#4da3ff; --q-a:#1d6fe0; --q-b:#1546a8; --q-c:#8a93a6;
- --ok:#12a150; --warn:#c98a12; --danger:#e0485f; --gray:#9aa4ba;
+ --ok:#12a150; --warn:#c98a12; --danger:#e0485f; --gray:#9299a1; --ai-unprobed:#9aa4ba;
  --sun-core:#fff; --sun-halo:#8fc0ff; --sun-energy:#1d6fe0;
  --glow-s:0 4px 14px rgba(77,163,255,.28); --glow-a:0 4px 14px rgba(29,111,224,.24);
  --glow-b:0 4px 12px rgba(21,70,168,.2); --glow-c:0 2px 8px rgba(138,147,166,.28);
  --glow-ok:0 3px 10px rgba(18,161,80,.3);
- --sh-md:0 8px 30px rgba(30,60,110,.10),0 2px 6px rgba(30,60,110,.06);
- --sh-lg:0 24px 60px rgba(30,60,110,.16);
- --radius:16px; --ease:cubic-bezier(.16,1,.3,1);
+ --sh-md:0 1px 2px rgba(31,35,40,.10);
+ --sh-lg:0 12px 32px rgba(31,35,40,.16);
+ --radius:8px; --ease:cubic-bezier(.16,1,.3,1);
  --t-micro:150ms; --t-panel:280ms;
- --bg-canvas:radial-gradient(120% 120% at 50% 0%,#f2f7ff 0%,#e8f0fb 100%);
+ --bg-canvas:#f3f4f6;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -58,47 +58,17 @@ h1,h2,h3{margin:0}
 a{color:inherit;text-decoration:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
 
-/* 星点 / 星云背景层(仅深空主题可见,属氛围层) */
-.starfield{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
-[data-theme="day"] .starfield,[data-theme="light"] .starfield{opacity:0}
-.stars{position:absolute;inset:-50%;
- background-image:
-  radial-gradient(1.4px 1.4px at 20% 30%,rgba(220,235,255,.9),transparent),
-  radial-gradient(1.2px 1.2px at 70% 60%,rgba(180,215,255,.8),transparent),
-  radial-gradient(1px 1px at 40% 80%,rgba(255,255,255,.75),transparent),
-  radial-gradient(1.6px 1.6px at 85% 20%,rgba(190,220,255,.85),transparent),
-  radial-gradient(1px 1px at 55% 45%,rgba(225,240,255,.7),transparent),
-  radial-gradient(1.2px 1.2px at 10% 65%,rgba(200,225,255,.7),transparent);
- background-size:520px 520px,360px 360px,300px 300px,600px 600px,420px 420px,480px 480px;
- animation:drift 120s linear infinite}
-.nebula{position:absolute;inset:0;
- background:
-  radial-gradient(40% 30% at 22% 18%,rgba(59,141,255,.16),transparent 70%),
-  radial-gradient(36% 28% at 82% 26%,rgba(124,196,255,.11),transparent 70%),
-  radial-gradient(44% 34% at 62% 88%,rgba(31,86,200,.12),transparent 70%);
- filter:blur(6px);animation:nebula 40s ease-in-out infinite alternate}
-@keyframes drift{to{transform:translate(-260px,-260px)}}
-@keyframes nebula{to{transform:translate(0,-20px) scale(1.05);opacity:.85}}
-/* 氛围层降级:reduced-motion 时停这些装饰循环。信息层(公转)由 rAF 控,不在此列。 */
-@media (prefers-reduced-motion:reduce){
- .stars,.nebula{animation-play-state:paused!important}
-}
-
 /* ===================== 布局骨架 ===================== */
 .app{position:relative;z-index:1;display:grid;grid-template-columns:236px 1fr;min-height:100vh;
  transition:grid-template-columns var(--t-panel) var(--ease)}
 .app.nav-collapsed{grid-template-columns:74px 1fr}
 .sidebar{position:sticky;top:0;height:100vh;min-width:0;display:flex;flex-direction:column;overflow:hidden;
- background:linear-gradient(180deg,var(--panel-2),var(--panel));
- border-right:1px solid var(--line);backdrop-filter:blur(14px)}
+ background:var(--panel-solid);
+ border-right:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:12px;padding:18px;border-bottom:1px solid var(--hairline)}
 .app.nav-collapsed .brand{justify-content:center;padding:18px 0}
 .brand .mark{position:relative;flex:0 0 auto;width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
- background:radial-gradient(circle at 35% 30%,#dbeaff,#3b8dff 60%,#1546a8);
- box-shadow:var(--glow-a);color:#fff;font-weight:900;font-size:13px;letter-spacing:.02em}
-.brand .mark::after{content:"";position:absolute;inset:-4px;border-radius:14px;
- background:conic-gradient(from 0deg,transparent,rgba(59,141,255,.6),transparent 40%);
- animation:spin 6s linear infinite;z-index:-1;filter:blur(2px)}
+ background:var(--accent);box-shadow:none;color:#fff;font-weight:900;font-size:13px;letter-spacing:.02em}
 .brand .bt{min-width:0;font-weight:800;letter-spacing:.02em;font-size:15px;white-space:nowrap;
  transition:opacity var(--t-micro),width var(--t-micro)}
 .brand .bt small{display:block;font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.18em;text-transform:uppercase}
@@ -117,7 +87,7 @@ a{color:inherit;text-decoration:none}
 .app.nav-collapsed .navitem .t{opacity:0;width:0}
 .navitem:hover{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--ink)}
 .navitem.active{color:var(--ink);border-color:color-mix(in srgb,var(--accent) 40%,transparent);
- background:color-mix(in srgb,var(--accent) 16%,transparent);box-shadow:var(--glow-a)}
+ background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .navitem.active .ico svg{color:var(--accent);filter:drop-shadow(0 0 6px color-mix(in srgb,var(--accent) 70%,transparent))}
 /* 折叠钮:侧栏左下(D 决策,不再放 logo 前) */
 .sidefoot{padding:12px;border-top:1px solid var(--hairline);display:flex;flex-direction:column;gap:8px}
@@ -134,9 +104,8 @@ a{color:inherit;text-decoration:none}
 .app.nav-collapsed .sidefoot .pill .t{opacity:0;width:0}
 
 .main{min-width:0;display:flex;flex-direction:column}
-.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;padding:0 20px;height:60px;
- background:color-mix(in srgb,var(--panel-solid) 82%,transparent);
- border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
+.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;padding:0 16px;height:56px;
+ background:var(--panel-solid);border-bottom:1px solid var(--line)}
 .topbar h1{font-size:15px;font-weight:800;letter-spacing:.01em}
 .spacer{flex:1}
 .topbar .actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
@@ -149,16 +118,16 @@ a{color:inherit;text-decoration:none}
 .iconbtn:hover{border-color:var(--accent);color:var(--accent);box-shadow:var(--glow-a)}
 .iconbtn:active{transform:scale(.94)}
 .iconbtn svg{width:19px;height:19px}
-.content{padding:24px;max-width:1440px;width:100%;margin:0 auto}
+.content{padding:16px;max-width:none;width:100%;margin:0 auto}
 
 /* ===================== 仪表读数卡 ===================== */
-.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:20px}
-.metric{position:relative;padding:16px 18px;border-radius:var(--radius);overflow:hidden;
- background:linear-gradient(180deg,var(--panel-2),var(--panel));border:1px solid var(--line);
- box-shadow:var(--sh-md);transition:transform var(--t-panel) var(--ease),border-color var(--t-panel)}
-.metric:hover{transform:translateY(-3px);border-color:color-mix(in srgb,var(--accent) 34%,var(--line))}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:12px}
+.metric{position:relative;padding:12px 14px;border-radius:var(--radius);overflow:hidden;
+ background:var(--panel);border:1px solid var(--line);
+ box-shadow:var(--sh-md);transition:border-color var(--t-panel)}
+.metric:hover{border-color:color-mix(in srgb,var(--accent) 34%,var(--line))}
 .metric::before{content:"";position:absolute;left:0;top:0;height:3px;width:100%;
- background:linear-gradient(90deg,var(--q-s),var(--q-a),var(--q-b),var(--q-c))}
+ background:var(--accent)}
 .metric .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700}
 .metric .v{font-size:30px;font-weight:800;letter-spacing:-.02em;margin:6px 0 2px;
  text-shadow:0 0 20px color-mix(in srgb,var(--accent) 40%,transparent)}
@@ -171,17 +140,17 @@ a{color:inherit;text-decoration:none}
 .overview-side .card{margin:0}
 .card.orbit-card{min-width:0;margin:0}
 .card{border-radius:var(--radius);border:1px solid var(--line);overflow:hidden;
- background:linear-gradient(180deg,var(--panel-2),var(--panel));box-shadow:var(--sh-md)}
-.card-h,.card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--hairline);flex-wrap:wrap}
+ background:var(--panel);box-shadow:var(--sh-md)}
+.card-h,.card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border-bottom:1px solid var(--hairline);flex-wrap:wrap}
 .card-h h3{font-size:14px;font-weight:800;letter-spacing:.01em;display:flex;align-items:center;gap:8px}
 .card-h .sub{font-size:11px;color:var(--muted)}
 .card-h .tools{display:flex;gap:8px;flex-wrap:wrap}
-.card-b,.card-body{padding:18px}
+.card-b,.card-body{padding:14px}
 /* 轨道卡:被 grid 拉高时,让 card-b 纵向居中其内容(星系+图例),消除底部大片空白 */
 .card.orbit-card{display:flex;flex-direction:column}
 .orbit-card .card-b,.card-body{flex:1;display:flex;flex-direction:column;justify-content:center}
 /* 卡头内小工具按钮(公转控制放这里,不用悬浮条) */
-.tbtn{padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel-2);color:var(--ink-2);
+.tbtn{padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel-2);color:var(--ink-2);
  cursor:pointer;font-weight:700;font-size:11px;transition:border-color var(--t-micro),color var(--t-micro),transform var(--t-micro)}
 .tbtn:hover{border-color:var(--accent);color:var(--accent)}
 .tbtn:active{transform:scale(.95)}
@@ -205,7 +174,7 @@ a{color:inherit;text-decoration:none}
 /* 卫星球体 */
 .sat,.orbit-sat{position:absolute;top:0;left:0;transform:translate(-50%,-50%);will-change:transform;cursor:pointer;pointer-events:auto}
 .sat .ball,.orbit-sat .ball{position:relative;width:100%;height:100%;border-radius:50%;display:grid;place-items:center;line-height:1;
- background:radial-gradient(circle at 34% 28%,#fff 0%,var(--qc,var(--q-a)) 42%,color-mix(in srgb,var(--qc,var(--q-a)) 55%,#04060e) 100%);
+ background:radial-gradient(circle at 34% 28%,#fff 0%,var(--qc,var(--q-a)) 42%,color-mix(in srgb,var(--qc,var(--q-a)) 55%,#111315) 100%);
  box-shadow:inset 0 -3px 8px rgba(0,0,0,.35),inset 2px 2px 6px rgba(255,255,255,.35),0 0 10px color-mix(in srgb,var(--qc,var(--q-a)) 45%,transparent);
  border:1px solid color-mix(in srgb,var(--qc,var(--q-a)) 60%,transparent)}
 .sat .cc,.orbit-sat .cc{font-size:10px;font-weight:900;letter-spacing:.02em;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6)}
@@ -257,7 +226,7 @@ a{color:inherit;text-decoration:none}
 .region .name{font-weight:700;font-size:13px;color:var(--ink);line-height:1.25;min-width:4.5em;max-width:8em;padding-right:4px;word-break:keep-all}
 .region .meta{display:flex;flex-direction:column;gap:8px;min-width:0}
 .region .bar{height:8px;border-radius:999px;background:color-mix(in srgb,var(--muted) 22%,transparent);overflow:hidden}
-.region .bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--q-b),var(--q-s));box-shadow:var(--glow-a)}
+.region .bar i{display:block;height:100%;border-radius:999px;background:var(--accent);box-shadow:none}
 .region .chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .region .n{text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:2px;min-width:72px}
 .region .n .big{font-size:18px;font-weight:800;color:var(--ink);line-height:1}
@@ -303,13 +272,6 @@ a{color:inherit;text-decoration:none}
 .tbl tbody tr{transition:background var(--t-micro)}
 .tbl tbody tr:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
 .mono{font-family:"Consolas",monospace}
-/* AI 解锁:Cloudflare/ChatGPT/Claude/Gemini/Grok 五枚短标签;状态仅绿畅通/红阻断/灰未知(不用品牌橙当状态) */
-.unlock{display:inline-flex;gap:3px;align-items:center}
-.unlock i{display:grid;place-items:center;min-width:22px;height:18px;padding:0 4px;border-radius:5px;
- font-size:9px;font-weight:800;letter-spacing:.01em;line-height:1;border:1px solid transparent;cursor:default}
-.unlock i.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 42%,transparent);background:color-mix(in srgb,var(--ok) 14%,transparent)}
-.unlock i.bad{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 42%,transparent);background:color-mix(in srgb,var(--danger) 12%,transparent)}
-.unlock i.unk{color:var(--gray);border-color:color-mix(in srgb,var(--gray) 40%,transparent);background:color-mix(in srgb,var(--gray) 10%,transparent);opacity:.75}
 .ops{display:inline-flex;gap:4px;flex-wrap:nowrap;white-space:nowrap}
 
 /* toast */
@@ -320,11 +282,11 @@ a{color:inherit;text-decoration:none}
 
 /* ===================== 多页壳 / 筛选 / 表单 / 日志 / 会话卡 ===================== */
 .page{display:none}.page.active{display:block}
-.pager{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;padding:10px 12px;border:1px solid var(--hairline);border-radius:12px;background:color-mix(in srgb,var(--panel-2) 80%,transparent)}
+.pager{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;padding:8px 10px;border:1px solid var(--hairline);border-radius:6px;background:var(--panel-2)}
 .pager-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .pager .input.sm{width:auto;min-width:72px}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
-.toolbar.filters{padding:10px 12px;border:1px solid var(--hairline);border-radius:12px;background:color-mix(in srgb,var(--panel-2) 80%,transparent);
+.toolbar.filters{padding:8px 10px;border:1px solid var(--hairline);border-radius:6px;background:var(--panel-2);
  justify-content:space-between;gap:8px}
 .toolbar.filters > .input.sm{flex:1 1 0;min-width:0;width:auto}
 .toolbar.filters > .filter-toggle{flex:1 1 0;min-width:0;justify-content:center}
@@ -332,6 +294,7 @@ a{color:inherit;text-decoration:none}
 .toolbar.filters.search-row{justify-content:flex-start}
 .toolbar.filters.search-row > .input.narrow{flex:0 0 110px}
 .toolbar.filters.search-row > .search-box{flex:1 1 auto}
+@media(max-width:720px){.toolbar.filters > .filter-toggle{flex:0 0 auto;min-width:max-content}}
 .search-box{display:flex;align-items:stretch;flex:1;min-width:200px;border:1px solid var(--line);border-radius:10px;background:var(--panel-2);overflow:hidden;
  transition:border-color var(--t-micro),box-shadow var(--t-micro)}
 .search-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
@@ -342,15 +305,15 @@ a{color:inherit;text-decoration:none}
 .search-box .sbtn:hover{background:color-mix(in srgb,var(--accent) 18%,transparent)}
 .search-box .sbtn svg{width:16px;height:16px}
 .input,.select,textarea,select.input{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);
- border-radius:10px;padding:8px 12px;font:inherit;font-size:13px;outline:none;min-width:0;
+ border-radius:6px;padding:7px 10px;font:inherit;font-size:13px;outline:none;min-width:0;
  transition:border-color var(--t-micro),box-shadow var(--t-micro)}
 .input:focus,textarea:focus,select.input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
 .input.grow{flex:1;min-width:160px}.input.narrow{width:100px}.input.mid{width:128px}.input.sm{width:112px}
 textarea{width:100%;min-height:110px;resize:vertical;font-family:"Consolas",monospace;line-height:1.45}
-.btn,.mini{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:10px;border:1px solid var(--line);
+.btn,.mini{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:6px;border:1px solid var(--line);
  background:var(--panel-2);color:var(--ink-2);font-weight:700;font-size:12px;padding:8px 14px;cursor:pointer;
  transition:border-color var(--t-micro),color var(--t-micro),background var(--t-micro),transform var(--t-micro)}
-.mini{padding:6px 11px;border-radius:999px;font-size:11px}
+.mini{padding:5px 9px;border-radius:6px;font-size:11px}
 .btn:hover,.mini:hover{border-color:var(--accent);color:var(--accent)}
 .btn:active,.mini:active{transform:scale(.96)}
 .btn.primary,.mini.primary{background:color-mix(in srgb,var(--accent) 18%,var(--panel-2));border-color:color-mix(in srgb,var(--accent) 50%,var(--line));color:var(--accent)}
@@ -361,12 +324,13 @@ textarea{width:100%;min-height:110px;resize:vertical;font-family:"Consolas",mono
 .filter-toggle[data-state="ok"]{border-color:color-mix(in srgb,var(--ok) 50%,var(--line));color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent)}
 .filter-toggle[data-state="bad"]{border-color:color-mix(in srgb,var(--danger) 50%,var(--line));color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}
 .filter-toggle[data-state="unk"]{border-color:color-mix(in srgb,var(--gray) 50%,var(--line));color:var(--gray);background:color-mix(in srgb,var(--gray) 12%,transparent)}
+.filter-toggle[data-sel^="ai-"][data-state="unk"]{border-color:color-mix(in srgb,var(--ai-unprobed) 50%,var(--line));color:var(--ai-unprobed);background:color-mix(in srgb,var(--ai-unprobed) 12%,transparent)}
 .filter-toggle .st{color:inherit;opacity:.8;font-weight:600;min-width:2em}
 .hidden-select{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
 .empty{padding:28px 12px;text-align:center;color:var(--muted);font-size:13px}
 .muted{color:var(--muted)}
 .session-grid{display:flex;flex-direction:column;gap:12px}
-.session-card{padding:0;border-radius:14px;border:1px solid var(--hairline);background:var(--panel-2);overflow:hidden;
+.session-card{padding:0;border-radius:8px;border:1px solid var(--hairline);background:var(--panel-2);overflow:hidden;
  transition:border-color var(--t-micro),box-shadow var(--t-micro)}
 .session-card.open{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));box-shadow:var(--glow-a)}
 .session-card .head{display:flex;align-items:center;gap:12px;padding:14px 16px;cursor:pointer;user-select:none}
@@ -392,14 +356,14 @@ textarea{width:100%;min-height:110px;resize:vertical;font-family:"Consolas",mono
 .session-card .occ{margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .session-card .occ .bar{flex:1;min-width:120px;height:8px;border-radius:999px;background:color-mix(in srgb,var(--muted) 22%,transparent);overflow:hidden}
 .session-card .occ .bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--q-b),var(--q-s))}
-.sub-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;border-radius:12px;
+.sub-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border-radius:8px;
  border:1px solid var(--hairline);background:var(--panel-2);margin-bottom:10px}
 .sub-item .meta strong{font-size:14px;display:inline-flex;align-items:center;gap:8px}
 .sub-item .meta .muted{margin-top:4px;font-size:12px}
 .sub-item .mini-actions{display:flex;gap:6px;flex-wrap:wrap}
-.logs{background:#060a14;border:1px solid var(--line);border-radius:12px;padding:12px 14px;max-height:520px;overflow:auto;
- font-family:"Consolas","Cascadia Mono",monospace;font-size:12px;line-height:1.55;color:#c8d7ef}
-[data-theme="day"] .logs{background:#0f1726;color:#d7e4ff}
+.logs{background:#121416;border:1px solid var(--line);border-radius:12px;padding:12px 14px;max-height:520px;overflow:auto;
+ font-family:"Consolas","Cascadia Mono",monospace;font-size:12px;line-height:1.55;color:#d7dce1}
+[data-theme="day"] .logs{background:#181b1f;color:#eef0f2}
 .log-line{padding:2px 4px;border-radius:4px;white-space:pre-wrap;word-break:break-all}
 .log-line:hover{background:rgba(59,141,255,.08)}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -408,7 +372,7 @@ textarea{width:100%;min-height:110px;resize:vertical;font-family:"Consolas",mono
 .field.full{grid-column:1/-1}
 .field label{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
 .field .fh{font-size:11px;color:var(--muted)}
-.field input,.field select,.field textarea{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:10px;padding:10px 12px;font:inherit;font-size:13px;outline:none;width:100%;box-sizing:border-box;transition:border-color var(--t-micro),box-shadow var(--t-micro)}
+.field input,.field select,.field textarea{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:6px;padding:9px 10px;font:inherit;font-size:13px;outline:none;width:100%;box-sizing:border-box;transition:border-color var(--t-micro),box-shadow var(--t-micro)}
 .field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
 .field input[readonly]{background:color-mix(in srgb,var(--muted) 14%,var(--panel-2));color:var(--muted);cursor:not-allowed}
 .guide-row{display:flex;gap:14px;padding:10px 0;border-bottom:1px solid var(--hairline);font-size:13px}
@@ -420,14 +384,14 @@ textarea{width:100%;min-height:110px;resize:vertical;font-family:"Consolas",mono
 [data-theme="day"] .code-block{background:#fff;color:var(--ink)}
 [data-theme="space"] .code-block{background:color-mix(in srgb,var(--space-0) 70%,#000);color:var(--ink)}
 .check{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:700;color:var(--ink-2);cursor:pointer}
-.modal{position:fixed;inset:0;z-index:40;display:none;place-items:center;background:rgba(4,6,14,.62);backdrop-filter:blur(6px);padding:20px}
+.modal{position:fixed;inset:0;z-index:40;display:none;place-items:center;background:rgba(10,11,12,.72);backdrop-filter:blur(6px);padding:20px}
 .modal.show{display:grid}
-.dialog{width:min(560px,100%);background:var(--panel-solid);border:1px solid var(--line);border-radius:16px;box-shadow:var(--sh-lg);padding:20px}
+.dialog{width:min(560px,100%);background:var(--panel-solid);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh-lg);padding:20px}
 .dialog h3{margin:0 0 14px;font-size:16px}
 .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 .login-shell{min-height:100vh;display:grid;place-items:center;padding:24px;position:relative;z-index:1}
-.login-card{width:min(400px,100%);padding:28px;border-radius:18px;border:1px solid var(--line);
- background:linear-gradient(180deg,var(--panel-2),var(--panel));box-shadow:var(--sh-lg)}
+.login-card{width:min(400px,100%);padding:24px;border-radius:8px;border:1px solid var(--line);
+ background:var(--panel);box-shadow:var(--sh-lg)}
 .login-card .brand-row{display:flex;align-items:center;gap:12px;margin-bottom:18px}
 .login-card h1{font-size:18px;font-weight:800}
 .login-card .sub{font-size:12px;color:var(--muted);margin-bottom:18px}
@@ -443,7 +407,7 @@ textarea{width:100%;min-height:110px;resize:vertical;font-family:"Consolas",mono
 
 /* production API/compat */
 .hidden-select{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
-.scrim{position:fixed;inset:0;background:rgba(4,6,14,.5);z-index:35;opacity:0;pointer-events:none;transition:opacity .28s}
+.scrim{position:fixed;inset:0;background:rgba(10,11,12,.58);z-index:35;opacity:0;pointer-events:none;transition:opacity .28s}
 body.drawer-open .scrim{opacity:1;pointer-events:auto}
 .hamburger{display:none}
 @media(max-width:900px){
@@ -457,7 +421,7 @@ body.drawer-open .scrim{opacity:1;pointer-events:auto}
 .ai-mark .gl{display:none}
 .ai-mark.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 42%,transparent);background:color-mix(in srgb,var(--ok) 14%,transparent)}
 .ai-mark.bad{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 42%,transparent);background:color-mix(in srgb,var(--danger) 12%,transparent)}
-.ai-mark.na{color:var(--gray);border-color:color-mix(in srgb,var(--gray) 40%,transparent);background:color-mix(in srgb,var(--gray) 10%,transparent);opacity:.75}
+.ai-mark.na{color:var(--ai-unprobed);border-color:color-mix(in srgb,var(--ai-unprobed) 40%,transparent);background:color-mix(in srgb,var(--ai-unprobed) 10%,transparent);opacity:.75}
 .th-ico{display:inline-flex;align-items:center;gap:5px;color:var(--muted)}
 .th-ico svg{width:15px;height:15px}
 .th-ico .tx{font-size:11px;font-weight:700}
@@ -466,7 +430,7 @@ body.drawer-open .scrim{opacity:1;pointer-events:auto}
 #page-logs .card-b,#page-logs .card-body{flex:1;display:flex;flex-direction:column;min-height:0}
 .logs{height:calc(100vh - 220px);min-height:420px;max-height:none}
 .conn{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
-.conn-item{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:12px}
+.conn-item{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:10px}
 .conn-item .k{font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .conn-item .v{font-family:Consolas,monospace;font-weight:700;margin-top:6px;word-break:break-all}
 .conn-item .desc{font-size:12px;color:var(--muted);margin-top:4px}
@@ -533,13 +497,14 @@ function abuserBadge(score){const n=Number(score);if(!Number.isFinite(n)||n<0)re
 function ipapiFlagsBadges(flags,seen){const raw=String(flags||'').trim();if(raw===''){return seen?'<span class="badge ok">干净</span>':'<span class="muted">--</span>'}const cls={proxy:'danger',hosting:'warn',mobile:'gray'};return raw.split(',').map(f=>f.trim()).filter(Boolean).map(f=>'<span class="badge '+(cls[f]||'gray')+'">'+html(f)+'</span>').join(' ')}
 // cfBadge: cf_blocked==1 显"拦截"红、==0 显"正常"绿、其它(-1/未探测)显 "--"。
 function cfBadge(v){ v=Number(v); if(v===1)return '<span class="badge danger">拦截</span>'; if(v===0)return '<span class="badge ok">正常</span>'; return '<span class="muted">--</span>' }
-// aiBadges: 解析 ai_reachability JSON（形如 {"openai":0,"claude":1,"grok":-1,"gemini":0}），
-// 四服务正规短标签：ChatGPT/Claude/Grok/Gemini。0=畅通(绿)、1=阻断(红)、其它=未知(灰)。
-// title 带全名与状态。空/非法 JSON 整体显 "--"。
-function aiBadges(v){ const raw=String(v||'').trim(); if(raw===''){return '<span class="muted">--</span>'} let m; try{m=JSON.parse(raw)}catch(e){return '<span class="muted">--</span>'} if(!m||typeof m!=='object'){return '<span class="muted">--</span>'} const defs=[['openai','GPT','ChatGPT'],['claude','Cld','Claude'],['grok','Grk','Grok'],['gemini','Gem','Gemini']]; return '<span class="ai-marks">'+defs.map(function(d){const k=d[0],ab=d[1],full=d[2];const n=Number(m[k]);const cls=n===0?'ok':(n===1?'bad':'na');const glyph=n===0?'✓':(n===1?'✗':'–');const title=full+(n===0?' 畅通':(n===1?' 阻断':' 未知'));return '<span class="ai-mark '+cls+'" title="'+html(title)+'"><span class="nm">'+ab+'</span><span class="gl">'+glyph+'</span></span>'}).join('')+'</span>' }
-function aiStateOf(p,svc){const raw=String((p&&p.ai_reachability)||'').trim();if(!raw)return 'unprobed';let m;try{m=JSON.parse(raw)}catch(e){return 'unprobed'}if(!m||typeof m!=='object')return 'unprobed';const n=Number(m[svc]);if(n===0)return 'unlocked';if(n===1)return 'blocked';return 'unprobed'}
-function cfStateOf(p){const v=Number(p&&p.cf_blocked);if(v===0)return 'unlocked';if(v===1)return 'blocked';return 'unknown'}
+// AI 状态只接受后端合同中的数字 0/1；缺字段、布尔值、坏 JSON 均保持未探测。
+function parseAIReachability(v){if(v&&typeof v==='object'&&!Array.isArray(v))return v;const raw=String(v||'').trim();if(!raw)return null;try{const m=JSON.parse(raw);return m&&typeof m==='object'&&!Array.isArray(m)?m:null}catch(e){return null}}
+function aiValueState(v){if(v===0||v==='0')return 'unlocked';if(v===1||v==='1')return 'blocked';return 'unprobed'}
+function aiBadges(v){const m=parseAIReachability(v);if(!m)return '<span class="muted">--</span>';const defs=[['openai','GPT','ChatGPT'],['claude','Cld','Claude'],['grok','Grk','Grok'],['gemini','Gem','Gemini']];return '<span class="ai-marks">'+defs.map(function(d){const state=aiValueState(m[d[0]]);const cls=state==='unlocked'?'ok':(state==='blocked'?'bad':'na');const glyph=state==='unlocked'?'✓':(state==='blocked'?'✗':'–');const title=d[2]+(state==='unlocked'?' 畅通':(state==='blocked'?' 阻断':' 未探测'));return '<span class="ai-mark '+cls+'" role="img" aria-label="'+html(title)+'" title="'+html(title)+'"><span class="nm">'+d[1]+'</span><span class="gl" aria-hidden="true">'+glyph+'</span></span>'}).join('')+'</span>'}
+function aiStateOf(p,svc){const m=parseAIReachability(p&&p.ai_reachability);return aiValueState(m&&m[svc])}
+function cfStateOf(p){const v=p&&p.cf_blocked;if(v===0||v==='0')return 'unlocked';if(v===1||v==='1')return 'blocked';return 'unknown'}
 function qualityOf(p){return String((p&&p.quality_grade)||'').trim().toUpperCase()}
+function purityStateOf(p){const raw=p&&p.ipapiis_score;if(raw===null||raw===undefined||raw===''||typeof raw==='boolean')return 'unprobed';const n=Number(raw);if(!Number.isFinite(n)||n<0)return 'unprobed';if(n<0.1)return 'clean';if(n<=0.5)return 'caution';return 'risky'}
 function filterVal(id){const el=document.getElementById(id);return el?String(el.value||'').trim():''}
 // starBtn: 星标切换按钮，★ 已加星 / ☆ 未加星。
 function starBtn(p){ const id=proxyIDArg(p); const on=!!(p.starred===true||Number(p.starred)===1); return '<button class="star'+(on?' on':'')+'" onclick="toggleStar('+id+','+(on?'true':'false')+')" title="'+(on?'取消星标':'加星标')+'" aria-label="星标">'+(on?'★':'☆')+'</button>' }
@@ -549,21 +514,24 @@ function randSession(){ const cs='abcdefghijklmnopqrstuvwxyz0123456789'; let s='
 // 读存储层显式下发的 dual_protocol 字段,而非靠地址长相猜测——手动本机 direct socks5 节点
 // 地址同为回环但只支持单协议,只有此显式标记能可靠区分。
 function isDualProtocol(p){return !!(p&&(p.dual_protocol===true||Number(p.dual_protocol)===1))}
+function nodeSupportsInboundProtocol(p,protocol){const wanted=String(protocol||'').trim().toLowerCase();if(!wanted)return true;const actual=String((p&&p.protocol)||'').trim().toLowerCase();const dual=!!(p&&(p.dual_protocol===true||p.dual_protocol===1));if(dual)return wanted==='http'||wanted==='socks5';return actual===wanted}
 // protocolBadges: 协议列徽章。dual_protocol 节点(mixed 入站)渲染 SOCKS5+HTTP 两个徽章;
 // 其余节点按存储的单一 protocol 渲染一个徽章(沿用 html 转义)。
 function protocolBadges(p){ if(isDualProtocol(p))return '<span class="badge blue">SOCKS5</span> <span class="badge blue">HTTP</span>'; return '<span class="badge blue">'+html(p.protocol).toUpperCase()+'</span>' }
 // isGatewayNode: dual_protocol(mixed 隧道)或回环本地地址必须经网关 DSL 连接；其余为可直连上游。
 function isGatewayNode(p){if(isDualProtocol(p))return true;const a=String((p&&p.address)||'');return a.indexOf('127.0.0.1:')===0||a.indexOf('[::1]:')===0||a.indexOf('localhost:')===0}
 function isDirectNode(p){return !isGatewayNode(p)}
-// copyProxyCred: 直连节点复制 protocol://host:port（无网关密码）；网关节点复制 DSL 凭据到公网入口。
-// 用户名/密码编码为 URL userinfo。成功 toast 不回显含真实密码的完整 URL。
+// copyProxyCred: 直连节点复制 protocol://host:port（无网关密码）；网关节点必须有稳定 NodeKey 才复制 DSL。
+// 网关缺少稳定身份时显式拒绝，不把会变化的 loopback address 当作 pin；用户名/密码编码为 URL userinfo。
+// 成功 toast 不回显含真实密码的完整 URL。
 function encodeProxyUserInfo(value){return encodeURIComponent(String(value||'')).replace(/[!'()*]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())}
-function copyProxyCred(id){ const p=allProxies.find(x=>Number(x.id)===Number(id)); if(!p)return; const addr=String(p.address||''); const scheme=isDualProtocol(p)?(confirm('确定复制 SOCKS5？取消则复制 HTTP')?'socks5':'http'):String(p.protocol||'socks5'); if(isDirectNode(p)){ const u=String(p.username||''); const url=u?(scheme+'://'+encodeProxyUserInfo(u)+':'+encodeProxyUserInfo(String(p.password||''))+'@'+addr):(scheme+'://'+addr); navigator.clipboard.writeText(url).then(()=>showToast('已复制直连地址')).catch(()=>showToast('复制失败')); return } const base=(configCache&&configCache.proxy_auth_username)?configCache.proxy_auth_username:'username'; const nkey=String(p.node_key||'').trim(); const pin=nkey?('key-'+btoa(unescape(encodeURIComponent(nkey))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')):addr; const user=base+'-node-'+pin; const rawPass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''; const pass=rawPass||'PASSWORD'; const host=publicIP||location.hostname||'127.0.0.1'; const port=scheme==='http'?(stripColon((configCache&&configCache.http_port)||'7802')):(stripColon((configCache&&configCache.socks5_port)||'7801')); const url=scheme+'://'+encodeProxyUserInfo(user)+':'+encodeProxyUserInfo(pass)+'@'+host+':'+port; const okMsg=rawPass?(nkey?'已复制（锁定节点身份，非出口IP）':'已复制'):'已复制，请将 PASSWORD 替换为真实密码'; navigator.clipboard.writeText(url).then(()=>showToast(okMsg)).catch(()=>showToast('复制失败')) }
+function encodeNodeKeyPin(nkey){nkey=String(nkey||'').trim();if(!nkey)return '';try{return btoa(unescape(encodeURIComponent(nkey))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}catch(e){return ''}}
+function copyProxyCred(id){ const p=allProxies.find(x=>Number(x.id)===Number(id)); if(!p)return; const addr=String(p.address||''); if(isDirectNode(p)){ const scheme=String(p.protocol||'socks5'); const u=String(p.username||''); const url=u?(scheme+'://'+encodeProxyUserInfo(u)+':'+encodeProxyUserInfo(String(p.password||''))+'@'+addr):(scheme+'://'+addr); navigator.clipboard.writeText(url).then(()=>showToast('已复制直连地址')).catch(()=>showToast('复制失败')); return } const nkey=String(p.node_key||'').trim(); if(!nkey){showToast('无法复制：该网关节点缺少稳定 NodeKey，请刷新订阅或重新导入节点后重试');return} const scheme=isDualProtocol(p)?(confirm('确定复制 SOCKS5？取消则复制 HTTP')?'socks5':'http'):String(p.protocol||'socks5'); const base=(configCache&&configCache.proxy_auth_username)?configCache.proxy_auth_username:'username'; const pin='key-'+encodeNodeKeyPin(nkey); if(pin==='key-'){showToast('无法复制：该网关节点 NodeKey 无法编码，请刷新订阅或重新导入节点后重试');return} const user=base+'-node-'+pin; const rawPass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''; const pass=rawPass||'PASSWORD'; const host=publicIP||location.hostname||'127.0.0.1'; const port=scheme==='http'?(stripColon((configCache&&configCache.http_port)||'7802')):(stripColon((configCache&&configCache.socks5_port)||'7801')); const url=scheme+'://'+encodeProxyUserInfo(user)+':'+encodeProxyUserInfo(pass)+'@'+host+':'+port; const okMsg=rawPass?'已复制（锁定节点身份，非出口IP）':'已复制，请将 PASSWORD 替换为真实密码'; navigator.clipboard.writeText(url).then(()=>showToast(okMsg)).catch(()=>showToast('复制失败')) }
 // toggleStar: 加星直接生效；取消星标须 confirm() 确认。
 async function toggleStar(id,on){if(on){const ok=await showConfirm('取消该节点星标？','取消星标');if(!ok)return}return runAsync('星标操作失败',async()=>{await api('/api/proxy/star',{method:'POST',body:JSON.stringify({id,starred:!on})});await loadProxies();showToast(on?'已取消星标':'已加星标')})}
 // keepPage=true：数据刷新（10s 轮询）保留当前页，避免把用户从第 N 页踢回第 1 页。
 // 筛选/搜索 onchange 不传参 → 重置到第 1 页。
-function renderProxies(keepPage){if(!keepPage)proxyPage=1;const protocol=document.getElementById('protocol-filter').value;const region=document.getElementById('region-filter').value;const sf=document.getElementById('status-filter').value;const srcf=(document.getElementById('source-filter')||{}).value||'';const qf=filterVal('quality-filter');const cff=filterVal('cf-filter');const aif={openai:filterVal('ai-openai-filter'),claude:filterVal('ai-claude-filter'),grok:filterVal('ai-grok-filter'),gemini:filterVal('ai-gemini-filter')};const latMinRaw=filterVal('latency-min');const latMaxRaw=filterVal('latency-max');const latMin=latMinRaw===''?null:Number(latMinRaw);const latMax=latMaxRaw===''?null:Number(latMaxRaw);const kw=filterVal('keyword-filter').toLowerCase();let rows=allProxies.filter(p=>(!protocol||p.protocol===protocol)&&(!region||regionOf(p)===region));if(sf)rows=rows.filter(p=>nodeState(p)===sf);if(srcf==='manual')rows=rows.filter(p=>p.source==='manual');else if(srcf==='subscription')rows=rows.filter(p=>p.source!=='manual');if(qf)rows=rows.filter(p=>qualityOf(p)===qf);if(cff)rows=rows.filter(p=>cfStateOf(p)===cff);['openai','claude','grok','gemini'].forEach(function(svc){const v=aif[svc];if(v)rows=rows.filter(p=>aiStateOf(p,svc)===v)});if(latMin!==null&&Number.isFinite(latMin))rows=rows.filter(p=>Number(p.latency||0)>=latMin);if(latMax!==null&&Number.isFinite(latMax))rows=rows.filter(p=>Number(p.latency||0)<=latMax);if(kw)rows=rows.filter(p=>{const addr=String(p.address||'').toLowerCase();const note=String(p.note||'').toLowerCase();const exitIP=String(p.exit_ip||'').toLowerCase();return addr.indexOf(kw)>=0||note.indexOf(kw)>=0||exitIP.indexOf(kw)>=0});const order={ok:0,pending:1,paused:2,failed:3};rows.sort((a,b)=>{const fa=(nodeState(a)==='ok'&&(a.starred===true||Number(a.starred)===1))?1:0;const fb=(nodeState(b)==='ok'&&(b.starred===true||Number(b.starred)===1))?1:0;if(fa!==fb)return fb-fa;const sa=nodeState(a),sb=nodeState(b);if(order[sa]!==order[sb])return order[sa]-order[sb];return Number(a.latency||1e9)-Number(b.latency||1e9)});const body=document.getElementById('proxy-rows');if(rows.length===0){proxyRenderRows=[];proxyPage=1;const bodyEmpty=document.getElementById('proxy-rows');if(bodyEmpty)bodyEmpty.innerHTML='<tr><td colspan="14" class="empty">没有匹配节点</td></tr>';renderProxyPager();return}proxyRenderRows=rows;const pages=proxyTotalPages();if(proxyPage>pages)proxyPage=pages;if(proxyPage<1)proxyPage=1;renderProxyPage()}
+function renderProxies(keepPage){if(!keepPage)proxyPage=1;const protocol=document.getElementById('protocol-filter').value;const region=document.getElementById('region-filter').value;const sf=document.getElementById('status-filter').value;const srcf=(document.getElementById('source-filter')||{}).value||'';const qf=filterVal('quality-filter');const pf=filterVal('purity-filter');const cff=filterVal('cf-filter');const aif={openai:filterVal('ai-openai-filter'),claude:filterVal('ai-claude-filter'),grok:filterVal('ai-grok-filter'),gemini:filterVal('ai-gemini-filter')};const latMinRaw=filterVal('latency-min');const latMaxRaw=filterVal('latency-max');const latMin=latMinRaw===''?null:Number(latMinRaw);const latMax=latMaxRaw===''?null:Number(latMaxRaw);const kw=filterVal('keyword-filter').toLowerCase();let rows=allProxies.filter(p=>nodeSupportsInboundProtocol(p,protocol)&&(!region||regionOf(p)===region));if(sf)rows=rows.filter(p=>nodeState(p)===sf);if(srcf==='manual')rows=rows.filter(p=>p.source==='manual');else if(srcf==='subscription')rows=rows.filter(p=>p.source!=='manual');if(qf)rows=rows.filter(p=>qualityOf(p)===qf);if(pf)rows=rows.filter(p=>purityStateOf(p)===pf);if(cff)rows=rows.filter(p=>cfStateOf(p)===cff);['openai','claude','grok','gemini'].forEach(function(svc){const v=aif[svc];if(v)rows=rows.filter(p=>aiStateOf(p,svc)===v)});if(latMin!==null&&Number.isFinite(latMin))rows=rows.filter(p=>{const n=Number(p.latency);return Number.isFinite(n)&&n>0&&n>=latMin});if(latMax!==null&&Number.isFinite(latMax))rows=rows.filter(p=>{const n=Number(p.latency);return Number.isFinite(n)&&n>0&&n<=latMax});if(kw)rows=rows.filter(p=>{const addr=String(p.address||'').toLowerCase();const note=String(p.note||'').toLowerCase();const exitIP=String(p.exit_ip||'').toLowerCase();return addr.indexOf(kw)>=0||note.indexOf(kw)>=0||exitIP.indexOf(kw)>=0});const order={ok:0,pending:1,paused:2,failed:3};rows.sort((a,b)=>{const fa=(nodeState(a)==='ok'&&(a.starred===true||Number(a.starred)===1))?1:0;const fb=(nodeState(b)==='ok'&&(b.starred===true||Number(b.starred)===1))?1:0;if(fa!==fb)return fb-fa;const sa=nodeState(a),sb=nodeState(b);if(order[sa]!==order[sb])return order[sa]-order[sb];return Number(a.latency||1e9)-Number(b.latency||1e9)});const body=document.getElementById('proxy-rows');if(rows.length===0){proxyRenderRows=[];proxyPage=1;const bodyEmpty=document.getElementById('proxy-rows');if(bodyEmpty)bodyEmpty.innerHTML='<tr><td colspan="14" class="empty">没有匹配节点</td></tr>';renderProxyPager();return}proxyRenderRows=rows;const pages=proxyTotalPages();if(proxyPage>pages)proxyPage=pages;if(proxyPage<1)proxyPage=1;renderProxyPage()}
 // ISO 3166-1 alpha-2 → 中文国家/地区（常见出口地域；未知码回退大写代码）。
 const REGION_ZH={us:'美国',ca:'加拿大',mx:'墨西哥',br:'巴西',ar:'阿根廷',cl:'智利',co:'哥伦比亚',pe:'秘鲁',gb:'英国',uk:'英国',ie:'爱尔兰',fr:'法国',de:'德国',nl:'荷兰',be:'比利时',lu:'卢森堡',ch:'瑞士',at:'奥地利',it:'意大利',es:'西班牙',pt:'葡萄牙',se:'瑞典',no:'挪威',dk:'丹麦',fi:'芬兰',pl:'波兰',cz:'捷克',ro:'罗马尼亚',hu:'匈牙利',bg:'保加利亚',gr:'希腊',tr:'土耳其',ru:'俄罗斯',ua:'乌克兰',jp:'日本',kr:'韩国',cn:'中国',hk:'香港',tw:'台湾',mo:'澳门',sg:'新加坡',my:'马来西亚',th:'泰国',vn:'越南',id:'印度尼西亚',ph:'菲律宾',in:'印度',pk:'巴基斯坦',bd:'孟加拉',au:'澳大利亚',nz:'新西兰',za:'南非',eg:'埃及',il:'以色列',ae:'阿联酋',sa:'沙特阿拉伯',qa:'卡塔尔',kw:'科威特',ng:'尼日利亚',ke:'肯尼亚',kz:'哈萨克斯坦'};
 function regionDisplayName(code){const c=String(code||'').trim().toLowerCase();if(!c||c==='unknown')return '未知';return REGION_ZH[c]||c.toUpperCase()}
@@ -664,7 +632,7 @@ async function loadLogs(){const data=await api('/api/logs');if(!data)return;cons
 async function loadConfig(){configCache=await api('/api/config');if(!configCache)return;const hp=stripColon(configCache.http_port),sp=stripColon(configCache.socks5_port),wp=stripColon(configCache.webui_port);document.getElementById('cfg-http-port').value=hp;document.getElementById('cfg-socks5-port').value=sp;document.getElementById('cfg-webui-port').value=wp;document.getElementById('cfg-auth-enabled').value=String(Boolean(configCache.proxy_auth_enabled));document.getElementById('cfg-auth-username').value=configCache.proxy_auth_username||'';document.getElementById('cfg-auth-password').value='';document.getElementById('cfg-session-ttl').value=configCache.session_ttl_minutes||'';document.getElementById('cfg-default-region').value=configCache.default_region||'';document.getElementById('cfg-health-interval').value=configCache.health_check_interval||'';document.getElementById('cfg-max-retry').value=configCache.max_retry??'';document.getElementById('cfg-singbox-path').value=configCache.singbox_path||'';document.getElementById('cfg-allowed-countries').value=(configCache.allowed_countries||[]).join(',');document.getElementById('cfg-blocked-countries').value=(configCache.blocked_countries||[]).join(',');renderConnection();renderDSLExamples()}
 async function loadPublicIP(){return runAsync('公网 IP 获取失败',async()=>{const d=await api('/api/public-ip');if(d){if(d.public_ip){publicIP=d.public_ip;renderConnection()}if(d.country){gatewayCC=String(d.country).toLowerCase()}renderOrbitSystem()}})}
 function renderConnection(){if(!configCache)return;const sp=stripColon(configCache.socks5_port)||'7801';const hp=stripColon(configCache.http_port)||'7802';const base=configCache.proxy_auth_username||'username';const enabled=configCache.proxy_auth_enabled;const host=publicIP||location.hostname||'127.0.0.1';const setText=function(id,v){const el=document.getElementById(id);if(el)el.textContent=v};setText('conn-socks5',host+':'+(sp||'7801'));setText('conn-http',host+':'+(hp||'7802'));setText('conn-user',base);setText('conn-pass',enabled?'见首次启动日志 / 系统设置':'（认证已关闭，无需密码）');setText('conn-auth-state',enabled?'代理认证：开启':'代理认证：关闭');const cred=enabled?(base+':PASSWORD@'):'';setText('conn-cmd','curl --socks5 '+cred+host+':'+(sp||'7801')+' https://www.gstatic.com/generate_204');renderDSLExamples()}
-function renderDSLExamples(){const base=(configCache&&configCache.proxy_auth_username)?configCache.proxy_auth_username:'username';const hint=document.getElementById('dsl-hint');if(!hint)return;hint.textContent=(configCache&&configCache.proxy_auth_enabled!==false)?('前缀 “'+base+'” = 代理认证用户名；-region-XX 地域；-unlock-gpt|claude|gemini|grok|cf|all 解锁过滤；-node-IP:端口 锁定入口节点(出口可能因上游漂移)；-session-ID 黏连。'):'代理认证当前关闭；启用后前缀须等于代理认证用户名。'}
+function renderDSLExamples(){const base=(configCache&&configCache.proxy_auth_username)?configCache.proxy_auth_username:'username';const hint=document.getElementById('dsl-hint');if(!hint)return;const syntax='<base>[-region-<cc>][-unlock-<token>][-node-<host:port|key-<base64url(nodeKey)>>][-session-<id>]';const nodeHint='key-<base64url(nodeKey)> 是稳定配置身份（优先）；host:port 是兼容入口地址。二者都不是最终出口 IP；无匹配节点时显式失败，不回退。node 锁定决定路由，优先于 session 黏连。';hint.textContent=(configCache&&configCache.proxy_auth_enabled!==false)?('语法：'+syntax+'；固定顺序 region → unlock → node → session；前缀 “'+base+'” 是代理认证用户名。'+nodeHint):'代理认证当前关闭；启用后前缀须等于代理认证用户名。'}
 async function openSettings(){switchTab('settings')}function closeSettings(){}function countries(id){return document.getElementById(id).value.split(',').map(v=>v.trim().toUpperCase()).filter(Boolean)}
 function formatAPIKeyTime(v){if(!v)return '--';const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString()}
 function renderAPIKeys(keys){const body=document.getElementById('apikey-rows');if(!body)return;const list=Array.isArray(keys)?keys:[];if(!list.length){body.innerHTML='<tr><td colspan="5" class="empty">暂无 API Key</td></tr>';return}body.innerHTML=list.map(k=>{const id=html(k.id);const name=html(k.name);const created=html(formatAPIKeyTime(k.created_at));const last=html(formatAPIKeyTime(k.last_used_at));const disabled=!!(k.disabled===true||Number(k.disabled)===1);const st=disabled?'<span class="badge warn">已吊销</span>':'<span class="badge ok">有效</span>';const revokeBtn=disabled?'':'<button class="mini" onclick="revokeAPIKey(\''+id+'\')">吊销</button> ';return '<tr><td>'+name+'</td><td>'+created+'</td><td>'+last+'</td><td>'+st+'</td><td>'+revokeBtn+'<button class="mini danger" onclick="deleteAPIKey(\''+id+'\')">删除</button></td></tr>'}).join('')}
@@ -683,9 +651,10 @@ function openDrawer(){document.body.classList.add('drawer-open')}
 function closeDrawer(){document.body.classList.remove('drawer-open')}
 (function(){let c=false;try{c=localStorage.getItem('gg-sidebar')==='1'}catch(e){}applySidebar(c);const sb=document.getElementById('sidebar');if(sb)requestAnimationFrame(function(){sb.classList.remove('preload')})})();
 // AI/Cloudflare 图标筛选：点击循环 全部->畅通->阻断->未知；值写入隐藏 select，renderProxies 读取不变。
-const FILTER_CYCLE={'':'全部','unlocked':'畅通','blocked':'阻断','unprobed':'未知','unknown':'未知'};
+const FILTER_CYCLE={'':'全部','unlocked':'畅通','blocked':'阻断','unprobed':'未探测','unknown':'未知'};
+const FILTER_STATE={'':'all','unlocked':'ok','blocked':'bad','unprobed':'unk','unknown':'unk'};
 function cycleFilter(selId,btnId){const sel=document.getElementById(selId);if(!sel)return;const opts=Array.from(sel.options).map(o=>o.value);let idx=opts.indexOf(sel.value);idx=(idx+1)%opts.length;sel.value=opts[idx];syncFilterToggle(selId,btnId);renderProxies()}
-function syncFilterToggle(selId,btnId){const sel=document.getElementById(selId);const btn=document.getElementById(btnId);if(!sel||!btn)return;const v=sel.value;const st=btn.querySelector('.st');if(st)st.textContent=FILTER_CYCLE[v]||'全部';btn.setAttribute('aria-pressed',v?'true':'false')}
+function syncFilterToggle(selId,btnId){const sel=document.getElementById(selId);const btn=document.getElementById(btnId);if(!sel||!btn)return;const v=sel.value;const st=btn.querySelector('.st');if(st)st.textContent=FILTER_CYCLE[v]||'全部';btn.dataset.state=FILTER_STATE[v]||'all';btn.setAttribute('aria-pressed',v?'true':'false')}
 function initFilterToggles(){document.querySelectorAll('.filter-toggle[data-sel]').forEach(function(btn){syncFilterToggle(btn.dataset.sel,btn.id)})}
 // 节点表分页：默认每页 20，可选 20/50/100；筛选变化回到第 1 页。
 let proxyRenderRows=[];let proxyPage=1;let proxyPageSize=20;

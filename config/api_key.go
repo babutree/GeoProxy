@@ -9,23 +9,22 @@ import (
 	"time"
 )
 
-// HashAPIKey is the single canonical hash for read-only API keys.
+// HashAPIKey 是只读 API Key 的唯一规范指纹函数。
 //
-// It is intentionally bare SHA-256 hex and MUST stay that way: every API key
-// already persisted — in config.json and via READONLY_API_KEYS env import — is
-// stored as this exact digest, and the read-only API authenticates by comparing
-// against it. Changing the algorithm, for example by adding a salt or KDF, would
-// silently invalidate every stored key, locking out existing integrations.
-// Backward compatibility is therefore mandatory; see docs/READONLY_API_DESIGN.md
-// §3.2 for the rejected-alternatives analysis. Both the config package and the
-// webui package hash API keys through this one function so no divergent second
-// implementation can drift out of sync.
+// 当前 WebUI 创建的 bearer token 由 16 字节 crypto/rand 随机数编码而成；这里的
+// 裸 SHA-256 十六进制值用于避免在 config.json 中保存该高熵令牌明文，属于
+// 兼容指纹，而不是低熵密码派生方案。已持久化配置和 READONLY_API_KEYS 导入
+// 均使用此格式，鉴权也按该格式比较；未配套迁移就直接改用盐或 KDF 会使
+// 现有集成失效。当前版本因此必须保持该持久化合同，但这不禁止未来通过
+// 版本化字段、双格式验证和显式迁移演进算法。具体边界见
+// docs/READONLY_API_DESIGN.md §3.2。config 与 webui 必须统一调用本函数，
+// 避免出现相互漂移的第二套实现。
 func HashAPIKey(plain string) string {
 	sum := sha256.Sum256([]byte(plain))
 	return hex.EncodeToString(sum[:])
 }
 
-// APIKey is a read-only API credential stored by SHA-256 hash only.
+// APIKey 表示只读 API 凭据；当前仅持久化 SHA-256 指纹。
 type APIKey struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name,omitempty"`
@@ -35,7 +34,7 @@ type APIKey struct {
 	Disabled   bool      `json:"disabled,omitempty"`
 }
 
-// ValidateReadOnlyAPIKey reports whether plain matches any non-disabled key hash.
+// ValidateReadOnlyAPIKey 判断明文是否匹配任一未禁用的 Key 指纹。
 func ValidateReadOnlyAPIKey(cfg *Config, plain string) bool {
 	if cfg == nil || plain == "" {
 		return false
@@ -74,8 +73,8 @@ func parseReadOnlyAPIKeysEnv(raw string) []string {
 	return out
 }
 
-// importReadOnlyAPIKeysFromEnv hashes READONLY_API_KEYS plains and appends missing hashes.
-// Plaintext is never stored on Config or disk.
+// importReadOnlyAPIKeysFromEnv 对 READONLY_API_KEYS 明文求指纹并追加缺失项。
+// Config 与磁盘中均不保存明文。
 func importReadOnlyAPIKeysFromEnv(cfg *Config) (changed bool) {
 	plains := parseReadOnlyAPIKeysEnv(os.Getenv("READONLY_API_KEYS"))
 	if len(plains) == 0 {

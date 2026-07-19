@@ -24,25 +24,25 @@ func (s *Server) apiAuthCheck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	total, err := s.storage.CountAll()
 	if err != nil {
-		log.Printf("[webui] stats CountAll failed: %v", err)
+		log.Printf("[webui] 统计全部节点失败: %v", err)
 		jsonError(w, "failed to load stats", http.StatusInternalServerError)
 		return
 	}
 	httpCount, err := s.storage.CountAvailableByProtocol("http")
 	if err != nil {
-		log.Printf("[webui] stats CountAvailableByProtocol(http) failed: %v", err)
+		log.Printf("[webui] 统计 HTTP 可用节点失败: %v", err)
 		jsonError(w, "failed to load stats", http.StatusInternalServerError)
 		return
 	}
 	socks5Count, err := s.storage.CountAvailableByProtocol("socks5")
 	if err != nil {
-		log.Printf("[webui] stats CountAvailableByProtocol(socks5) failed: %v", err)
+		log.Printf("[webui] 统计 SOCKS5 可用节点失败: %v", err)
 		jsonError(w, "failed to load stats", http.StatusInternalServerError)
 		return
 	}
 	subscriptionCount, err := s.storage.CountBySource(storage.SourceSubscription)
 	if err != nil {
-		log.Printf("[webui] stats CountBySource failed: %v", err)
+		log.Printf("[webui] 按来源统计节点失败: %v", err)
 		jsonError(w, "failed to load stats", http.StatusInternalServerError)
 		return
 	}
@@ -68,7 +68,7 @@ func (s *Server) apiProxies(w http.ResponseWriter, r *http.Request) {
 	// 协议筛选交由前端处理，避免停用节点从列表消失后无法再启用。
 	proxies, err := s.storage.GetAllForAdmin()
 	if err != nil {
-		log.Printf("[webui] list proxies failed: %v", err)
+		log.Printf("[webui] 获取节点列表失败: %v", err)
 		jsonError(w, "failed to list proxies", http.StatusInternalServerError)
 		return
 	}
@@ -78,7 +78,7 @@ func (s *Server) apiProxies(w http.ResponseWriter, r *http.Request) {
 	nameByID := map[int64]string{}
 	subs, subErr := s.storage.GetSubscriptions()
 	if subErr != nil {
-		log.Printf("[webui] list proxies subscription names failed: %v", subErr)
+		log.Printf("[webui] 获取节点订阅名称失败: %v", subErr)
 		jsonError(w, "failed to list proxies", http.StatusInternalServerError)
 		return
 	}
@@ -120,7 +120,7 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	// Resolve identity so manual tunnel deletes go through Manager (runtime + DB).
+	// 解析节点身份，确保删除手工隧道节点时通过 Manager 同步运行态和数据库。
 	var proxy *storage.Proxy
 	var lookupErr error
 	if req.ID > 0 {
@@ -129,7 +129,7 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 		proxy, lookupErr = s.storage.GetProxyByAddress(req.Address)
 	}
 	if lookupErr != nil {
-		// Missing identity is treated as already deleted (idempotent delete).
+		// 找不到节点身份时视为已删除，使删除操作保持幂等。
 		if lookupErr == sql.ErrNoRows || strings.Contains(lookupErr.Error(), "not found") {
 			jsonOK(w, map[string]string{"status": "deleted"})
 			return
@@ -138,7 +138,7 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "ambiguous proxy address; use id", http.StatusConflict)
 			return
 		}
-		log.Printf("[webui] delete proxy lookup failed: id=%d address=%q err=%v", req.ID, req.Address, lookupErr)
+		log.Printf("[webui] 删除节点前查询失败: id=%d address=%q err=%v", req.ID, req.Address, lookupErr)
 		jsonError(w, "failed to delete proxy", http.StatusInternalServerError)
 		return
 	}
@@ -157,7 +157,7 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, map[string]string{"status": "deleted"})
 			return
 		}
-		log.Printf("[webui] delete proxy failed: id=%d address=%q err=%v", req.ID, req.Address, err)
+		log.Printf("[webui] 删除节点失败: id=%d address=%q err=%v", req.ID, req.Address, err)
 		jsonError(w, "failed to delete proxy", http.StatusInternalServerError)
 		return
 	}
@@ -195,7 +195,7 @@ func (s *Server) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		err = s.storage.PauseProxy(req.Address)
 	}
 	if err != nil {
-		log.Printf("[webui] toggle proxy %q failed: %v", req.Address, err)
+		log.Printf("[webui] 切换节点 %q 状态失败: %v", req.Address, err)
 		jsonError(w, "failed to toggle proxy", http.StatusInternalServerError)
 		return
 	}
@@ -231,7 +231,7 @@ func (s *Server) apiStarProxy(w http.ResponseWriter, r *http.Request) {
 		id = proxy.ID
 	}
 	if err := s.storage.SetProxyStarred(id, req.Starred); err != nil {
-		log.Printf("[webui] star proxy failed: id=%d address=%q err=%v", req.ID, req.Address, err)
+		log.Printf("[webui] 切换节点星标失败: id=%d address=%q err=%v", req.ID, req.Address, err)
 		jsonError(w, "failed to star proxy", http.StatusInternalServerError)
 		return
 	}
@@ -284,7 +284,7 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 		cfg := config.Get()
 		v := validator.New(1, cfg.ValidateTimeout, cfg.ValidateURL)
 
-		log.Printf("[webui] refreshing proxy: %s", req.Address)
+		log.Printf("[webui] 开始刷新节点: %s", req.Address)
 		valid, latency, exitIP, exitLocation, risk := v.ValidateOne(*targetProxy)
 
 		if valid {
@@ -293,14 +293,14 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 			// EnableProxyByID 仅对 status='disabled' 生效，且尊重父订阅暂停，不影响 user_paused。
 			if targetProxy.Status == "disabled" {
 				if err := s.storage.EnableProxyByID(targetProxy.ID); err != nil {
-					log.Printf("[webui] re-enable proxy %s after successful test failed: %v", targetProxy.Address, err)
+					log.Printf("[webui] 节点测试成功后重新启用失败: %s: %v", targetProxy.Address, err)
 				}
 			}
-			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs, risk.IPAPIIsScore, risk.Flags, risk.CFBlocked, risk.AIReachability)
-			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", targetProxy.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
+			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs, risk.IPAPIIsScore, risk.Flags, risk.FlagsKnown, risk.CFBlocked, risk.AIReachability)
+			log.Printf("[webui] 节点刷新完成: %s latency=%dms grade=%s", targetProxy.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
 		} else {
 			s.storage.DisableProxyByID(targetProxy.ID)
-			log.Printf("[webui] proxy validation failed, disabled: %s", targetProxy.Address)
+			log.Printf("[webui] 节点验证失败，已禁用: %s", targetProxy.Address)
 		}
 	}()
 
@@ -313,32 +313,32 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() {
-		log.Println("[webui] refreshing latency for all proxies...")
+		log.Println("[webui] 开始刷新全部节点延迟...")
 		proxies, err := s.storage.GetAll()
 		if err != nil {
-			log.Printf("[webui] get proxies error: %v", err)
+			log.Printf("[webui] 获取节点失败: %v", err)
 			return
 		}
 		if len(proxies) == 0 {
-			log.Println("[webui] no proxies to refresh")
+			log.Println("[webui] 没有需要刷新延迟的节点")
 			return
 		}
 
 		cfg := config.Get()
 		validate := validator.New(cfg.ValidateConcurrency, cfg.ValidateTimeout, cfg.ValidateURL)
 
-		log.Printf("[webui] refreshing latency for %d proxies...", len(proxies))
+		log.Printf("[webui] 正在刷新 %d 个节点的延迟...", len(proxies))
 		updated := 0
 		for r := range validate.ValidateStream(proxies) {
 			if r.Valid {
 				latencyMs := int(r.Latency.Milliseconds())
-				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags, r.Risk.CFBlocked, r.Risk.AIReachability)
+				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags, r.Risk.FlagsKnown, r.Risk.CFBlocked, r.Risk.AIReachability)
 				updated++
 			} else {
 				s.storage.DisableProxyByID(r.Proxy.ID)
 			}
 		}
-		log.Printf("[webui] latency refresh done: updated=%d", updated)
+		log.Printf("[webui] 延迟刷新完成: updated=%d", updated)
 	}()
 	jsonOK(w, map[string]string{"status": "refresh started"})
 }

@@ -8,9 +8,9 @@ import (
 	"github.com/babutree/GeoProxy/config"
 )
 
-// resolvePublicHost picks an externally reachable host for connect views.
-// Priority: cfg.PublicHost > public_ip cache > request Host.
-// Loopback / localhost values are skipped. Never probes the network.
+// resolvePublicHost 为连接视图选择可从外部访问的主机。
+// 优先级：cfg.PublicHost > public_ip 缓存 > 请求 Host。
+// 跳过回环地址和 localhost，且绝不发起网络探测。
 // PUBLIC_HOST 仅在首次启动时导入；运行期读取会让过期环境变量覆盖已持久化的 config.json。
 func resolvePublicHost(cfg *config.Config, r *http.Request) (host string, unresolved bool) {
 	candidates := make([]string, 0, 3)
@@ -32,7 +32,7 @@ func resolvePublicHost(cfg *config.Config, r *http.Request) (host string, unreso
 	return "", true
 }
 
-// cachedPublicIPOnly reads the in-process public IP cache without issuing probes.
+// cachedPublicIPOnly 只读取进程内公网 IP 缓存，不发起探测。
 func cachedPublicIPOnly() string {
 	pubIP.mu.Lock()
 	v := pubIP.value
@@ -56,7 +56,7 @@ func stripHostPort(hostport string) string {
 	if err == nil {
 		return h
 	}
-	// No port, or malformed with brackets only (e.g. "[::1]").
+	// 没有端口，或只有方括号且格式错误（如 "[::1]"）。
 	return strings.Trim(hostport, "[]")
 }
 
@@ -65,7 +65,7 @@ func normalizePublicHostCandidate(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	// Allow accidental host:port in override/env.
+	// 允许覆盖值或环境变量中意外包含 host:port。
 	if strings.Contains(raw, ":") {
 		if h, _, err := net.SplitHostPort(raw); err == nil {
 			return h

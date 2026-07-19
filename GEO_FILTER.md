@@ -34,6 +34,7 @@ Saved WebUI settings are stored in `config.json` under `DATA_DIR` and override e
 Proxy authentication usernames may include these suffixes:
 
 ```text
+<base>[-region-<cc>][-unlock-<token>][-node-<host:port|key-<base64url(nodeKey)>>][-session-<id>]
 username-region-us
 username-session-browser
 username-region-jp-unlock-gpt-session-app01
@@ -41,11 +42,18 @@ username-region-jp-unlock-gpt-session-app01
 
 Rules:
 
+- Optional suffixes have a fixed order: `region` → `unlock` → `node` → `session`.
 - Region must be two ASCII letters and is normalized to lowercase.
 - Session can contain ASCII letters, digits, `_`, and `-`, up to 64 characters.
-- Optional `-unlock-<token>` appears after region and before session when present.
+- `key-<base64url(nodeKey)>` is the preferred stable configuration identity.
+  `host:port` remains a backward-compatible entrance address.
+- Both node forms identify the gateway's dial entrance, not the final exit IP.
+  A missing, unavailable, or constraint-mismatched pin fails with no fallback.
+- A node pin takes precedence over session affinity; a `session` suffix is
+  still parsed but does not create a separate sticky binding.
 - A request-specific region overrides `DEFAULT_REGION`.
-- A session key keeps the client bound to the same available node until the session TTL expires or the node becomes unavailable.
+- When no node pin is present, a session key keeps the client bound to the same
+  available node until the session TTL expires or the node becomes unavailable.
 
 ## Runtime Behavior
 

@@ -32,15 +32,133 @@ var firstBoot *FirstBootInfo
 // FirstBootCredentials 返回本次进程首次启动生成的凭据；非首次启动返回 nil。
 func FirstBootCredentials() *FirstBootInfo { return firstBoot }
 
-func dataDir() string {
-	if d := os.Getenv("DATA_DIR"); d != "" {
-		os.MkdirAll(d, 0755)
-		return d + "/"
-	}
-	return ""
+const defaultDataDirName = "GeoProxy"
+
+var legacyWorkingDirectoryMarkers = []string{
+	"config.json",
+	"proxy.db",
+	"proxy.db-wal",
+	"proxy.db-shm",
+	"data.db",
+	"data.db-wal",
+	"data.db-shm",
+	"subscriptions",
 }
 
-func ConfigFile() string { return dataDir() + "config.json" }
+// configuredDataDir 返回显式 DATA_DIR；空值视为未配置，以便使用平台默认目录。
+func configuredDataDir() (string, bool) {
+	if raw := strings.TrimSpace(os.Getenv("DATA_DIR")); raw != "" {
+		return filepath.Clean(raw), true
+	}
+	return "", false
+}
+
+func resolveDataDir() (string, bool, error) {
+	if dir, explicit := configuredDataDir(); explicit {
+		return dir, true, nil
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", false, fmt.Errorf("resolve default data directory: %w", err)
+	}
+	if strings.TrimSpace(base) == "" {
+		return "", false, fmt.Errorf("resolve default data directory: user config directory is empty")
+	}
+	base, err = filepath.Abs(base)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve default data directory %q: %w", base, err)
+	}
+	return filepath.Join(base, defaultDataDirName), false, nil
+}
+
+func ensureDataDir(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("create data directory: path is empty")
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create data directory %q: %w", dir, err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("stat data directory %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("create data directory %q: path is not a directory", dir)
+	}
+	return nil
+}
+
+// dataDir 只解析数据目录，不隐式创建；Load/Save 在明确的启动/写入边界创建目录。
+func dataDir() string {
+	dir, _, err := resolveDataDir()
+	if err != nil {
+		panic(err)
+	}
+	return dir
+}
+
+func dataDirOrEmpty() string {
+	dir, _, err := resolveDataDir()
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
+func defaultDBPath() string {
+	dir := dataDirOrEmpty()
+	if dir == "" {
+		// DefaultConfig 无 error 返回值；平台目录不可解析时保留空 DBPath，
+		// 由 Load/DataDir 在有错误语义的边界显式中止，绝不回退到 CWD。
+		return ""
+	}
+	return filepath.Join(dir, "proxy.db")
+}
+
+func ConfigFile() string { return filepath.Join(dataDir(), "config.json") }
+
+// DataDir 返回当前配置解析出的数据目录；调用方负责在写入前创建它。
+// 跨包写入入口应使用本函数，避免重新读取 DATA_DIR 后与默认目录策略漂移。
+func DataDir() (string, error) {
+	dir, _, err := resolveDataDir()
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func rejectLegacyWorkingDirectoryData(targetDataDir string) error {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("inspect legacy working-directory data: %w", err)
+	}
+	workingInfo, err := os.Stat(workingDir)
+	if err != nil {
+		return fmt.Errorf("inspect working directory %q: %w", workingDir, err)
+	}
+	targetInfo, err := os.Stat(targetDataDir)
+	if err == nil && os.SameFile(workingInfo, targetInfo) {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect target data directory %q: %w", targetDataDir, err)
+	}
+	found := make([]string, 0, len(legacyWorkingDirectoryMarkers))
+	for _, marker := range legacyWorkingDirectoryMarkers {
+		_, err := os.Stat(filepath.Join(workingDir, marker))
+		if err == nil {
+			found = append(found, marker)
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect legacy working-directory marker %q: %w", marker, err)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf("DATA_DIR 未设置，当前工作目录 %q 存在旧运行时数据（%s）；为避免生成新身份，请设置 DATA_DIR 指向该旧目录，或人工迁移后再启动；不会自动迁移", workingDir, strings.Join(found, ", "))
+}
 
 type Config struct {
 	HTTPPort              string
@@ -52,12 +170,12 @@ type Config struct {
 	ProxyAuthPassword     string
 	ProxyAuthPasswordHash string
 	SessionTTLMinutes     int
-	// MaxSessionsPerProxy limits concurrent sticky sessions per proxy node.
-	// 0 means unlimited (default, backward compatible). Values < 0 are rejected on Save.
+	// MaxSessionsPerProxy 限制每个代理节点的并发粘性会话数。
+	// 0 表示无限制（默认值，保持向后兼容）；Save 会拒绝小于 0 的值。
 	MaxSessionsPerProxy int
-	// ProxyCooldownMinutes is the quiet period after a new session first-bind
-	// during which other new sessions must not bind the same proxy.
-	// 0 disables cooldown (default). Values < 0 are rejected on Save.
+	// ProxyCooldownMinutes 表示新会话首次绑定后的冷却期；
+	// 在此期间，其他新会话不得绑定同一代理。
+	// 0 表示禁用冷却（默认值）；Save 会拒绝小于 0 的值。
 	ProxyCooldownMinutes   int
 	DefaultRegion          string
 	BlockedCountries       []string
@@ -76,11 +194,11 @@ type Config struct {
 	SingBoxBasePort        int
 	SingBoxShardCount      int
 	MaxRetry               int
-	// ReadOnlyAPIKeys holds read-only API credentials as SHA-256 hashes only (never plaintext).
+	// ReadOnlyAPIKeys 仅以 SHA-256 哈希保存只读 API 凭据，绝不保存明文。
 	ReadOnlyAPIKeys []APIKey
-	// PublicHost is an optional public hostname/IP override for external connect.host.
+	// PublicHost 是可选的公共主机名/IP，用于覆盖对外返回的 connect.host。
 	PublicHost string
-	// ReadOnlyAPIRatePerMin is the per-key rate limit for the read-only API (default 60).
+	// ReadOnlyAPIRatePerMin 是只读 API 的单密钥每分钟限速（默认 60）。
 	ReadOnlyAPIRatePerMin int
 }
 
@@ -123,7 +241,7 @@ func DefaultConfig() *Config {
 		DefaultRegion:          NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
 		BlockedCountries:       envCountriesDefault("BLOCKED_COUNTRIES", []string{"CN"}),
 		AllowedCountries:       envCountries("ALLOWED_COUNTRIES"),
-		DBPath:                 dataDir() + "proxy.db",
+		DBPath:                 defaultDBPath(),
 		ValidateConcurrency:    300,
 		ValidateTimeout:        10,
 		ValidateURL:            "http://www.gstatic.com/generate_204,http://cp.cloudflare.com/generate_204,http://captive.apple.com/hotspot-detect.html",
@@ -143,8 +261,24 @@ func DefaultConfig() *Config {
 }
 
 func Load() *Config {
+	dataDirPath, explicitDataDir, err := resolveDataDir()
+	if err != nil {
+		panic(err)
+	}
+	if !explicitDataDir {
+		if err := rejectLegacyWorkingDirectoryData(dataDirPath); err != nil {
+			panic(err)
+		}
+	}
+	if err := ensureDataDir(dataDirPath); err != nil {
+		panic(err)
+	}
+
 	cfg := DefaultConfig()
-	data, err := os.ReadFile(ConfigFile())
+	// Load 已在上方成功解析并准备 dataDirPath；使用同一快照，避免环境变化导致 DBPath 漂移。
+	cfg.DBPath = filepath.Join(dataDirPath, "proxy.db")
+	configPath := filepath.Join(dataDirPath, "config.json")
+	data, err := os.ReadFile(configPath)
 	hasPersistedConfig := err == nil
 	if hasPersistedConfig {
 		// 已落盘配置是权威来源，不能被部署环境中的旧只读 API 变量覆盖。
@@ -152,7 +286,7 @@ func Load() *Config {
 		cfg.ReadOnlyAPIRatePerMin = 60
 		var saved savedConfig
 		if err := json.Unmarshal(data, &saved); err != nil {
-			panic(fmt.Sprintf("load config: parse %s: %v", ConfigFile(), err))
+			panic(fmt.Sprintf("load config: parse %s: %v", configPath, err))
 		}
 		applySavedConfig(cfg, saved)
 	}
@@ -229,7 +363,7 @@ type savedConfig struct {
 	ProxyAuthPassword     string `json:"proxy_auth_password,omitempty"`
 	ProxyAuthPasswordHash string `json:"proxy_auth_password_hash,omitempty"`
 	SessionTTLMinutes     int    `json:"session_ttl_minutes,omitempty"`
-	// pointer so 0 (unlimited / disabled) can be distinguished from "field absent"
+	// 使用指针区分 0（无限制/禁用）与“字段缺失”。
 	MaxSessionsPerProxy   *int     `json:"max_sessions_per_proxy,omitempty"`
 	ProxyCooldownMinutes  *int     `json:"proxy_cooldown_minutes,omitempty"`
 	DefaultRegion         string   `json:"default_region,omitempty"`
@@ -241,15 +375,26 @@ type savedConfig struct {
 	AllowedCountries      []string `json:"allowed_countries,omitempty"`
 	ReadOnlyAPIKeys       []APIKey `json:"readonly_api_keys,omitempty"`
 	PublicHost            string   `json:"public_host,omitempty"`
-	// pointer so a non-default rate can round-trip; absent means keep DefaultConfig value
+	// 使用指针保证非默认限速值可往返序列化；缺失时保留 DefaultConfig 的值。
 	ReadOnlyAPIRatePerMin *int `json:"readonly_api_rate_per_min,omitempty"`
 }
 
 func Save(cfg *Config) error {
-	return saveConfig(cfg, os.Rename)
+	dataDirPath, _, err := resolveDataDir()
+	if err != nil {
+		return err
+	}
+	if err := ensureDataDir(dataDirPath); err != nil {
+		return err
+	}
+	return saveConfigAt(cfg, os.Rename, filepath.Join(dataDirPath, "config.json"))
 }
 
 func saveConfig(cfg *Config, replace func(string, string) error) error {
+	return saveConfigAt(cfg, replace, ConfigFile())
+}
+
+func saveConfigAt(cfg *Config, replace func(string, string) error, targetPath string) error {
 	if cfg.MaxSessionsPerProxy < 0 {
 		return fmt.Errorf("max_sessions_per_proxy must be >= 0, got %d", cfg.MaxSessionsPerProxy)
 	}
@@ -287,7 +432,6 @@ func saveConfig(cfg *Config, replace func(string, string) error) error {
 	if err != nil {
 		return err
 	}
-	targetPath := ConfigFile()
 	tempFile, err := os.CreateTemp(filepath.Dir(targetPath), ".config-*.tmp")
 	if err != nil {
 		return err
@@ -366,7 +510,7 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 	}
 	if saved.MaxSessionsPerProxy != nil {
 		if *saved.MaxSessionsPerProxy < 0 {
-			// corrupt config: keep default (unlimited) rather than panic
+			// 配置损坏时保留默认值（无限制），避免 panic。
 			cfg.MaxSessionsPerProxy = 0
 		} else {
 			cfg.MaxSessionsPerProxy = *saved.MaxSessionsPerProxy
@@ -443,8 +587,8 @@ func envInt(key string, defaultValue int) int {
 	return value
 }
 
-// envIntNonNegative parses env as int allowing 0. Empty/unset/invalid → defaultValue.
-// Negative values are rejected and fall back to defaultValue.
+// envIntNonNegative 将环境变量解析为允许 0 的整数；空值、未设置或无效值返回 defaultValue。
+// 负数会被拒绝，并回退到 defaultValue。
 func envIntNonNegative(key string, defaultValue int) int {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {

@@ -382,8 +382,9 @@ func TestReloadRetriesUnchangedPartialShard(t *testing.T) {
 	}
 }
 
-// TestRecoverFailedShardsRestartsPartialShard：健康检查须把 Partial 当分片异常并重载。
-func TestRecoverFailedShardsRestartsPartialShard(t *testing.T) {
+// TestRecoverFailedShardsRejectsPartialReloadCommit：健康检查重载后仍为 Partial 时，
+// 必须返回提交门错误并保留最后一次成功的 assignedKeys，供后续周期继续重试。
+func TestRecoverFailedShardsRejectsPartialReloadCommit(t *testing.T) {
 	const n = 4
 	sb, spies := newSpyOrchestrator(10000, n)
 	nodes := nodesOnDistinctShards(t, n, 2)
@@ -396,6 +397,8 @@ func TestRecoverFailedShardsRestartsPartialShard(t *testing.T) {
 	for i, shard := range spies {
 		before[i] = shard.calls()
 	}
+	spies[partialIdx].mu.Lock()
+	spies[partialIdx].forcePartial = true
 	spies[partialIdx].status = SingBoxRuntimeStatus{
 		Running:    true,
 		Status:     SingBoxStatusPartial,
@@ -404,9 +407,14 @@ func TestRecoverFailedShardsRestartsPartialShard(t *testing.T) {
 		ReadyPorts: 0,
 		TotalPorts: 1,
 	}
+	spies[partialIdx].mu.Unlock()
 
-	if err := sb.recoverFailedShards(); err != nil {
-		t.Fatalf("recoverFailedShards() error = %v", err)
+	beforeKeys := copyKeySet(sb.assignedKeys[partialIdx])
+	if err := sb.recoverFailedShards(); err == nil {
+		t.Fatal("recoverFailedShards() partial reload error = nil, want commit-gate error")
+	}
+	if !keySetsEqual(sb.assignedKeys[partialIdx], beforeKeys) {
+		t.Fatalf("partial recovery changed assignedKeys: got %v, want %v", sb.assignedKeys[partialIdx], beforeKeys)
 	}
 	for i, shard := range spies {
 		want := before[i]
@@ -477,6 +485,7 @@ func TestRecoverFailedShardsRestartsIncompletePortShard(t *testing.T) {
 		before[i] = shard.calls()
 	}
 	spies[badIdx].mu.Lock()
+	spies[badIdx].incompletePorts = true
 	spies[badIdx].portMap = map[string]int{}
 	spies[badIdx].status = SingBoxRuntimeStatus{
 		Running:    true,
@@ -487,8 +496,12 @@ func TestRecoverFailedShardsRestartsIncompletePortShard(t *testing.T) {
 	}
 	spies[badIdx].mu.Unlock()
 
-	if err := sb.recoverFailedShards(); err != nil {
-		t.Fatalf("recoverFailedShards() error = %v", err)
+	beforeKeys := copyKeySet(sb.assignedKeys[badIdx])
+	if err := sb.recoverFailedShards(); err == nil {
+		t.Fatal("recoverFailedShards() incomplete reload error = nil, want commit-gate error")
+	}
+	if !keySetsEqual(sb.assignedKeys[badIdx], beforeKeys) {
+		t.Fatalf("incomplete recovery changed assignedKeys: got %v, want %v", sb.assignedKeys[badIdx], beforeKeys)
 	}
 	for i, shard := range spies {
 		want := before[i]
@@ -863,5 +876,32 @@ func TestRuntimeStatusRollup(t *testing.T) {
 	if rs.Nodes != 3 || rs.ReadyPorts != 0 || rs.TotalPorts != 3 {
 		t.Fatalf("情形3: 数值求和错误 Nodes=%d ReadyPorts=%d TotalPorts=%d，期望 3/0/3",
 			rs.Nodes, rs.ReadyPorts, rs.TotalPorts)
+	}
+
+	// 情形 4：一个 running 分片与一个零节点 failed 分片 → Partial。
+	sb, spies = newSpyOrchestrator(10000, 3)
+	spies[0].status = SingBoxRuntimeStatus{Running: true, Status: SingBoxStatusRunning, Nodes: 1, ReadyPorts: 1, TotalPorts: 1}
+	spies[1].status = SingBoxRuntimeStatus{Running: false, Status: SingBoxStatusFailed, Reason: "data_dir_invalid"}
+	rs = sb.GetRuntimeStatus()
+	if rs.Status != SingBoxStatusPartial || !rs.Running {
+		t.Fatalf("情形4: 期望 Partial/Running，得到 Status=%q Reason=%q Running=%v", rs.Status, rs.Reason, rs.Running)
+	}
+
+	// 情形 5：所有分片均为零节点 failed，且原因一致 → 透传具体原因。
+	sb, spies = newSpyOrchestrator(10000, 3)
+	spies[0].status = SingBoxRuntimeStatus{Running: false, Status: SingBoxStatusFailed, Reason: "data_dir_invalid"}
+	spies[1].status = SingBoxRuntimeStatus{Running: false, Status: SingBoxStatusFailed, Reason: "data_dir_invalid"}
+	rs = sb.GetRuntimeStatus()
+	if rs.Status != SingBoxStatusFailed || rs.Reason != "data_dir_invalid" || rs.Running {
+		t.Fatalf("情形5: 期望 Failed/data_dir_invalid/非Running，得到 Status=%q Reason=%q Running=%v", rs.Status, rs.Reason, rs.Running)
+	}
+
+	// 情形 6：存在非 failed 的被考虑分片时，不得把另一分片的具体失败原因伪装为全局原因。
+	sb, spies = newSpyOrchestrator(10000, 2)
+	spies[0].status = SingBoxRuntimeStatus{Running: false, Status: SingBoxStatusStopped, Reason: SingBoxStatusStopped, Nodes: 1, TotalPorts: 1}
+	spies[1].status = SingBoxRuntimeStatus{Running: false, Status: SingBoxStatusFailed, Reason: "data_dir_invalid"}
+	rs = sb.GetRuntimeStatus()
+	if rs.Status != SingBoxStatusFailed || rs.Reason != "all_shards_failed" || rs.Running {
+		t.Fatalf("情形6: 期望 Failed/all_shards_failed/非Running，得到 Status=%q Reason=%q Running=%v", rs.Status, rs.Reason, rs.Running)
 	}
 }

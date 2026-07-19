@@ -1,156 +1,151 @@
 # GeoProxy 测试脚本
 
-本目录包含用于测试 GeoProxy 代理服务的脚本。所有脚本都采用**持续运行模式**（类似 `ping` 命令），按 `Ctrl+C` 停止并显示统计。
+本目录包含用于验证 GeoProxy 代理服务的脚本。两个协议探针默认持续运行，
+也可以指定有限的测试轮数，便于在自动化验收中取得明确退出码。
 
-## 📝 脚本列表
+## 脚本列表
 
-| 脚本 | 语言 | 依赖 | 运行模式 | 推荐度 |
-|------|------|------|----------|--------|
-| `test_proxy.sh` | Bash | curl + Python3 | 持续运行 | ⭐⭐⭐ |
-| `test_socks5.sh` | Bash | curl + Python3 | 持续运行 | ⭐⭐⭐ |
-| `test_http_https.sh` | Bash | curl + Python3 | 持续运行 / 可限次 | ⭐⭐⭐ |
-| `test_proxy.go` | Go | 标准库 | 持续运行 | ⭐⭐ |
-| `test_proxy.py` | Python | `requests` | 持续运行 | ⭐⭐ |
+| 脚本 | 语言 | 依赖 | 运行模式 |
+|------|------|------|----------|
+| `test_proxy.sh` | Bash | curl + Python3 | 持续运行 |
+| `test_socks5.sh` | Bash | curl + Python3 | 持续运行 / 可限轮数 |
+| `test_http_https.sh` | Bash | curl + Python3 | 持续运行 / 可限轮数 |
+| `test_proxy.go` | Go | 标准库 | 持续运行 |
+| `test_proxy.py` | Python | `requests` | 持续运行 |
 
-## 🚀 快速使用
+## 快速使用
 
-### Bash 脚本（推荐）
+先在当前终端设置真实认证信息；密码只放在环境变量中，不要写入脚本或仓库：
 
-**HTTP 代理测试**（探测出口 IP）：
 ```bash
-# 先填入首次启动日志或 WebUI Settings 中的实际代理认证信息；不要把密码写入脚本。
 export GEOPROXY_AUTH_USERNAME=username
 export GEOPROXY_AUTH_PASSWORD='replace-with-your-proxy-password'
-
-# 测试 HTTP 代理端口（默认 7802）
-./test/test_proxy.sh 7802
-
-# 按 Ctrl+C 停止并查看统计
 ```
 
-**HTTP 代理 HTTPS 隧道测试**（CONNECT，随机访问多个 HTTPS 站点）：
-```bash
-# 复用上面的 GEOPROXY_AUTH_USERNAME / GEOPROXY_AUTH_PASSWORD。
+HTTP 代理的 HTTPS CONNECT 探针（默认端口 `7802`）：
 
-# 持续运行
+```bash
+# 持续观察
 ./test/test_http_https.sh 7802
 
-# 或指定次数后退出
-./test/test_http_https.sh 7802 10
+# 自动化验收：运行 2 轮后退出
+./test/test_http_https.sh 7802 2
 ```
 
-**SOCKS5 代理测试**：
-```bash
-# 复用上面的 GEOPROXY_AUTH_USERNAME / GEOPROXY_AUTH_PASSWORD。
+SOCKS5 探针（默认端口 `7801`）：
 
-# 测试 SOCKS5 代理端口（默认 7801）
+```bash
+# 持续观察
 ./test/test_socks5.sh 7801
 
-# 按 Ctrl+C 停止并查看统计
+# 自动化验收：运行 2 轮后退出
+./test/test_socks5.sh 7801 2
 ```
 
-### Go 脚本
+可选路由参数仍通过环境变量提供：
 
 ```bash
-# 运行测试（可选端口参数，默认 7802）
-go run test/test_proxy.go
-go run test/test_proxy.go 7802
-
-# 或编译后运行
-cd test
-go build -o test_proxy test_proxy.go
-./test_proxy 7802
+export GEOPROXY_AUTH_REGION=us
+export GEOPROXY_AUTH_SESSION=browser
 ```
 
-### Python 脚本
+脚本会把它们追加到认证用户名的路由 DSL 中，不会把密码写入命令行参数。
+
+## 多目标探针合同
+
+`test_socks5.sh` 和 `test_http_https.sh` 各自有至少两个默认 HTTPS 目标，
+由不同服务提供方托管，用来降低单一第三方故障造成的误报：
+
+- SOCKS5：`api.ipify.org`、`checkip.amazonaws.com`
+- HTTP CONNECT：`www.cloudflare.com`、`api.ipify.org`
+
+可以用 `GEOPROXY_PROBE_URLS` 覆盖目标列表。值是换行分隔的 HTTPS URL，
+每行一个；空行会被忽略，非 HTTPS URL 会立即以配置错误退出：
 
 ```bash
-# 安装依赖
-pip install requests
-
-# 运行测试（可选端口参数，默认 7802）
-python test/test_proxy.py
-python test/test_proxy.py 7802
+export GEOPROXY_PROBE_URLS=$'https://health-a.example/\nhttps://health-b.example/'
+./test/test_http_https.sh 7802 1
 ```
 
-## 📊 测试内容
+每轮探针从轮换起点开始，最多逐个尝试所有目标；任一目标返回 `2xx/3xx`
+即判定该轮成功。收到 `4xx` 或 `5xx` 会记录为“目标站失败”，不会被当成
+成功；curl 没有拿到 HTTP 响应时会单独记录为“代理链或传输失败”。只有
+**全部目标失败**时，该轮才计为失败。每个目标的 URL、失败原因和耗时都会
+输出，便于区分目标站故障与代理链故障。
 
-| 脚本 | 默认端口 | 探测目标 | 间隔 |
-|------|----------|----------|------|
+有限轮数的退出码合同：
+
+- `0`：所有已完成轮次至少有一个目标成功；
+- 退出码 `1`：至少一轮出现全部目标失败；
+- `2`：认证、轮数或目标配置无效。
+
+持续模式按 `Ctrl+C` 停止并打印同样的轮次摘要；自动化门禁请使用有限轮数，
+不要把真实外网可用性作为唯一门禁。
+
+### 离线合同门禁
+
+无法启动真实网关或执行 Bash 时，可在仓库根目录运行：
+
+```pwsh
+go test ./test -run TestProbe -count=1 -timeout 60s
+```
+
+该测试包含静态合同和真实 Bash 行为场景：fake curl 只接受 `.invalid` 保留域，
+并验证回退、2xx/3xx、4xx/5xx、curl 非零、无效配置和未知目标保护。测试不访问
+网络、不需要代理凭据；Windows 缺少 WSL Debian 或 Linux 缺少 `/bin/bash`
+时会明确失败，不会静默跳过。
+
+## 其他测试脚本
+
+`test_proxy.sh`、`test_proxy.go` 和 `test_proxy.py` 保留原有的单目标出口
+IP 检查，用于快速人工观察。它们不参与上述多目标退出码合同。
+
+## 测试内容
+
+| 脚本 | 默认端口 | 默认目标 | 默认间隔 |
+|------|----------|----------|----------|
 | `test_proxy.sh` / `.go` / `.py` | `127.0.0.1:7802` | `http://ip-api.com/json/?fields=countryCode,query` | 1s |
-| `test_socks5.sh` | `127.0.0.1:7801` | `https://httpbin.org/ip`（成功后再查国家） | 1s |
-| `test_http_https.sh` | `127.0.0.1:7802` | 随机 HTTPS 站点（Google/OpenAI/GitHub 等） | 2s |
+| `test_socks5.sh` | `127.0.0.1:7801` | 两个 HTTPS 出口 IP 服务，逐轮回退 | 1s |
+| `test_http_https.sh` | `127.0.0.1:7802` | 两个 HTTPS CONNECT 目标，逐轮回退 | 2s |
 
 共性行为：
-1. 通过本地代理端口转发请求；`test_proxy.sh` / `test_socks5.sh` / `test_http_https.sh` / `test_proxy.go` / `test_proxy.py` 都要求 `GEOPROXY_AUTH_USERNAME` 和 `GEOPROXY_AUTH_PASSWORD`，缺失时会直接报错退出
-2. **持续发送**（类似 `ping`），`test_http_https.sh` 可用第 2 个参数限次
-3. 实时输出成功/失败与延迟
-4. 按 `Ctrl+C` 停止并打印统计摘要
 
-可选路由参数：设置 `GEOPROXY_AUTH_REGION=us` 会把认证用户名扩展为 `username-region-us`，设置 `GEOPROXY_AUTH_SESSION=browser` 会追加 `-session-browser`。只在环境变量中提供真实密码，不要写入仓库文件。
+1. 通过本地代理端口转发请求；三个 Bash 探针都要求
+   `GEOPROXY_AUTH_USERNAME` 和 `GEOPROXY_AUTH_PASSWORD`。
+2. 第 2 个参数为测试轮数；省略或设为 `0` 时持续运行。
+3. 每次尝试输出目标、状态或 curl 错误和延迟。
+4. 按 `Ctrl+C` 停止并打印轮次摘要。
 
-## 🔀 测试不同协议端口
+## 按协议验证
 
 ### HTTP 代理
 
 ```bash
-export GEOPROXY_AUTH_USERNAME=username
-export GEOPROXY_AUTH_PASSWORD='replace-with-your-proxy-password'
 ./test/test_proxy.sh 7802
-./test/test_http_https.sh 7802
+./test/test_http_https.sh 7802 1
 ```
 
-**观察要点**：
-- **7802**：HTTP 代理；`test_proxy.sh` 应返回出口 IP
-- **CONNECT**：`test_http_https.sh` 应对 HTTPS 目标返回 2xx/3xx
+`test_http_https.sh` 验证 HTTPS CONNECT；只接受 `2xx/3xx`，不会把任意
+`4xx` 当作成功。
 
 ### SOCKS5 代理
 
 ```bash
-export GEOPROXY_AUTH_USERNAME=username
-export GEOPROXY_AUTH_PASSWORD='replace-with-your-proxy-password'
-./test/test_socks5.sh 7801
+./test/test_socks5.sh 7801 1
 ```
 
-**观察要点**：
-- **7801**：SOCKS5 代理，应返回出口 IP
+脚本通过两个 HTTPS 出口服务验证 SOCKS5 转发；一个目标不可用时会尝试
+另一个目标。
 
-> 提示：`test_socks5.sh` 与 `test_http_https.sh` 使用 `curl -k` 跳过 TLS 证书校验，便于连通性测试；生产环境请使用可信上游。
+两个 Bash 探针使用 `curl -k`（即 `--insecure`）进行连通性验证，生产环境
+应确保上游证书链可信。超时可通过 `GEOPROXY_PROBE_CONNECT_TIMEOUT` 和
+`GEOPROXY_PROBE_TIMEOUT` 调整，轮间隔可通过 `GEOPROXY_PROBE_DELAY` 调整。
 
-## 🔍 预期输出
+## 注意事项
 
-```
-PROXY 127.0.0.1:7802 (http://ip-api.com/json/?fields=countryCode,query): continuous mode
-
-proxy from 🇺🇸 203.0.113.45: seq=1 time=1234ms
-proxy from 🇩🇪 198.51.100.78: seq=2 time=987ms
-proxy from 🇬🇧 192.0.2.123: seq=3 time=1567ms
-proxy #4: request failed (timeout)
-proxy from 🇯🇵 198.51.100.12: seq=5 time=890ms
-proxy from 🇫🇷 192.0.2.234: seq=6 time=1456ms
-...
-（持续运行，按 Ctrl+C 停止）
-
-^C
----
-50 requests transmitted, 47 received, 3 failed, 6.0% packet loss
-```
-
-**输出风格**：
-- 简洁清晰，类似 `ping` 命令
-- 一行一个结果
-- 显示国旗 emoji、出口 IP、序号、延迟
-- 统计信息简洁明了
-
-**观察要点**：
-- 每次请求的出口 IP 应该不同（证明代理轮换）
-- 延迟应该在合理范围（< 2000ms）
-- 丢包率应该 < 10%
-- 可以长时间运行观察稳定性
-
-## 📝 注意事项
-
-1. 确保 GeoProxy 服务已启动：`./geoproxy`
-2. 首次启动需保存日志中一次性打印的代理认证用户名和密码；脚本不会使用默认密码，也不会从 WebUI 密码推断代理密码
-3. 可配合 WebUI (http://localhost:7800) 查看实时状态
-
+1. 确保 GeoProxy 服务已启动：`./geoproxy`。
+2. 首次启动需保存日志中一次性打印的代理认证用户名和密码；脚本不会使用
+   默认密码，也不会从 WebUI 密码推断代理密码。
+3. 脚本会在临时目录创建权限为用户私有的 curl 认证配置，并在退出时清理；
+   不要把真实凭据或带凭据的目标 URL 写入仓库文件。
+4. 可配合 WebUI（`http://localhost:7800`）查看实时状态。

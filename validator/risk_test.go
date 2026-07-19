@@ -61,6 +61,9 @@ func TestUnknownRisk(t *testing.T) {
 	if r.Flags != "" {
 		t.Fatalf("UnknownRisk().Flags = %q, want empty", r.Flags)
 	}
+	if r.FlagsKnown {
+		t.Fatal("UnknownRisk().FlagsKnown = true, want false")
+	}
 }
 
 func TestQueryIPAPIIsRejectsNon2xxAndMissingScore(t *testing.T) {

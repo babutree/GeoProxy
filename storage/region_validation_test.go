@@ -86,7 +86,7 @@ func TestValidatorRegionWriteNotRegressed(t *testing.T) {
 	insertTestSubscription(t, store, 1, "active")
 	insertProxyWithRegionSource(t, store, "auto:8080", "", "auto")
 
-	if err := store.UpdateExitInfo("auto:8080", "8.8.8.8", "US Mountain View", 120, -1, "", -1, ""); err != nil {
+	if err := store.UpdateExitInfo("auto:8080", "8.8.8.8", "US Mountain View", 120, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateExitInfo() error = %v", err)
 	}
 	proxy, err := store.GetProxyByAddress("auto:8080")

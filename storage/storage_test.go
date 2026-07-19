@@ -170,10 +170,10 @@ func TestUpdateExitInfoWritesAutoRegionAndPreservesManualRegion(t *testing.T) {
 	insertProxyWithRegionSource(t, store, "auto:8080", "", "auto")
 	insertProxyWithRegionSource(t, store, "manual:8080", "jp", "manual")
 
-	if err := store.UpdateExitInfo("auto:8080", "8.8.8.8", "US Mountain View", 120, -1, "", -1, ""); err != nil {
+	if err := store.UpdateExitInfo("auto:8080", "8.8.8.8", "US Mountain View", 120, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateExitInfo(auto) error = %v", err)
 	}
-	if err := store.UpdateExitInfo("manual:8080", "1.1.1.1", "US Los Angeles", 80, -1, "", -1, ""); err != nil {
+	if err := store.UpdateExitInfo("manual:8080", "1.1.1.1", "US Los Angeles", 80, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateExitInfo(manual) error = %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestUpdateExitInfoIgnoresInvalidRegionCode(t *testing.T) {
 	insertTestSubscription(t, store, 1, "active")
 	insertProxyWithRegionSource(t, store, "unknown:8080", "hk", "auto")
 
-	if err := store.UpdateExitInfo("unknown:8080", "9.9.9.9", "USA Miami", 150, -1, "", -1, ""); err != nil {
+	if err := store.UpdateExitInfo("unknown:8080", "9.9.9.9", "USA Miami", 150, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateExitInfo() error = %v", err)
 	}
 
@@ -607,7 +607,7 @@ func TestProxyIdentityConsistencyForUsagePauseAndDelete(t *testing.T) {
 	if err := store.DisableSubscriptionProxy(sub.Address, sub.SubscriptionID); err != nil {
 		t.Fatalf("DisableSubscriptionProxy() error = %v", err)
 	}
-	if err := store.UpdateSubscriptionProxyExitInfo(sub.Address, sub.SubscriptionID, "203.0.113.9", "US Ashburn", 42, -1, "", -1, ""); err != nil {
+	if err := store.UpdateSubscriptionProxyExitInfo(sub.Address, sub.SubscriptionID, "203.0.113.9", "US Ashburn", 42, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateSubscriptionProxyExitInfo() error = %v", err)
 	}
 	if err := store.EnableSubscriptionProxy(sub.Address, sub.SubscriptionID); err != nil {
@@ -755,7 +755,7 @@ func TestSuccessResetsFailCountEnablesSelfHeal(t *testing.T) {
 	if nodes, err := store.GetByRegion("us", nil); err != nil || len(nodes) != 0 {
 		t.Fatalf("GetByRegion after zombie = %d nodes err=%v, want 0", len(nodes), err)
 	}
-	if batch, err := store.GetBatchForHealthCheck(10, false); err != nil || len(batch) != 0 {
+	if batch, err := store.GetBatchForHealthCheck(10); err != nil || len(batch) != 0 {
 		t.Fatalf("GetBatchForHealthCheck after zombie = %d nodes err=%v, want 0", len(batch), err)
 	}
 
@@ -775,7 +775,7 @@ func TestSuccessResetsFailCountEnablesSelfHeal(t *testing.T) {
 	if nodes, err := store.GetByRegion("us", nil); err != nil || len(nodes) != 1 {
 		t.Fatalf("GetByRegion after heal = %d nodes err=%v, want 1", len(nodes), err)
 	}
-	if batch, err := store.GetBatchForHealthCheck(10, false); err != nil || len(batch) != 1 {
+	if batch, err := store.GetBatchForHealthCheck(10); err != nil || len(batch) != 1 {
 		t.Fatalf("GetBatchForHealthCheck after heal = %d nodes err=%v, want 1", len(batch), err)
 	}
 }
@@ -815,7 +815,7 @@ func TestHealthCheckSuccessResetsFailCount(t *testing.T) {
 		t.Fatalf("seed fail_count = %d, want 2", p.FailCount)
 	}
 
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.10", "US Ashburn", 42, -1, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.10", "US Ashburn", 42, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("10.0.0.2:8080")
@@ -824,6 +824,94 @@ func TestHealthCheckSuccessResetsFailCount(t *testing.T) {
 	}
 	if p.ExitIP != "203.0.113.10" || p.Latency != 42 {
 		t.Fatalf("exit info not written: %#v", p)
+	}
+}
+
+// TestUpdateProxyExitInfoAdvancesLastCheck 覆盖 BUG-024：健康检查成功写回出口
+// 信息时必须推进 last_check，避免同一节点在 oldest-first 批次中被立即重复选中。
+func TestUpdateProxyExitInfoAdvancesLastCheck(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "success-last-check:8080", "http", "us", SourceManual, 100, "active", 0)
+	p, err := store.GetProxyByAddress("success-last-check:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	if _, err := store.db.Exec("UPDATE proxies SET last_check = ? WHERE id = ?", "2000-01-01 00:00:00", p.ID); err != nil {
+		t.Fatalf("seed last_check: %v", err)
+	}
+	before, err := store.GetProxyByID(p.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID(before) error = %v", err)
+	}
+
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.11", "US Ashburn", 42, -1, "", true, -1, ""); err != nil {
+		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
+	}
+	after, err := store.GetProxyByID(p.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID(after) error = %v", err)
+	}
+	if after.LastCheck.IsZero() || !after.LastCheck.After(before.LastCheck) {
+		t.Fatalf("last_check after success = %v, before = %v; want advanced timestamp", after.LastCheck, before.LastCheck)
+	}
+}
+
+// TestRecordProxyFailureByIDAdvancesLastCheck 覆盖 BUG-024：健康检查失败写回
+// 失败计数时也必须推进 last_check，避免失败节点在同一轮被立即重复检查。
+func TestRecordProxyFailureByIDAdvancesLastCheck(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "failure-last-check:8080", "http", "us", SourceManual, 100, "active", 0)
+	p, err := store.GetProxyByAddress("failure-last-check:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	if _, err := store.db.Exec("UPDATE proxies SET last_check = ? WHERE id = ?", "2000-01-01 00:00:00", p.ID); err != nil {
+		t.Fatalf("seed last_check: %v", err)
+	}
+	before, err := store.GetProxyByID(p.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID(before) error = %v", err)
+	}
+
+	if err := store.RecordProxyFailureByID(p.ID, 3); err != nil {
+		t.Fatalf("RecordProxyFailureByID() error = %v", err)
+	}
+	after, err := store.GetProxyByID(p.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID(after) error = %v", err)
+	}
+	if after.LastCheck.IsZero() || !after.LastCheck.After(before.LastCheck) {
+		t.Fatalf("last_check after failure = %v, before = %v; want advanced timestamp", after.LastCheck, before.LastCheck)
+	}
+}
+
+// TestGetBatchForHealthCheckPrefersStaleSGradeByLastCheck 覆盖 BUG-024：健康检查
+// 批次必须按 last_check 轮转，不能因 S 级占比高而把陈旧 S 级节点永久排除。
+func TestGetBatchForHealthCheckPrefersStaleSGradeByLastCheck(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "stale-s:8080", "http", "jp", SourceManual, 20, "active", 0)
+	insertProxy(t, store, "fresh-c:8080", "http", "jp", SourceManual, 10, "active", 0)
+
+	if _, err := store.db.Exec(`
+		UPDATE proxies
+		SET quality_grade = CASE address WHEN ? THEN ? ELSE ? END,
+		    last_check = CASE address
+			WHEN ? THEN ?
+			ELSE ?
+		    END
+		WHERE address IN (?, ?)`,
+		"stale-s:8080", "S", "C",
+		"stale-s:8080", "2000-01-01 00:00:00", "2099-01-01 00:00:00",
+		"stale-s:8080", "fresh-c:8080"); err != nil {
+		t.Fatalf("seed health-check ordering: %v", err)
+	}
+
+	batch, err := store.GetBatchForHealthCheck(1)
+	if err != nil {
+		t.Fatalf("GetBatchForHealthCheck() error = %v", err)
+	}
+	if len(batch) != 1 || batch[0].Address != "stale-s:8080" {
+		t.Fatalf("GetBatchForHealthCheck() = %#v, want stale S-grade node", batch)
 	}
 }
 

@@ -1,34 +1,57 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# GeoProxy HTTP 协议代理 HTTPS 访问测试脚本
-# 随机访问多个 HTTPS 网站，验证 HTTP 代理的 CONNECT 隧道能力
-# 用法: GEOPROXY_AUTH_USERNAME=username GEOPROXY_AUTH_PASSWORD=... ./test_http_https.sh [端口号，默认7802] [测试次数，默认持续运行]
+# GeoProxy HTTP 代理 HTTPS CONNECT 测试脚本
+# 用法: GEOPROXY_AUTH_USERNAME=username GEOPROXY_AUTH_PASSWORD=... ./test_http_https.sh [端口号，默认7802] [测试轮数，默认持续运行]
 # 可选: GEOPROXY_AUTH_REGION=us GEOPROXY_AUTH_SESSION=browser
-# 按 Ctrl+C 停止测试
+# 可选: GEOPROXY_PROBE_URLS=$'https://target-a.example/\nhttps://target-b.example/'
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${1:-7802}"
-MAX_COUNT="${2:-0}"  # 0 = 持续运行
-DELAY=2
+MAX_COUNT="${2:-0}" # 0 = 持续运行
+DELAY="${GEOPROXY_PROBE_DELAY:-2}"
+CONNECT_TIMEOUT="${GEOPROXY_PROBE_CONNECT_TIMEOUT:-5}"
+REQUEST_TIMEOUT="${GEOPROXY_PROBE_TIMEOUT:-15}"
+
+DEFAULT_TARGETS=(
+    "https://www.cloudflare.com/cdn-cgi/trace"
+    "https://api.ipify.org/"
+)
+TARGETS=()
+CURL_AUTH_CONFIG=""
+
+total_rounds=0
+successful_rounds=0
+failed_rounds=0
+total_attempts=0
 
 require_proxy_auth() {
-    if [ -z "${GEOPROXY_AUTH_USERNAME:-}" ] || [ -z "${GEOPROXY_AUTH_PASSWORD:-}" ]; then
-        echo "Missing proxy credentials." >&2
-        echo "Set GEOPROXY_AUTH_USERNAME and GEOPROXY_AUTH_PASSWORD from the first-boot log or WebUI Settings." >&2
-        echo "Optional: GEOPROXY_AUTH_REGION=us GEOPROXY_AUTH_SESSION=browser" >&2
+    if [[ -z "${GEOPROXY_AUTH_USERNAME:-}" || -z "${GEOPROXY_AUTH_PASSWORD:-}" ]]; then
+        echo "缺少代理认证信息。" >&2
+        echo "请通过 GEOPROXY_AUTH_USERNAME 和 GEOPROXY_AUTH_PASSWORD 提供首次启动日志或 WebUI 设置中的认证信息。" >&2
+        echo "可选路由参数: GEOPROXY_AUTH_REGION=us GEOPROXY_AUTH_SESSION=browser" >&2
+        exit 2
+    fi
+}
+
+require_non_negative_integer() {
+    local name="$1"
+    local value="$2"
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "${name} 必须是非负整数，实际为: ${value}" >&2
         exit 2
     fi
 }
 
 proxy_auth_username() {
     local username="$GEOPROXY_AUTH_USERNAME"
-    if [ -n "${GEOPROXY_AUTH_REGION:-}" ]; then
+    if [[ -n "${GEOPROXY_AUTH_REGION:-}" ]]; then
         username="${username}-region-${GEOPROXY_AUTH_REGION}"
     fi
-    if [ -n "${GEOPROXY_AUTH_SESSION:-}" ]; then
+    if [[ -n "${GEOPROXY_AUTH_SESSION:-}" ]]; then
         username="${username}-session-${GEOPROXY_AUTH_SESSION}"
     fi
-    echo "$username"
+    printf '%s\n' "$username"
 }
 
 setup_curl_auth_config() {
@@ -37,80 +60,150 @@ setup_curl_auth_config() {
     umask 077
     CURL_AUTH_CONFIG=$(mktemp "${TMPDIR:-/tmp}/GeoProxy-curl-auth.XXXXXX")
     umask "$old_umask"
-    printf 'proxy-user = "%s:%s"\n' "$(proxy_auth_username)" "$GEOPROXY_AUTH_PASSWORD" > "$CURL_AUTH_CONFIG"
-    trap 'rm -f "$CURL_AUTH_CONFIG"' EXIT INT TERM
+    printf 'proxy-user = "%s:%s"\n' "$(proxy_auth_username)" "$GEOPROXY_AUTH_PASSWORD" >"$CURL_AUTH_CONFIG"
 }
 
-# 测试目标（HTTPS 网站）
-TARGETS=(
-    "https://www.google.com"
-    "https://www.openai.com"
-    "https://www.github.com"
-    "https://www.cloudflare.com"
-    "https://httpbin.org/ip"
-)
+cleanup() {
+    if [[ -n "$CURL_AUTH_CONFIG" ]]; then
+        rm -f -- "$CURL_AUTH_CONFIG"
+    fi
+}
 
-# 统计变量
-total=0
-success=0
-fail=0
+load_targets() {
+    local target
+    if [[ -n "${GEOPROXY_PROBE_URLS:-}" ]]; then
+        while IFS= read -r target || [[ -n "$target" ]]; do
+            target="${target%$'\r'}"
+            if [[ -z "$target" ]]; then
+                continue
+            fi
+            TARGETS+=("$target")
+        done <<<"$GEOPROXY_PROBE_URLS"
+    else
+        TARGETS=("${DEFAULT_TARGETS[@]}")
+    fi
 
-# 获取毫秒时间戳
+    if (( ${#TARGETS[@]} == 0 )); then
+        echo "GEOPROXY_PROBE_URLS 未提供有效目标；每行必须包含一个 HTTPS URL。" >&2
+        exit 2
+    fi
+    for target in "${TARGETS[@]}"; do
+        if [[ "$target" != https://* ]]; then
+            echo "探针目标必须使用 HTTPS: ${target}" >&2
+            exit 2
+        fi
+    done
+}
+
 get_ms_time() {
     python3 -c 'import time; print(int(time.time() * 1000))'
 }
 
-# 捕获 Ctrl+C 信号
-trap ctrl_c INT
-function ctrl_c() {
-    echo ""
+is_success_status() {
+    [[ "$1" =~ ^[23][0-9][0-9]$ ]]
+}
+
+probe_target() {
+    local round_number="$1"
+    local target="$2"
+    local start_time end_time elapsed curl_output curl_exit http_code details
+
+    start_time=$(get_ms_time)
+    total_attempts=$((total_attempts + 1))
+    if curl_output=$(curl --silent --show-error --insecure \
+        --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
+        --config "$CURL_AUTH_CONFIG" \
+        --output /dev/null \
+        --write-out $'\n%{http_code}' \
+        --connect-timeout "$CONNECT_TIMEOUT" \
+        --max-time "$REQUEST_TIMEOUT" \
+        "$target" 2>&1); then
+        curl_exit=0
+    else
+        curl_exit=$?
+    fi
+    end_time=$(get_ms_time)
+    elapsed=$((end_time - start_time))
+
+    http_code="${curl_output##*$'\n'}"
+    details="${curl_output%$'\n'*}"
+    details="${details//$'\n'/ }"
+
+    if (( curl_exit != 0 )); then
+        if [[ -z "$details" ]]; then
+            details="无详细信息"
+        fi
+        echo "失败 round=${round_number} target=${target} 代理链或传输失败: curl=${curl_exit}, ${details} time=${elapsed}ms" >&2
+        return 1
+    fi
+    if ! is_success_status "$http_code"; then
+        echo "失败 round=${round_number} target=${target} 目标站失败: HTTP ${http_code} time=${elapsed}ms" >&2
+        return 1
+    fi
+
+    echo "成功 round=${round_number} target=${target} HTTP ${http_code} time=${elapsed}ms"
+    return 0
+}
+
+probe_round() {
+    local round_number="$1"
+    local attempt target_index target
+
+    for (( attempt = 0; attempt < ${#TARGETS[@]}; attempt++ )); do
+        target_index=$(( (round_number - 1 + attempt) % ${#TARGETS[@]} ))
+        target="${TARGETS[$target_index]}"
+        if probe_target "$round_number" "$target"; then
+            return 0
+        fi
+    done
+
+    echo "失败 round=${round_number} 全部目标失败 (${#TARGETS[@]} 个目标)" >&2
+    return 1
+}
+
+print_summary() {
     echo "---"
-    if [ $total -gt 0 ]; then
-        loss_rate=$(awk "BEGIN {printf \"%.1f\", ($total - $success)/$total*100}")
-        success_rate=$(awk "BEGIN {printf \"%.1f\", $success/$total*100}")
-        echo "$total requests transmitted, $success succeeded, $fail failed, ${loss_rate}% loss, ${success_rate}% success rate"
+    echo "${total_rounds} 轮探针，${successful_rounds} 轮成功，${failed_rounds} 轮全部目标失败，共 ${total_attempts} 次目标请求"
+}
+
+finish() {
+    print_summary
+    if (( failed_rounds > 0 )); then
+        exit 1
     fi
     exit 0
 }
 
-echo "HTTP PROXY HTTPS TEST — $PROXY_HOST:$PROXY_PORT"
-echo "targets: ${#TARGETS[@]} HTTPS sites"
-echo ""
+handle_interrupt() {
+    echo ""
+    finish
+}
 
+trap cleanup EXIT
+trap handle_interrupt INT
+trap 'exit 143' TERM
+
+require_non_negative_integer "测试轮数" "$MAX_COUNT"
 require_proxy_auth
+load_targets
 setup_curl_auth_config
 
+echo "HTTP 代理 HTTPS CONNECT ${PROXY_HOST}:${PROXY_PORT}: $([[ "$MAX_COUNT" -eq 0 ]] && echo '持续模式' || echo "${MAX_COUNT} 轮")"
+echo "目标数: ${#TARGETS[@]}（每轮任一目标成功即成功）"
+echo ""
+
 while true; do
-    # 随机选择目标
-    idx=$((RANDOM % ${#TARGETS[@]}))
-    target="${TARGETS[$idx]}"
-
-    total=$((total + 1))
-
-    start_time=$(get_ms_time)
-    response=$(curl -x "http://${PROXY_HOST}:${PROXY_PORT}" \
-					--config "$CURL_AUTH_CONFIG" \
-                   -s -k \
-                   -o /dev/null \
-                   -w "%{http_code}" \
-                   --connect-timeout 10 \
-                   --max-time 15 \
-                   "${target}" 2>&1)
-    end_time=$(get_ms_time)
-    elapsed=$((end_time - start_time))
-
-    if [[ "$response" =~ ^[23] ]]; then
-        echo "✅ seq=$total ${target} -> HTTP $response time=${elapsed}ms"
-        success=$((success + 1))
+    total_rounds=$((total_rounds + 1))
+    if probe_round "$total_rounds"; then
+        successful_rounds=$((successful_rounds + 1))
     else
-        echo "❌ seq=$total ${target} -> HTTP $response time=${elapsed}ms"
-        fail=$((fail + 1))
+        failed_rounds=$((failed_rounds + 1))
     fi
 
-    # 达到指定次数则停止
-    if [ "$MAX_COUNT" -gt 0 ] && [ "$total" -ge "$MAX_COUNT" ]; then
-        ctrl_c
+    if (( MAX_COUNT > 0 && total_rounds >= MAX_COUNT )); then
+        break
     fi
-
-    sleep $DELAY
+    sleep "$DELAY"
 done
+
+finish

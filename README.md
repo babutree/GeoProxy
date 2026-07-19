@@ -41,9 +41,11 @@ docker compose logs | grep "首次启动"
 ```
 
 Save those credentials, then open the WebUI at `http://YOUR-HOST-IP:7800` and log
-in. You can change all credentials later under **Settings**. The credentials are
-persisted (hashed for the WebUI password) in `config.json` inside the data
-volume; they are not shown again on later restarts.
+in. Proxy authentication username/password can be changed in the WebUI
+**Settings** panel. The WebUI login password is not editable there; use the
+reset procedure below. The credentials are persisted (hashed for the WebUI
+password) in `config.json` inside the data volume and are not shown again on
+later restarts.
 
 ### Local Run
 
@@ -65,7 +67,9 @@ $env:GOPROXY="https://goproxy.cn,direct"
 
 Proxy authentication is enabled by default. The base username (default `username`)
 and password are auto-generated on first boot and printed once to the log; the
-password is stored in `config.json`. Change them in the WebUI **Settings** page.
+password is stored in `config.json`. The proxy authentication username/password
+can be changed in the WebUI **Settings** page. The WebUI login password is not
+editable there; use the reset procedure below.
 
 > Proxy credentials must be stored in recoverable form (not just a hash) because
 > the SOCKS5 username/password auth scheme (RFC 1929) compares the plaintext the
@@ -84,7 +88,7 @@ client's proxy-username field.
 The full username has the form (**fixed order**):
 
 ```
-<base>[-region-<cc>][-unlock-<token>][-node-<host:port>][-session-<id>]
+<base>[-region-<cc>][-unlock-<token>][-node-<host:port|key-<base64url(nodeKey)>>][-session-<id>]
 ```
 
 Suffixes are optional, but when present they must appear in this order:
@@ -113,16 +117,20 @@ credentials.
 | `username-session-browser` | Bind session key `browser` to one node for the configured TTL. |
 | `username-region-jp-session-app01` | `jp` region + sticky session `app01`. |
 | `username-region-jp-unlock-gpt-session-app01` | `jp` region + unlock filter `gpt` + sticky session `app01`. |
-| `username-node-1.2.3.4:7801` | Pin routing to the node whose dial address is `1.2.3.4:7801`. |
+| `username-region-jp-unlock-gpt-node-key-dHJvamFuOmpwLmV4YW1wbGUuY29tOjQ0Mzpub2RlMDE-session-app01` | Full canonical-order example: `jp` + GPT constraints + stable node pin; the node pin determines routing. |
+| `username-node-1.2.3.4:7801` | Backward-compatible pin by the node's dial address `host:port`. |
 
-> **`-node-` pins the ENTRANCE node, not the exit IP.** The value is the node's
-> own dial address (host:port), i.e. its identity in the pool — the address the
-> gateway connects to. It bypasses region selection and session affinity and
-> routes exactly to that node, as long as it still passes
-> availability/region/unlock/parent-subscription checks (otherwise the request
-> fails; there is no fallback). With chained proxies or realm forwarding the
-> final exit IP the target site sees may differ from this address and may drift;
-> the gateway can only guarantee the entrance node, not the upstream exit.
+> **`-node-` pins the entrance node, not the final exit IP.** The preferred form
+> `key-<base64url(nodeKey)>` is a stable configuration identity. The
+> `host:port` form is a backward-compatible entrance address for older copied
+> credentials. Both identify the node the gateway dials, not a final exit IP.
+> Node pins bypass region selection and session affinity, but the selected node
+> must still pass availability/region/unlock/parent-subscription checks. If the
+> pinned node is missing or fails a constraint, the request fails with no fallback.
+> A node pin takes precedence over session affinity; a `session` suffix in a
+> pinned example is parsed but does not create a separate sticky binding.
+> With chained proxies or realm forwarding, the final exit IP visible to the
+> target may differ from this entrance and may drift.
 
 > Replace `username` with the configured proxy username (default `username`, editable in
 > the WebUI Settings). If your base username is `myuser`, the strings become
@@ -215,7 +223,7 @@ Panels currently include:
 - Manual node add/edit/delete for manual nodes only; star, test, and copy full proxy URL.
 - Subscription management for adding, refreshing, pausing, enabling, and deleting subscription nodes, including optional custom request headers (JSON, e.g. `User-Agent`) for sources that reject the default client UA.
 - Active session monitor for username DSL session bindings.
-- Settings for authentication, default region, country filters, session TTL, health interval, retry count, and `sing-box` path.
+- Settings for proxy authentication, default region, country filters, session TTL, health interval, retry count, and `sing-box` path.
 - Logs.
 
 Subscription nodes are managed through subscription operations. Manual-node delete/edit actions do not apply to subscription-owned nodes.
@@ -262,11 +270,12 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 
 Credentials (WebUI password, proxy auth username/password) are **not** set via
 environment variables. On first boot the server generates them, prints them once
-to the container log, and stores them in `config.json` under `DATA_DIR`. Edit
-them afterwards in the WebUI **Settings** panel. All other settings are seeded
-from the environment on first boot and then persisted to `config.json`, which is
-the source of truth on subsequent starts. To reset everything, delete
-`config.json` from the data volume.
+to the container log, and stores them in `config.json` under `DATA_DIR`.
+Proxy authentication username/password can be changed in the WebUI **Settings** panel.
+The WebUI login password is not editable in Settings; use the reset procedure below.
+All other settings are seeded from the environment on first boot and then persisted
+to `config.json`, which is the source of truth on subsequent starts. To reset
+everything, delete `config.json` from the data volume.
 
 ### Lost the WebUI password?
 
@@ -278,7 +287,7 @@ The default Docker Compose deployment bind-mounts host `./data` to container
 `/app/data`. The persisted files below therefore live under `./data` beside
 `docker-compose.yml` unless you override `HOST_DATA_DIR`.
 
-Reset only the WebUI password (keeps username, filters, and all subscription
+Reset only the WebUI password (keeps proxy authentication username, filters, and all subscription
 nodes). This removes the stored hash so the next start regenerates and prints a
 new WebUI password:
 
@@ -347,11 +356,16 @@ local dangling-image behavior still depends on the Docker builder and cache mode
 Security recommendations:
 
 - On first boot the gateway prints an auto-generated WebUI password and proxy
-  credentials **once** to the container log (`docker compose logs`). Save them,
-  then log in and change them in Settings.
+  credentials **once** to the container log (`docker compose logs`). Save them.
+  Only proxy authentication username/password are editable in **Settings**; use
+  the lost-password reset procedure above for the WebUI login password.
 - Proxy authentication is enabled by default with the generated credentials.
 - `config.json` is persisted with mode `0600` (owner read/write only).
 - Restrict inbound firewall rules to trusted clients when possible.
+- Login rate limiting honors `X-Forwarded-For` only when the WebUI's direct
+  peer is loopback. Run a reverse proxy on the same host and have it overwrite
+  this header; non-loopback peers cannot select a different rate-limit key by
+  supplying or rotating forwarded addresses.
 - Treat upstream node credentials and subscription URLs as secrets.
 - Prefer subscription custom headers over embedding secrets in the subscription
   name or public logs when a provider requires a special `User-Agent`.

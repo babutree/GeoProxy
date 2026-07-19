@@ -141,6 +141,44 @@ func TestAPISubscriptionAddEmptyHeadersOK(t *testing.T) {
 	}
 }
 
+func TestAPISubscriptionAddWithoutDataDirUsesConfigDataDirectory(t *testing.T) {
+	server := newTestServer(t)
+	workingDir := t.TempDir()
+	userConfig := t.TempDir()
+	t.Chdir(workingDir)
+	t.Setenv("DATA_DIR", "")
+	setUserConfigEnvForSubscriptionTest(t, userConfig)
+	if cfg := config.Load(); filepath.Clean(filepath.Dir(cfg.DBPath)) != filepath.Join(userConfig, "GeoProxy") {
+		t.Fatalf("test config default directory = %q, want %q", filepath.Dir(cfg.DBPath), filepath.Join(userConfig, "GeoProxy"))
+	}
+
+	raw := "proxies:\n  - name: default-dir\n    type: http\n"
+	serveAuthenticated(t, server, "/api/subscription/add", fmt.Sprintf(`{"name":"default-dir","file_content":%q,"refresh_min":60}`, raw), http.StatusOK)
+
+	subs, err := server.storage.GetSubscriptions()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("len(subs) = %d, want 1", len(subs))
+	}
+	wantDir := filepath.Join(userConfig, "GeoProxy", "subscriptions")
+	if got := filepath.Clean(filepath.Dir(subs[0].FilePath)); got != filepath.Clean(wantDir) {
+		t.Fatalf("subscription file directory = %q, want %q", got, wantDir)
+	}
+	if _, err := os.Stat(filepath.Join(workingDir, "subscriptions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("working directory was polluted by subscription upload: err=%v", err)
+	}
+}
+
+func setUserConfigEnvForSubscriptionTest(t *testing.T, path string) {
+	t.Helper()
+	t.Setenv("APPDATA", path)
+	t.Setenv("XDG_CONFIG_HOME", path)
+	t.Setenv("HOME", path)
+	t.Setenv("USERPROFILE", path)
+}
+
 // TestAPISubscriptionDeleteDoesNotPreDeleteProxiesWhenSubscriptionDeleteFails
 // 回归：handler 不得在 DeleteSubscription 事务外先 DeleteBySubscriptionID。
 // 否则 DeleteSubscription 失败后会留下“空订阅 + 代理已丢”的半删状态。

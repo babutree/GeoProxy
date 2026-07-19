@@ -5,6 +5,8 @@
 > - 复核范围：上一轮全仓审计提出的功能、安全、生命周期、WebUI、部署、文档和抽象问题。
 > - 本文只做事实判定与修复建议，不修改生产代码、不删除运行数据、不清理 Git 历史。
 > - 文中不记录订阅文件里的主机、口令或其他真实凭据值。
+> - **状态边界**：本文是 `main@7becd9f` 的历史快照，不是当前 OPEN 清单。
+>   当前状态以 `Bug-Fix TO DO list.csv` 和 `docs/bug-grok-0718.md` 为准。
 
 > **审计完成度说明：** 原汇总中的 11 个 P0/P1 编号项已经逐项回到源码、配置或文档核对，P2 的代表项也分别归入确认 bug、条件性风险、测试盲区、设计债或误报。这里的“逐项复核”不等于已经穷尽仓库中所有未知 bug，也不等于每项都做过真实浏览器、Docker、远端 registry 或 6000 节点动态复现。2026-07-16 的补充审计继续覆盖了品牌、项目链接、Docker/Compose 标识，并根据用户提供的浏览器错误新增 BUG-08。
 
@@ -56,7 +58,7 @@
 | 编号 | 结论 | 优先级 | 核心证据 |
 |---|---|---:|---|
 | DOC-01 | `DATA_DIRECTORY.md` 把 Named Volume 写成默认，实际 compose 是 bind mount | P1 | 文档与 `docker-compose.yml` 直接相反 |
-| DOC-02 | README / GEO_FILTER / CLAUDE 的 DSL 缺少 `-unlock-` | P1 | 代码、AGENTS、CHANGELOG、设计语言均已有 unlock |
+| DOC-02 | **SUPERSEDED（2026-07-19，BUGFIX-031）**：历史基线的 README / GEO_FILTER / CLAUDE DSL 缺少 `-unlock-` | 历史 P1 | 当前 README/GEO_FILTER 已包含 `unlock` 与完整固定顺序；本行仅保留基线证据 |
 | DOC-03 | `.env.example` 中部分变量不会被 compose 传入容器 | P1 | 示例列出 max sessions / cooldown / shard count，compose 未引用这些变量 |
 | DOC-04 | README 中文免责声明仍描述公共代理抓取和访客贡献 | P1 | 当前产品明确只管理用户节点，访客贡献入口已移除 |
 | DOC-05 | README 声称不发布预构建镜像，workflow 却配置每次 main 推送 GHCR | P2 | 源码级发布口径冲突；远端镜像实际可用性本次未验证 |
@@ -86,7 +88,7 @@
 | P1-5 入站配置热更新不生效 | 是 | 扩展为 BUG-03：不只是 HTTP/SOCKS5，而是多组件运行态分裂 |
 | P1-6 订阅 HTTP 无 `CheckRedirect` | 是 | RISK-01 仅确认跨 origin 非标准秘密头转发；私网 redirect SSRF 被每跳 Dial 校验反证 |
 | P1-7 验证写库错误被吞 | 是 | BUG-04，确认 bug |
-| P1-8 DSL 文档缺 unlock | 是 | DOC-02，确认文档 bug |
+| P1-8 DSL 文档缺 unlock | 是 | DOC-02；历史确认，当前由 BUGFIX-031 修复并标记 SUPERSEDED |
 | P1-9 数据目录文档与 compose 相反 | 是 | DOC-01，确认部署文档 bug |
 | P1-10 镜像发布口径冲突 | 是 | DOC-05，确认源码级发布契约漂移；tag / manifest 仍未验证 |
 | P1-11 中文免责声明仍是公共池模型 | 是 | DOC-04，确认产品 / 法律文档 bug |
@@ -384,14 +386,15 @@ WebUI 给用户的契约是：
 
 **判定：确认文档 bug，P1。** 会直接误导备份、恢复和数据定位。
 
-## DOC-02：公开 DSL 文档缺 unlock
+## DOC-02：公开 DSL 文档缺 unlock（SUPERSEDED）
 
 - `auth/dsl.go:11-14` 和 `AGENTS.md:35` 的正式语法均为 `<base>[-region-<cc>][-unlock-<token>][-session-<id>]`。
-- `README.md:84-114` 仍写 region → session。
-- `CLAUDE.md:70`、`GEO_FILTER.md` 示例也缺 unlock。
+- 基线 `README.md:84-114` 曾写 region → session；该历史说法由 BUGFIX-031 修复。
+- 基线 `CLAUDE.md:70`、`GEO_FILTER.md` 示例也曾缺 unlock；当前文件已同步完整 DSL。
 - `CHANGELOG.md:60` 和 `DESIGN_LANGUAGE.md:360-362` 已使用完整语法。
 
-**判定：确认行为文档 bug，P1。** 外部集成按 README 无法发现能力，也无法理解固定顺序。
+**历史判定：确认行为文档 bug，P1。当前状态：SUPERSEDED（BUGFIX-031）。**
+外部集成应以当前 `README.md`、`GEO_FILTER.md` 和 `AGENTS.md` 为准。
 
 ## DOC-03：`.env.example` 与 compose 不闭环
 

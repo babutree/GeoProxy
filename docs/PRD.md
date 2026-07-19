@@ -58,7 +58,7 @@
 
 **语法格式** (kv 分段, `-` 分隔; **顺序固定**):
 ```
-<基础用户名>[-region-<国家码>][-unlock-<token>][-session-<会话id>]
+<base>[-region-<cc>][-unlock-<token>][-node-<host:port|key-<base64url(nodeKey)>>][-session-<id>]
 ```
 
 **示例**:
@@ -69,6 +69,8 @@
 | `username-unlock-gpt` | 仅选 OpenAI 探测可达的节点 |
 | `username-unlock-all` | 要求 OpenAI+Claude+Grok+Gemini+CF 均通过 |
 | `username-region-jp-unlock-gpt-session-abc123` | 日本出口 + GPT 解锁 + 会话 abc123 黏连 |
+| `username-region-jp-unlock-gpt-node-key-dHJvamFuOmpwLmV4YW1wbGUuY29tOjQ0Mzpub2RlMDE-session-app01` | 完整固定顺序示例;日本 + GPT 约束 + 稳定节点身份, node 锁定决定路由 |
+| `username-node-1.2.3.4:7801` | 兼容旧凭据，按入口地址锁定节点 |
 | `username-session-xy` | 不限地域 + 会话 xy 黏连到某个任意节点 |
 
 **解析规则**:
@@ -76,8 +78,12 @@
 - 密码校验只使用解析出的 **base** + 密码; 后缀不是凭据。
 - `region` 值为 2 位国家码 (大小写不敏感, 内部统一转小写)。
 - `unlock` 为 AI/CF 解锁过滤: `gpt|openai|chatgpt|claude|gemini|grok|cf|all` (可用 `+`/`,` 组合; `all` 展开五维 AND)。
+- `node` 有两种形式: `key-<base64url(nodeKey)>` 是优先使用的稳定配置身份;
+  `host:port` 是兼容入口地址。二者标识网关拨号入口, 不是最终出口 IP。
+- 锁定节点不存在、不可用或不满足 region/unlock/父订阅约束时显式失败, 不回退到普通选路。
+- node 锁定优先于 session 黏连;同时出现时 `session` 仍会解析, 但不建立独立亲和绑定。
 - `session` 值为任意字符串 (建议限制长度 ≤ 64, 字符集 `[a-zA-Z0-9_-]`)。
-- 参数顺序固定: **region → unlock → session**。顺序错误会导致整段用户名解析失败, 从而认证失败 (即使密码正确)。
+- 参数顺序固定: **region → unlock → node → session**。顺序错误会导致整段用户名解析失败, 从而认证失败 (即使密码正确)。
 - 缺省即不启用对应能力; 无节点满足 unlock 时请求失败, 不静默降级。
 - 密码必须等于配置的 `AuthPassword` (或其 hash), 否则认证失败。
 
@@ -120,7 +126,7 @@
   3. 若绑定的节点已失效 → 在**同地域** (若原请求指定了 region) 或全局 (未指定 region) 重新选节点, 更新绑定。
 
 **TTL 与清理**:
-- TTL = 10 分钟 (可配置 `SessionTTLMinutes`, 默认 10)。
+- TTL = 1440 分钟（1 天，可配置 `SessionTTLMinutes`）。
 - `last_active_time` 每次命中刷新。
 - 后台协程定期 (如每 1 分钟) 清理超过 TTL 未活动的绑定。
 - 绑定表为纯内存结构 (重启即失效, 可接受; 见【决策点 9】)。
@@ -308,7 +314,7 @@ type Binding struct {
 | `HTTP_PORT` | 7802 | HTTP 入口端口 |
 | `SOCKS5_PORT` | 7801 | SOCKS5 入口端口 |
 | `WEBUI_PORT` | 7800 | WebUI 端口 |
-| `SESSION_TTL_MINUTES` | 10 | 会话黏连 TTL |
+| `SESSION_TTL_MINUTES` | 1440 | 会话黏连 TTL（默认 1 天） |
 | `DEFAULT_REGION` | (空) | 未指定 region 时的默认地域, 空=全局 |
 | `ALLOWED_COUNTRIES` | (空) | 地域白名单 (仅这些地域节点入库) |
 | `BLOCKED_COUNTRIES` | 未设置时 `CN`; 显式空值时为空 | 地域黑名单；仅在白名单为空时生效 |
@@ -316,6 +322,8 @@ type Binding struct {
 | `MAX_RETRY` | 3 | 单请求换节点重试上限 |
 | `SINGBOX_PATH` | sing-box | sing-box 路径 (Docker 内置) |
 | `SINGBOX_SHARD_COUNT` | 4 | sing-box 分片进程数 |
+| `DATA_DIR` | 未设置时 `os.UserConfigDir()/GeoProxy` | 原生运行时数据目录；Docker Compose 固定注入 `/app/data` |
+| `HOST_DATA_DIR` | `./data`（Compose） | Compose bind mount 的宿主机目录，映射到容器 `/app/data` |
 | `TZ` | Asia/Shanghai | 时区 |
 
 凭据不再通过 `WEBUI_PASSWORD`、`PROXY_AUTH_USERNAME` 或 `PROXY_AUTH_PASSWORD` 环境变量注入。首次启动会生成 WebUI 登录密码和代理认证凭据，打印一次到日志，并持久化到 `config.json`; 后续修改通过 WebUI Settings 或配置保存路径完成。
@@ -326,7 +334,8 @@ type Binding struct {
 
 ## 8. 部署形态 (不变)
 - Docker 单容器 + docker-compose, 镜像内置 sing-box。
-- 数据持久化: bind mount `./data` (SQLite + config.json + sing-box 配置)。
+- Docker 数据持久化: bind mount `${HOST_DATA_DIR:-./data}` 到 `/app/data`，并在容器内设置 `DATA_DIR=/app/data`；SQLite、`config.json` 和 sing-box 配置均位于该目录。
+- 原生运行未设置 `DATA_DIR` 时使用 `os.UserConfigDir()/GeoProxy`；若 CWD 存在旧运行时文件，启动会要求显式设置 `DATA_DIR` 或人工迁移，不会静默生成新身份。
 - 部署方式: 从本地源码树构建 (`docker compose up -d --build`), 不依赖已发布的远程镜像。
 - 目标运行环境: 国外服务器 (AlmaLinux + Podman, 已验证)。
 

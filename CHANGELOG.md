@@ -14,7 +14,7 @@
 - **总览节点分布**：动画分布图替换世界地图；按地域与延迟档聚合，连线表示 session 绑定；可暂停
 - **活跃会话表/卡片**：对齐设计稿详情（Proxy ID、DSL 地域、协议、来源、最近活跃、冷却、占用条、路由标签）；出口节点优先真实 `exit_ip`，本机 `127.0.0.1:mixed` 仅作绑定地址；定时刷新保留展开状态
 - **节点统一管理弹窗**：订阅与手工节点共享「管理」入口；地域/备注/删除走应用内弹窗，替换浏览器 `prompt`/`confirm`
-- **节点表 AI/Cloudflare**：表头与筛选用 Cloudflare / ChatGPT / Claude / Gemini / Grok；状态为畅通/阻断/未知
+- **节点表 AI/Cloudflare**：表头与筛选用 Cloudflare / ChatGPT / Claude / Gemini / Grok；AI 沿用已发布的 `GPT/Cld/Grk/Gem` 短标签与胶囊筛选样式，状态为绿色畅通、红色阻断、淡灰未探测
 - **节点名称/来源列去重**：名称列不再回退显示订阅名（来源列已展示），无备注时显示脱敏地址
 - **备注/地域编辑**：非破坏性路径对订阅节点开放（删除走来源无关的 `/api/proxy/delete`）
 - **轨道分布动画丝滑化**：卫星改为单一 `transform` 合成层动画；引力透镜改为平滑鹅卵石轮廓；beam 能量色读 `--sun-energy`
@@ -26,11 +26,13 @@
 - **星系会话连线**：按「地区+品质/延迟档」匹配卫星；品质空/D 时回退到该地区现有 S–C 轨道
 - **地域分布**：倒序、TopN（不足则全显）、S/A/B/C/会话/均延、国家/地区中文名、查看全部页
 - **顶部协议统计**：HTTP/SOCKS5 可用计入 `dual_protocol` mixed 节点（与列表双徽章一致）
+- **P0-04 入口能力统一**：WebUI、可用统计、`GetByProtocol`、只读节点 API 及协议选取 helper 对 HTTP/SOCKS5 均计入 `dual_protocol` mixed 节点；未知协议仍精确匹配存储协议
 - **会话 DSL 展示**：地域请求为 `region-xx`（去掉多余前导 `-`）
 - **节点身份锁定**：SQLite 持久化 `node_key`；订阅刷新按 key upsert 保 id；`-node-key-…` 锁定稳定配置身份（兼容旧 host:port）；复制优先输出 key DSL（非出口 IP、非临时本地端口）
+- **节点复制安全边界**：网关节点缺少稳定 `node_key` 时不再把临时本地端口复制为锁定凭据，改为明确提示刷新订阅或重新导入；直连节点复制保持不变
 - **节点状态**：`disabled` 且无 `last_check` 显示「待验证」，有验证记录或失败次数超限显示「不可用」
 - **示例凭据**：文档/默认用户名占位改为 `username`，连接示例主机改为 `YOUR-HOST-IP`
-- **DSL 文档**：README / GEO_FILTER / CLAUDE 补齐固定顺序中的 `-unlock-`
+- **DSL 文档与连接提示**：README / GEO_FILTER / PRD / WebUI 统一 `region → unlock → node → session`；优先使用 `key-<base64url(nodeKey)>` 稳定身份，保留 `host:port` 兼容入口，并明确入口节点、最终出口、fail-closed 与 node 优先 session 语义
 - **部署文档**：`DATA_DIRECTORY.md` 默认数据路径改为 bind mount `./data`；README 镜像与中文免责声明对齐当前网关模型
 - **仓库卫生**：`.gitignore` / `.dockerignore` 排除 `subscriptions/`、`proxygo`、`shard-*/`；从索引移除已跟踪运行时订阅与二进制（历史清理需另授权）
 
@@ -55,10 +57,17 @@
 - **订阅重定向**：限制跳数，跨 origin 不转发非标准自定义密钥头
 - **WebUI sessions**：affinity 为 nil 时返回空列表而非 panic
 - **SOCKS5 Accept**：持续错误时记录并退避，避免忙循环
+- **HTTP CONNECT 中继**：保留 Hijack 预读首包并支持 TCP half-close 延迟响应；仅在首个上游字节成功写回客户端后记节点成功，Hijack、成功响应写入或首字节写入失败时不再假成功，并释放对应会话绑定
+- **session 与健康轮转**：session 首次绑定改用全候选 deterministic weighted rendezvous，稳定 ID/NodeKey 不受输入顺序影响；健康检查移除 S 级永久跳过，按最久未检查节点轮转，并在成功/失败写回推进 `last_check`
+- **出口信息多源降级**：validator 并发查询 ip-api 与 ipapi.is；单源故障可降级，两源出口 IP/国家冲突时 fail-closed；备用源单独成功不会伪造 ip-api 风险标记已探测
+- **跨订阅 NodeKey 所有权**：刷新、删除订阅或删除单行时，仅在没有其它 owner 后回收全局 sing-box 运行态；旧空 key 仅按相同地址兼容，查询失败保持运行态
+- **代理日志**：HTTP/SOCKS5 启动、拨号和失败日志统一使用模块前缀与中文描述，避免日志合同漂移
 - **WebUI 深色侧栏未选项**：button 默认背景重置为透明，未选中色改用 `--muted`
 - **浅色主题命令示例框**：`.cmd`/`.code-block` 在 day 主题改为白底深字，避免偏黑突兀
 - **运行日志高度**：日志区相对视口再减约 40px，避免略超出屏幕
 - **节点分布控制文案**：暂停按钮改为「暂停动画 / 恢复动画」
+- **移动端节点筛选**：筛选按钮保留固有命中宽度并自然换行，避免 Cloudflare 与 AI 按钮文字溢出、点击区域互相覆盖，同时保持已发布的 AI 胶囊、短标签和三态色值
+- **运行时数据目录**：订阅上传与 sing-box 分片统一使用配置解析结果；空根或不可用路径显式失败，不再静默回退到当前工作目录
 
 ### 新增
 

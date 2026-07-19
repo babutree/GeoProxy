@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -9,15 +10,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/babutree/GeoProxy/auth"
+	"github.com/babutree/GeoProxy/config"
 	"github.com/babutree/GeoProxy/storage"
 )
 
 const (
-	nodesAPIDefaultLimit = 500
-	nodesAPIMaxLimit     = 2000
+	nodesAPIDefaultLimit              = 500
+	nodesAPIMaxLimit                  = 2000
+	usernameHintInvalidRegionMessage  = "cannot generate username hint: node region must be empty or a 2-letter country code"
+	usernameHintMissingNodeKeyMessage = "cannot generate username hint: gateway node has no stable node key"
 )
 
-// apiV1Nodes serves GET /api/v1/nodes (read-only API key auth via middleware).
+// apiV1Nodes 处理 GET /api/v1/nodes；只读 API Key 鉴权由中间件完成。
 func (s *Server) apiV1Nodes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -196,8 +201,13 @@ func buildConnectView(p storage.Proxy, publicHost string, hostUnresolved bool, s
 			"host":                publicHost,
 			"gateway_socks5_port": socksPort,
 			"gateway_http_port":   httpPort,
-			"username_hint":       gatewayUsernameHint(usernameBase, p.Region),
 			"note":                "需网关代理认证；密码见部署配置。host 为空时请用部署域名/请求 Host。",
+		}
+		hint, err := gatewayUsernameHint(usernameBase, p.Region, p.NodeKey)
+		if err != nil {
+			conn["username_hint_error"] = err.Error()
+		} else {
+			conn["username_hint"] = hint
 		}
 		if hostUnresolved || publicHost == "" {
 			conn["host_unresolved"] = true
@@ -234,7 +244,7 @@ func splitAddressHostPort(address string) (string, int) {
 	}
 	host, portStr, err := net.SplitHostPort(address)
 	if err != nil {
-		// bare host without port
+		// 不带端口的裸主机名。
 		return strings.Trim(address, "[]"), 0
 	}
 	port, _ := strconv.Atoi(portStr)
@@ -283,14 +293,22 @@ func parseAIReachabilityObject(raw string) map[string]any {
 	return out
 }
 
-func gatewayUsernameHint(base, region string) string {
+func gatewayUsernameHint(base, region, nodeKey string) (string, error) {
 	base = strings.TrimSpace(base)
 	if base == "" {
 		base = "username"
 	}
-	region = strings.ToLower(strings.TrimSpace(region))
-	if region == "" {
-		region = "any"
+	rawRegion := strings.TrimSpace(region)
+	normalizedRegion := config.NormalizeCountryCode(rawRegion)
+	if rawRegion != "" && normalizedRegion == "" {
+		return "", errors.New(usernameHintInvalidRegionMessage)
 	}
-	return base + "-region-" + region + "-session-api"
+	encodedNodeKey := auth.EncodeNodeKeyPin(nodeKey)
+	if encodedNodeKey == "" {
+		return "", errors.New(usernameHintMissingNodeKeyMessage)
+	}
+	if normalizedRegion == "" {
+		return base + "-node-key-" + encodedNodeKey + "-session-api", nil
+	}
+	return base + "-region-" + strings.ToLower(normalizedRegion) + "-node-key-" + encodedNodeKey + "-session-api", nil
 }

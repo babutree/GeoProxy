@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,8 +26,8 @@ type singBoxShard interface {
 	GetLocalAddress(nodeKey string) string
 }
 
-// assemblyAwareShard exposes exact node assembly decisions when available.
-// Shard implementations without it keep the conservative fallback behavior.
+// assemblyAwareShard 在实现可用时提供精确的节点装配决策。
+// 未实现该接口的分片保持保守回退行为。
 type assemblyAwareShard interface {
 	GetAssemblyDiagnostics() assemblyDiagnostics
 }
@@ -63,7 +64,10 @@ type shardFactory func(shardIndex, shardBasePort int) singBoxShard
 //	分片 i 起始端口 = basePort + i*portRangeSpan
 func NewShardedSingBox(binPath, dataDir string, basePort, shardCount int) *ShardedSingBox {
 	factory := func(shardIndex, shardBasePort int) singBoxShard {
-		shardDir := filepath.Join(dataDir, fmt.Sprintf("shard-%d", shardIndex))
+		shardDir := dataDir
+		if strings.TrimSpace(dataDir) != "" {
+			shardDir = filepath.Join(dataDir, fmt.Sprintf("shard-%d", shardIndex))
+		}
 		return NewSingBoxProcess(binPath, shardDir, shardBasePort)
 	}
 	sb := newShardedSingBoxWithFactory(basePort, shardCount, factory)
@@ -208,8 +212,8 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 			if !touched[i] {
 				continue
 			}
-			// Restore assignedKeys before/with rollback so a failed compensation
-			// still reflects the last known-good commit set.
+			// 回滚前或回滚时恢复 assignedKeys，使补偿失败后仍反映
+			// 最近一次已知成功提交的节点集合。
 			sb.assignedKeys[i] = copyKeySet(oldKeysByShard[i])
 			if len(oldNodesByShard[i]) == 0 {
 				sb.shards[i].Stop()
@@ -390,7 +394,14 @@ func (sb *ShardedSingBox) recoverFailedShards() error {
 		nodes := shard.GetNodes()
 		if err := shard.Reload(nodes); err != nil {
 			errs = append(errs, fmt.Errorf("shard %d: %w", i, err))
+			continue
 		}
+		accepted, err := shardReloadCommitError(nodes, shard)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("shard %d recovery commit: %w", i, err))
+			continue
+		}
+		sb.assignedKeys[i] = nodeKeySet(accepted)
 	}
 	return errors.Join(errs...)
 }
@@ -477,25 +488,25 @@ func (sb *ShardedSingBox) Stop() {
 
 // GetRuntimeStatus 汇总各分片运行态为单一可解释状态。
 //   - Nodes/ReadyPorts/TotalPorts 为各分片对应字段之和。
-//   - activeShards 为 Nodes>0 的分片；无活跃分片时报告 NoTunnelNodes。
-//   - 活跃分片全部 running → Running；全部非 running → Failed；部分 → Partial。
+//   - Nodes>0 或 Status=failed 的分片参与状态汇总；无此类分片时报告 NoTunnelNodes。
+//   - 参与分片全部 running → Running；全部非 running → Failed；部分 → Partial。
 func (sb *ShardedSingBox) GetRuntimeStatus() SingBoxRuntimeStatus {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
 	var nodes, ready, total int
-	var active []SingBoxRuntimeStatus
+	var considered []SingBoxRuntimeStatus
 	for _, shard := range sb.shards {
 		rs := shard.GetRuntimeStatus()
 		nodes += rs.Nodes
 		ready += rs.ReadyPorts
 		total += rs.TotalPorts
-		if rs.Nodes > 0 {
-			active = append(active, rs)
+		if rs.Nodes > 0 || rs.Status == SingBoxStatusFailed {
+			considered = append(considered, rs)
 		}
 	}
 
-	if len(active) == 0 {
+	if len(considered) == 0 {
 		return SingBoxRuntimeStatus{
 			Running:    false,
 			Status:     SingBoxStatusNoTunnelNodes,
@@ -507,7 +518,7 @@ func (sb *ShardedSingBox) GetRuntimeStatus() SingBoxRuntimeStatus {
 	}
 
 	runningCount := 0
-	for _, rs := range active {
+	for _, rs := range considered {
 		if rs.Running && rs.Status == SingBoxStatusRunning {
 			runningCount++
 		}
@@ -519,13 +530,13 @@ func (sb *ShardedSingBox) GetRuntimeStatus() SingBoxRuntimeStatus {
 		TotalPorts: total,
 	}
 	switch {
-	case runningCount == len(active):
+	case runningCount == len(considered):
 		result.Status = SingBoxStatusRunning
 		result.Reason = SingBoxStatusRunning
 		result.Running = true
 	case runningCount == 0:
 		result.Status = SingBoxStatusFailed
-		result.Reason = "all_shards_failed"
+		result.Reason = aggregateShardFailureReason(considered)
 		result.Running = false
 	default:
 		result.Status = SingBoxStatusPartial
@@ -533,4 +544,28 @@ func (sb *ShardedSingBox) GetRuntimeStatus() SingBoxRuntimeStatus {
 		result.Running = true
 	}
 	return result
+}
+
+func aggregateShardFailureReason(statuses []SingBoxRuntimeStatus) string {
+	reason := ""
+	for _, status := range statuses {
+		if status.Status != SingBoxStatusFailed {
+			return "all_shards_failed"
+		}
+		candidate := strings.TrimSpace(status.Reason)
+		if candidate == "" {
+			return "all_shards_failed"
+		}
+		if reason == "" {
+			reason = candidate
+			continue
+		}
+		if reason != candidate {
+			return "all_shards_failed"
+		}
+	}
+	if reason == "" {
+		return "all_shards_failed"
+	}
+	return reason
 }

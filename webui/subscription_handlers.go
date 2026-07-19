@@ -40,7 +40,7 @@ func writeSubscriptionFile(file subscriptionFile, content string) error {
 func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 	subs, err := s.storage.GetSubscriptions()
 	if err != nil {
-		log.Printf("[webui] list subscriptions failed: %v", err)
+		log.Printf("[webui] 获取订阅列表失败: %v", err)
 		jsonError(w, "failed to list subscriptions", http.StatusInternalServerError)
 		return
 	}
@@ -59,7 +59,7 @@ func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 	for _, sub := range subs {
 		active, disabled, err := s.storage.CountBySubscriptionID(sub.ID)
 		if err != nil {
-			log.Printf("[webui] count subscription #%d proxies failed: %v", sub.ID, err)
+			log.Printf("[webui] 统计订阅 #%d 节点失败: %v", sub.ID, err)
 			jsonError(w, "failed to list subscriptions", http.StatusInternalServerError)
 			return
 		}
@@ -67,7 +67,7 @@ func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		// 否则前端会把 paused_count=0 当真值显示，掩盖统计失败。
 		paused, err := s.storage.CountPausedBySubscriptionID(sub.ID)
 		if err != nil {
-			log.Printf("[webui] count subscription #%d paused proxies failed: %v", sub.ID, err)
+			log.Printf("[webui] 统计订阅 #%d 已暂停节点失败: %v", sub.ID, err)
 			jsonError(w, "failed to list subscriptions", http.StatusInternalServerError)
 			return
 		}
@@ -135,25 +135,37 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	// 如果上传了文件内容，保存到本地
 	filePath := ""
 	if req.FileContent != "" {
-		dataDir := os.Getenv("DATA_DIR")
-		if dataDir == "" {
-			dataDir = "."
+		dataDir, err := config.DataDir()
+		if err != nil {
+			log.Printf("[webui] 解析订阅数据目录失败: %v", err)
+			jsonError(w, "failed to resolve data directory", http.StatusInternalServerError)
+			return
 		}
 		subDir := filepath.Join(dataDir, "subscriptions")
-		os.MkdirAll(subDir, 0755)
+		if err := os.MkdirAll(subDir, 0755); err != nil {
+			log.Printf("[webui] 创建订阅目录失败: %v", err)
+			jsonError(w, "failed to save subscription file", http.StatusInternalServerError)
+			return
+		}
 		file, err := os.CreateTemp(subDir, "sub_*.yaml")
 		if err != nil {
-			log.Printf("[webui] create subscription file failed: %v", err)
+			log.Printf("[webui] 创建订阅文件失败: %v", err)
 			jsonError(w, "failed to save subscription file", http.StatusInternalServerError)
 			return
 		}
 		filePath = file.Name()
 		if err := writeSubscriptionFile(file, req.FileContent); err != nil {
-			log.Printf("[webui] save subscription file failed: %v", err)
+			log.Printf("[webui] 保存订阅文件失败: %v", err)
 			jsonError(w, "failed to save subscription file", http.StatusInternalServerError)
 			return
 		}
-		filePath, _ = filepath.Abs(filePath)
+		filePath, err = filepath.Abs(filePath)
+		if err != nil {
+			_ = os.Remove(filePath)
+			log.Printf("[webui] 解析订阅文件路径失败: %v", err)
+			jsonError(w, "failed to save subscription file", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// 先验证：拉取并解析，确认能解析出节点后再入库
@@ -164,7 +176,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 			if filePath != "" {
 				os.Remove(filePath)
 			}
-			log.Printf("[webui] subscription validation failed: %v", err)
+			log.Printf("[webui] 订阅验证失败: %v", err)
 			jsonError(w, "subscription validation failed", http.StatusBadRequest)
 			return
 		}
@@ -176,7 +188,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		if filePath != "" {
 			_ = os.Remove(filePath)
 		}
-		log.Printf("[webui] add subscription failed: %v", err)
+		log.Printf("[webui] 添加订阅失败: %v", err)
 		jsonError(w, "failed to add subscription", http.StatusInternalServerError)
 		return
 	}
@@ -214,7 +226,7 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 
 	if s.customMgr != nil {
 		if err := s.customMgr.DeleteSubscription(req.ID); err != nil {
-			log.Printf("[webui] delete subscription #%d via manager failed: %v", req.ID, err)
+			log.Printf("[webui] 通过 Manager 删除订阅 #%d 失败: %v", req.ID, err)
 			jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
 			return
 		}
@@ -223,9 +235,9 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fallback for tests/minimal servers without custom manager: DB-only deletion cannot update sing-box runtime.
+	// custom manager 缺失的测试或最小服务器使用此回退；仅删除数据库记录无法更新 sing-box 运行态。
 	if err := s.storage.DeleteSubscription(req.ID); err != nil {
-		log.Printf("[webui] delete subscription #%d failed: %v", req.ID, err)
+		log.Printf("[webui] 删除订阅 #%d 失败: %v", req.ID, err)
 		jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
 		return
 	}
@@ -297,7 +309,7 @@ func (s *Server) apiSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
 
 	status, err := s.storage.ToggleSubscription(req.ID)
 	if err != nil {
-		log.Printf("[webui] toggle subscription #%d failed: %v", req.ID, err)
+		log.Printf("[webui] 切换订阅 #%d 状态失败: %v", req.ID, err)
 		jsonError(w, "failed to toggle subscription", http.StatusInternalServerError)
 		return
 	}
@@ -334,7 +346,7 @@ func (s *Server) apiSubscriptionUpdate(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := s.storage.GetSubscription(req.ID)
 	if err != nil {
-		log.Printf("[webui] load subscription #%d failed: %v", req.ID, err)
+		log.Printf("[webui] 加载订阅 #%d 失败: %v", req.ID, err)
 		jsonError(w, "subscription not found", http.StatusNotFound)
 		return
 	}
@@ -351,7 +363,7 @@ func (s *Server) apiSubscriptionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.storage.UpdateSubscription(req.ID, req.Name, req.URL, existing.FilePath, existing.Format, req.RefreshMin, req.Headers); err != nil {
-		log.Printf("[webui] update subscription #%d failed: %v", req.ID, err)
+		log.Printf("[webui] 更新订阅 #%d 失败: %v", req.ID, err)
 		jsonError(w, "failed to update subscription", http.StatusInternalServerError)
 		return
 	}

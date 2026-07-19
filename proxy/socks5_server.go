@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/babutree/GeoProxy/affinity"
@@ -54,7 +56,7 @@ func (s *SOCKS5Server) Start() error {
 	if cfg.ProxyAuthEnabled {
 		authStatus = fmt.Sprintf("需认证 (用户: %s)", cfg.ProxyAuthUsername)
 	}
-	log.Printf("socks5 server listening on %s [lowest latency] [%s]", s.port, authStatus)
+	log.Printf("[socks5] 服务器监听 %s [%s]", s.port, authStatus)
 
 	listener, err := net.Listen("tcp", s.port)
 	if err != nil {
@@ -68,7 +70,7 @@ func (s *SOCKS5Server) Start() error {
 		if err != nil {
 			// listener 关闭是正常退出；其它持续错误退避，避免忙循环（RISK-04）。
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				log.Printf("[socks5] accept temporary error: %v", err)
+				log.Printf("[socks5] Accept 临时错误: %v", err)
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
@@ -76,7 +78,7 @@ func (s *SOCKS5Server) Start() error {
 				return nil
 			}
 			acceptFailures++
-			log.Printf("[socks5] accept error: %v", err)
+			log.Printf("[socks5] Accept 错误: %v", err)
 			if acceptFailures >= 20 {
 				return fmt.Errorf("socks5 accept 持续失败: %w", err)
 			}
@@ -94,7 +96,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	protocolTimeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	if protocolTimeout > 0 {
 		if err := clientConn.SetDeadline(time.Now().Add(protocolTimeout)); err != nil {
-			log.Printf("[socks5] set inbound protocol deadline failed: %v", err)
+			log.Printf("[socks5] 设置入站协议 deadline 失败: %v", err)
 			return
 		}
 	}
@@ -102,19 +104,19 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	// SOCKS5 握手
 	route, err := s.socks5Handshake(clientConn)
 	if err != nil {
-		log.Printf("[socks5] handshake failed: %v", err)
+		log.Printf("[socks5] 握手失败: %v", err)
 		return
 	}
 
 	// 读取请求
 	target, err := s.readSOCKS5Request(clientConn)
 	if err != nil {
-		log.Printf("[socks5] read request failed: %v", err)
+		log.Printf("[socks5] 读取请求失败: %v", err)
 		return
 	}
 	if protocolTimeout > 0 {
 		if err := clientConn.SetDeadline(time.Time{}); err != nil {
-			log.Printf("[socks5] clear inbound protocol deadline failed: %v", err)
+			log.Printf("[socks5] 清除入站协议 deadline 失败: %v", err)
 			return
 		}
 	}
@@ -126,13 +128,13 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	}
 
 	// 带重试的连接上游代理
-	// 重试机制：只使用 SOCKS5 协议的上游代理（天然支持 HTTPS）
+	// selector 可返回 HTTP 或 SOCKS5 上游；HTTP 上游必须为当前目标建立 CONNECT 隧道。
 	tried := []int64{}
 	for attempt := 0; attempt <= s.runtimeConfig().MaxRetry; attempt++ {
 		p, err := s.selectSOCKS5Proxy(route, tried)
 		if err != nil {
-			log.Printf("[socks5] no available socks5 upstream proxy: %v", err)
-			s.sendSOCKS5Reply(clientConn, 0x01) // General failure
+			log.Printf("[socks5] 无可用上游代理: %v", err)
+			s.sendSOCKS5Reply(clientConn, 0x01) // 通用失败
 			return
 		}
 
@@ -141,7 +143,14 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		// 连接上游代理
 		upstreamConn, err := s.dialViaProxy(p, target)
 		if err != nil {
-			log.Printf("[socks5] dial %s via %s (%s) failed: %v", target, p.Address, p.Protocol, err)
+			log.Printf("[socks5] 通过节点 %s（%s）拨号 %s 失败: %v", p.Address, p.Protocol, target, err)
+			if isHTTPConnectCapabilityRejection(err) {
+				// HTTP 上游对目标端口的显式策略拒绝不等于节点失效；只放弃本次候选，
+				// 让重试选择其它具备该目标能力的节点，避免污染全局健康计数。
+				log.Printf("[socks5] HTTP 上游不具备目标 CONNECT 能力，跳过健康失败计数 target=%s proxy=%s", target, p.Address)
+				s.releaseFailedBinding(route, p)
+				continue
+			}
 			recordProxyFailure(s.storage, p)
 			s.releaseFailedBinding(route, p)
 			continue
@@ -150,24 +159,32 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		// 发送成功响应
 		if err := s.sendSOCKS5Reply(clientConn, 0x00); err != nil {
 			upstreamConn.Close()
+			s.releaseFailedBinding(route, p)
 			return
 		}
 
-		s.storage.RecordProxyUseByID(p.ID, true)
-		log.Printf("[socks5] %s via %s established", target, p.Address)
-
-		// 双向转发数据
-		go io.Copy(upstreamConn, clientConn)
-		io.Copy(clientConn, upstreamConn)
-
-		// 转发完成，关闭连接
-		upstreamConn.Close()
+		log.Printf("[socks5] 已通过节点 %s 建立 %s", p.Address, target)
+		var recordSuccess sync.Once
+		idleTimeout := s.socks5RelayIdleTimeout()
+		relayResult := relaySOCKS5(clientConn, upstreamConn, idleTimeout, func() {
+			recordSuccess.Do(func() {
+				if err := s.storage.RecordProxyUseByID(p.ID, true); err != nil {
+					log.Printf("[socks5] 记录节点成功使用失败 id=%d: %v", p.ID, err)
+				}
+			})
+		})
+		logSOCKS5RelayResult(target, idleTimeout, relayResult)
+		if relayResult.upstreamToClientBytes == 0 {
+			// CONNECT 成功只证明隧道建立，不能证明节点完成了有效转发。
+			// 零上游数据时保留 fail_count，仅释放本次粘滞绑定供后续重新选路。
+			s.releaseFailedBinding(route, p)
+		}
 		return
 	}
 
 	// 所有重试都失败
-	s.sendSOCKS5Reply(clientConn, 0x01) // General failure
-	log.Printf("[socks5] all proxies failed for %s", target)
+	s.sendSOCKS5Reply(clientConn, 0x01) // 通用失败
+	log.Printf("[socks5] 所有上游节点均失败 target=%s", target)
 }
 
 func (s *SOCKS5Server) releaseFailedBinding(route auth.ParsedUsername, p *storage.Proxy) {
@@ -177,23 +194,339 @@ func (s *SOCKS5Server) releaseFailedBinding(route auth.ParsedUsername, p *storag
 	s.sessions.RemoveIfProxyID(route.Session, p.ID)
 }
 
+type socks5RelayDirection uint8
+
+const (
+	socks5RelayClientToUpstream socks5RelayDirection = iota
+	socks5RelayUpstreamToClient
+)
+
+const defaultSOCKS5RelayIdleTimeout = 10 * time.Second
+
+type socks5RelayCopyResult struct {
+	direction socks5RelayDirection
+	bytes     int64
+	err       error
+	timedOut  bool
+}
+
+type socks5RelayResult struct {
+	clientToUpstreamBytes    int64
+	clientToUpstreamErr      error
+	clientToUpstreamTimedOut bool
+	clientToUpstreamCanceled bool
+	clientToUpstreamDeadline error
+	upstreamToClientBytes    int64
+	upstreamToClientErr      error
+	upstreamToClientTimedOut bool
+	upstreamToClientCanceled bool
+	upstreamToClientDeadline error
+	coordinationDirection    socks5RelayDirection
+	coordinationErr          error
+}
+
+type socks5RelayObservedWriter struct {
+	dst     io.Writer
+	onWrite func()
+}
+
+func (w *socks5RelayObservedWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 && w.onWrite != nil {
+		w.onWrite()
+	}
+	return n, err
+}
+
+type socks5RelayIdleDeadline struct {
+	mu            sync.Mutex
+	readConn      net.Conn
+	writeConn     net.Conn
+	timeout       time.Duration
+	armed         bool
+	diagnosticErr error
+}
+
+func (d *socks5RelayIdleDeadline) arm() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	deadline := time.Now().Add(d.timeout)
+	if err := d.readConn.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	if err := d.writeConn.SetWriteDeadline(deadline); err != nil {
+		_ = d.readConn.SetReadDeadline(time.Time{})
+		return err
+	}
+	d.armed = true
+	return nil
+}
+
+func (d *socks5RelayIdleDeadline) progress() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.armed {
+		return
+	}
+	deadline := time.Now().Add(d.timeout)
+	if err := d.readConn.SetReadDeadline(deadline); err != nil {
+		d.rememberDiagnosticLocked(fmt.Errorf("刷新读 deadline: %w", err))
+	}
+	if err := d.writeConn.SetWriteDeadline(deadline); err != nil {
+		d.rememberDiagnosticLocked(fmt.Errorf("刷新写 deadline: %w", err))
+	}
+}
+
+func (d *socks5RelayIdleDeadline) clear() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.armed {
+		return
+	}
+	d.armed = false
+	if err := d.readConn.SetReadDeadline(time.Time{}); err != nil {
+		d.rememberDiagnosticLocked(fmt.Errorf("清除读 deadline: %w", err))
+	}
+	if err := d.writeConn.SetWriteDeadline(time.Time{}); err != nil {
+		d.rememberDiagnosticLocked(fmt.Errorf("清除写 deadline: %w", err))
+	}
+}
+
+func (d *socks5RelayIdleDeadline) rememberDiagnosticLocked(err error) {
+	if d.diagnosticErr == nil {
+		d.diagnosticErr = err
+	}
+}
+
+func (d *socks5RelayIdleDeadline) diagnosticError() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.diagnosticErr
+}
+
+// relaySOCKS5 协调双向复制。任一方向正常 EOF 时只向对应目的端传播
+// CloseWrite，并为仍工作的另一方向启用空闲 deadline；每次成功转发都会刷新
+// deadline。非正常错误快速关闭两端，最终始终等待两个复制任务返回。
+func relaySOCKS5(clientConn, upstreamConn net.Conn, idleTimeout time.Duration, onUpstreamWrite func()) socks5RelayResult {
+	results := make(chan socks5RelayCopyResult, 2)
+	clientToUpstreamIdle := &socks5RelayIdleDeadline{
+		readConn:  clientConn,
+		writeConn: upstreamConn,
+		timeout:   idleTimeout,
+	}
+	upstreamToClientIdle := &socks5RelayIdleDeadline{
+		readConn:  upstreamConn,
+		writeConn: clientConn,
+		timeout:   idleTimeout,
+	}
+	observedUpstreamWriter := &socks5RelayObservedWriter{
+		dst:     upstreamConn,
+		onWrite: clientToUpstreamIdle.progress,
+	}
+	observedClientWriter := &socks5RelayObservedWriter{
+		dst: clientConn,
+		onWrite: func() {
+			upstreamToClientIdle.progress()
+			if onUpstreamWrite != nil {
+				onUpstreamWrite()
+			}
+		},
+	}
+	go copySOCKS5Relay(observedUpstreamWriter, clientConn, socks5RelayClientToUpstream, results)
+	go copySOCKS5Relay(observedClientWriter, upstreamConn, socks5RelayUpstreamToClient, results)
+
+	first := <-results
+	coordinationDirection := first.direction
+	var coordinationErr error
+	fastClose := first.err != nil
+	if !fastClose {
+		coordinationErr = armRemainingSOCKS5Relay(first.direction, clientConn, upstreamConn, clientToUpstreamIdle, upstreamToClientIdle)
+		fastClose = coordinationErr != nil
+	}
+	if fastClose {
+		clientToUpstreamIdle.clear()
+		upstreamToClientIdle.clear()
+		_ = clientConn.Close()
+		_ = upstreamConn.Close()
+	}
+	second := <-results
+	if !fastClose && second.err == nil {
+		coordinationDirection = second.direction
+		coordinationErr = propagateSOCKS5RelayEOF(second.direction, clientConn, upstreamConn)
+	}
+	clientToUpstreamIdle.clear()
+	upstreamToClientIdle.clear()
+	_ = clientConn.Close()
+	_ = upstreamConn.Close()
+
+	var result socks5RelayResult
+	result.add(first, false)
+	result.add(second, fastClose)
+	result.clientToUpstreamDeadline = clientToUpstreamIdle.diagnosticError()
+	result.upstreamToClientDeadline = upstreamToClientIdle.diagnosticError()
+	result.coordinationDirection = coordinationDirection
+	result.coordinationErr = coordinationErr
+	return result
+}
+
+func armRemainingSOCKS5Relay(
+	completed socks5RelayDirection,
+	clientConn net.Conn,
+	upstreamConn net.Conn,
+	clientToUpstreamIdle *socks5RelayIdleDeadline,
+	upstreamToClientIdle *socks5RelayIdleDeadline,
+) error {
+	if completed == socks5RelayClientToUpstream {
+		if err := upstreamToClientIdle.arm(); err != nil {
+			return fmt.Errorf("启用上游到客户端 idle deadline: %w", err)
+		}
+		if err := closeSOCKS5RelayWrite(upstreamConn); err != nil {
+			return fmt.Errorf("向上游传播客户端 EOF: %w", err)
+		}
+		return nil
+	}
+	if err := clientToUpstreamIdle.arm(); err != nil {
+		return fmt.Errorf("启用客户端到上游 idle deadline: %w", err)
+	}
+	if err := closeSOCKS5RelayWrite(clientConn); err != nil {
+		return fmt.Errorf("向客户端传播上游 EOF: %w", err)
+	}
+	return nil
+}
+
+func propagateSOCKS5RelayEOF(direction socks5RelayDirection, clientConn, upstreamConn net.Conn) error {
+	if direction == socks5RelayClientToUpstream {
+		if err := closeSOCKS5RelayWrite(upstreamConn); err != nil {
+			return fmt.Errorf("向上游传播客户端 EOF: %w", err)
+		}
+		return nil
+	}
+	if err := closeSOCKS5RelayWrite(clientConn); err != nil {
+		return fmt.Errorf("向客户端传播上游 EOF: %w", err)
+	}
+	return nil
+}
+
+func closeSOCKS5RelayWrite(conn net.Conn) error {
+	if closeWriter, ok := conn.(interface{ CloseWrite() error }); ok {
+		return closeWriter.CloseWrite()
+	}
+	if buffered, ok := conn.(*bufferedConn); ok {
+		return closeSOCKS5RelayWrite(buffered.Conn)
+	}
+	return fmt.Errorf("连接 %T 不支持 CloseWrite", conn)
+}
+
+func copySOCKS5Relay(dst io.Writer, src io.Reader, direction socks5RelayDirection, results chan<- socks5RelayCopyResult) {
+	n, err := io.Copy(dst, src)
+	timedOut := false
+	if netErr, ok := err.(net.Error); ok {
+		timedOut = netErr.Timeout()
+	}
+	results <- socks5RelayCopyResult{direction: direction, bytes: n, err: err, timedOut: timedOut}
+}
+
+func (r *socks5RelayResult) add(result socks5RelayCopyResult, canceled bool) {
+	if result.direction == socks5RelayClientToUpstream {
+		r.clientToUpstreamBytes = result.bytes
+		r.clientToUpstreamErr = result.err
+		r.clientToUpstreamTimedOut = result.timedOut
+		r.clientToUpstreamCanceled = canceled
+		return
+	}
+	r.upstreamToClientBytes = result.bytes
+	r.upstreamToClientErr = result.err
+	r.upstreamToClientTimedOut = result.timedOut
+	r.upstreamToClientCanceled = canceled
+}
+
+func logSOCKS5RelayResult(target string, idleTimeout time.Duration, result socks5RelayResult) {
+	logSOCKS5RelayDirection(
+		target,
+		"客户端->上游",
+		result.clientToUpstreamBytes,
+		result.clientToUpstreamErr,
+		result.clientToUpstreamTimedOut,
+		result.clientToUpstreamCanceled,
+		idleTimeout,
+	)
+	logSOCKS5RelayDirection(
+		target,
+		"上游->客户端",
+		result.upstreamToClientBytes,
+		result.upstreamToClientErr,
+		result.upstreamToClientTimedOut,
+		result.upstreamToClientCanceled,
+		idleTimeout,
+	)
+	if result.clientToUpstreamDeadline != nil {
+		log.Printf("[socks5] relay deadline 异常 target=%s direction=客户端->上游 idle=%s: %v", target, idleTimeout, result.clientToUpstreamDeadline)
+	}
+	if result.upstreamToClientDeadline != nil {
+		log.Printf("[socks5] relay deadline 异常 target=%s direction=上游->客户端 idle=%s: %v", target, idleTimeout, result.upstreamToClientDeadline)
+	}
+	if result.coordinationErr != nil {
+		log.Printf(
+			"[socks5] relay 协调异常 target=%s completed_direction=%s: %v",
+			target,
+			socks5RelayDirectionName(result.coordinationDirection),
+			result.coordinationErr,
+		)
+	}
+}
+
+func logSOCKS5RelayDirection(
+	target string,
+	direction string,
+	bytes int64,
+	err error,
+	timedOut bool,
+	canceled bool,
+	idleTimeout time.Duration,
+) {
+	if err == nil || canceled {
+		return
+	}
+	if timedOut {
+		log.Printf("[socks5] relay 空闲超时 target=%s direction=%s bytes=%d idle=%s", target, direction, bytes, idleTimeout)
+		return
+	}
+	log.Printf("[socks5] relay 转发异常 target=%s direction=%s bytes=%d: %v", target, direction, bytes, err)
+}
+
+func socks5RelayDirectionName(direction socks5RelayDirection) string {
+	if direction == socks5RelayClientToUpstream {
+		return "客户端->上游"
+	}
+	return "上游->客户端"
+}
+
 // socks5Direct 为内网/本地目标建立直连，不经上游节点。
 func (s *SOCKS5Server) socks5Direct(clientConn net.Conn, target string) {
 	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	upstreamConn, err := net.DialTimeout("tcp", target, timeout)
 	if err != nil {
-		log.Printf("[socks5] direct dial %s failed: %v", target, err)
-		s.sendSOCKS5Reply(clientConn, 0x01) // General failure
+		log.Printf("[socks5] 直连拨号 %s 失败: %v", target, err)
+		s.sendSOCKS5Reply(clientConn, 0x01) // 通用失败
 		return
 	}
 	if err := s.sendSOCKS5Reply(clientConn, 0x00); err != nil {
 		upstreamConn.Close()
 		return
 	}
-	log.Printf("[socks5] %s direct (bypass upstream)", target)
-	go io.Copy(upstreamConn, clientConn)
-	io.Copy(clientConn, upstreamConn)
-	upstreamConn.Close()
+	log.Printf("[socks5] %s 已直连建立（绕过上游）", target)
+	idleTimeout := s.socks5RelayIdleTimeout()
+	relayResult := relaySOCKS5(clientConn, upstreamConn, idleTimeout, nil)
+	logSOCKS5RelayResult(target, idleTimeout, relayResult)
+}
+
+// socks5RelayIdleTimeout 将运行时校验超时映射为半关闭后的空闲回收门槛。
+// ValidateTimeout<=0 时使用与配置默认值一致的 10 秒，确保 relay 始终有界。
+func (s *SOCKS5Server) socks5RelayIdleTimeout() time.Duration {
+	if cfg := s.runtimeConfig(); cfg != nil && cfg.ValidateTimeout > 0 {
+		return time.Duration(cfg.ValidateTimeout) * time.Second
+	}
+	return defaultSOCKS5RelayIdleTimeout
 }
 
 // selectSOCKS5Proxy 根据使用模式选择 SOCKS5 上游代理
@@ -331,7 +664,7 @@ func (s *SOCKS5Server) readSOCKS5Request(conn net.Conn) (string, error) {
 		return "", fmt.Errorf("unsupported command: %d", cmd)
 	}
 	if header[2] != 0x00 {
-		s.sendSOCKS5Reply(conn, 0x01) // General failure
+		s.sendSOCKS5Reply(conn, 0x01) // 通用失败
 		return "", fmt.Errorf("invalid reserved byte: %d", header[2])
 	}
 
@@ -427,7 +760,7 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 		} else {
 			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 		}
-		proxiedConn, err := readHTTPConnectResponse(conn)
+		proxiedConn, err := readHTTPConnectResponseForTarget(conn, target)
 		if err != nil {
 			conn.Close()
 			return nil, err
@@ -524,6 +857,42 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 }
 
 func readHTTPConnectResponse(conn net.Conn) (net.Conn, error) {
+	return readHTTPConnectResponseForTarget(conn, "")
+}
+
+type httpConnectRejectionError struct {
+	target     string
+	statusCode int
+	status     string
+}
+
+func (e *httpConnectRejectionError) Error() string {
+	if e.target == "" {
+		return fmt.Sprintf("upstream proxy connect failed: %s", e.status)
+	}
+	return fmt.Sprintf("upstream proxy connect failed: %s (target %s)", e.status, e.target)
+}
+
+func isHTTPConnectCapabilityRejection(err error) bool {
+	var rejection *httpConnectRejectionError
+	if !errors.As(err, &rejection) || rejection.target == "" {
+		return false
+	}
+	_, port, splitErr := net.SplitHostPort(rejection.target)
+	if splitErr != nil || port != "80" {
+		return false
+	}
+	// 只豁免能明确表达“策略禁止/方法不支持”的状态。400、407、408、
+	// 429 与 5xx 仍可能是请求、认证、限流或节点故障，保持原健康计数。
+	switch rejection.statusCode {
+	case http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
+}
+
+func readHTTPConnectResponseForTarget(conn net.Conn, target string) (net.Conn, error) {
 	reader := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
@@ -531,7 +900,11 @@ func readHTTPConnectResponse(conn net.Conn) (net.Conn, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream proxy connect failed: %s", resp.Status)
+		return nil, &httpConnectRejectionError{
+			target:     target,
+			statusCode: resp.StatusCode,
+			status:     resp.Status,
+		}
 	}
 	return &bufferedConn{Conn: conn, reader: reader}, nil
 }

@@ -11,8 +11,8 @@ import (
 	"github.com/babutree/GeoProxy/config"
 )
 
-// configSave is the persistence seam used by config handlers.
-// Production defaults to config.Save; tests may override it to inject failures.
+// configSave 是配置处理器使用的持久化切入点。
+// 生产环境默认为 config.Save；测试可替换它以注入失败。
 var configSave = config.Save
 
 // apiConfig 获取配置
@@ -101,17 +101,17 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	newCfg.AllowedCountries = config.NormalizeCountryCodes(req.AllowedCountries)
 
 	if err := configSave(&newCfg); err != nil {
-		log.Printf("[webui] save config failed: %v", err)
+		log.Printf("[webui] 保存配置失败: %v", err)
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
 	s.cfg = &newCfg
 	s.affinity.SetTTL(time.Duration(newCfg.SessionTTLMinutes) * time.Minute)
 	if err := s.applyCountryFilters(&newCfg); err != nil {
-		log.Printf("[webui] apply country filters failed: %v", err)
+		log.Printf("[webui] 应用国家过滤条件失败: %v", err)
 		if rollbackErr := configSave(&oldCfg); rollbackErr != nil {
 			// 磁盘/全局无法回滚时，保留已成功落盘的新配置运行态，避免 s.cfg/affinity 与 config.Get()/磁盘分裂。
-			log.Printf("[webui] rollback config after country filter failure failed: %v", rollbackErr)
+			log.Printf("[webui] 国家过滤条件失败后回滚配置失败: %v", rollbackErr)
 		} else {
 			s.cfg = &oldCfg
 			s.affinity.SetTTL(time.Duration(oldCfg.SessionTTLMinutes) * time.Minute)
@@ -126,7 +126,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
-	log.Printf("[config] 配置已更新: auth_user=%s ttl=%dmin health=%dmin",
+	log.Printf("[webui] 配置已更新: auth_user=%s ttl=%dmin health=%dmin",
 		req.ProxyAuthUsername, req.SessionTTLMinutes, req.HealthIntervalMinutes)
 	jsonOK(w, map[string]string{"status": "saved"})
 }

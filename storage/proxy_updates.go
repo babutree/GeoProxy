@@ -81,30 +81,81 @@ func (s *Storage) UpdateLatencyByID(id int64, latencyMs int) error {
 }
 
 // UpdateExitInfo 更新出口信息；自动地域可由验证结果回写，手动地域受保护。
-func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int, aiReachability string) error {
+func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
 	if err := s.requireUnambiguousAddress(address); err != nil {
 		return err
 	}
-	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, cfBlocked, aiReachability)
+	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability)
 }
 
-func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int, aiReachability string) error {
-	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, cfBlocked, aiReachability)
+func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
+	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability)
 }
 
-func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int, aiReachability string) error {
-	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, cfBlocked, aiReachability)
+func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
+	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability)
+}
+
+// RecoverSubscriptionProxyWithExitInfo 原子写回探测结果并恢复订阅节点。
+// 出口元数据和 active 状态必须在同一条 UPDATE 中提交：任一字段写入失败时，
+// SQLite 会回滚整条语句，节点保持 disabled 与旧元数据，避免半提交假健康。
+// 仅允许从 disabled 恢复，且父订阅未暂停；调用方可在故障解除后安全重试。
+func (s *Storage) RecoverSubscriptionProxyWithExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始探测恢复事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	grade := CalculateQualityGrade(latencyMs)
+	region := regionFromExitLocation(exitLocation)
+	res, err := tx.Exec(
+		`UPDATE proxies
+		 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?,
+		     status = 'active', fail_count = 0, last_check = CURRENT_TIMESTAMP,
+		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END,
+		     ipapiis_score = CASE WHEN ? >= 0 THEN ? ELSE ipapiis_score END,
+		     ipapi_flags = CASE WHEN ? THEN ? ELSE ipapi_flags END,
+		     ipapi_flags_seen = CASE WHEN ? THEN 1 ELSE ipapi_flags_seen END,
+		     cf_blocked = CASE WHEN ? >= 0 THEN ? ELSE cf_blocked END,
+		     ai_reachability = CASE WHEN ? != '' THEN ? ELSE ai_reachability END
+		 WHERE address = ? AND source = ? AND subscription_id = ?
+		   AND status = 'disabled'
+		   AND EXISTS (
+			   SELECT 1 FROM subscriptions
+			   WHERE subscriptions.id = proxies.subscription_id
+			     AND subscriptions.status != 'paused'
+		   )`,
+		exitIP, exitLocation, latencyMs, grade,
+		region, region,
+		ipapiisScore, ipapiisScore,
+		ipapiFlagsKnown, ipapiFlags,
+		ipapiFlagsKnown,
+		cfBlocked, cfBlocked,
+		aiReachability, aiReachability,
+		address, SourceSubscription, subscriptionID,
+	)
+	if err != nil {
+		return fmt.Errorf("写回探测恢复结果失败: %w", err)
+	}
+	if err := requireRowsAffected(res.RowsAffected()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交探测恢复结果失败: %w", err)
+	}
+	return nil
 }
 
 // updateExitInfoWhere 写回出口信息与两源风险信号。
 // ipapiis_score 仅在 ipapiisScore >= 0 时更新：探测降级/未知(-1)不得覆盖已有有效分。
-// ipapi_flags 随每次成功探测覆盖写入（含空串——空表示本次探测无命中，语义有效）。
-// ipapi_flags_seen=1 区分“已探测且无命中”和“旧数据/未探测”。
+// ipapiFlagsKnown=true 时覆盖 ipapi_flags（含空串）并置 seen=1；false 时保留旧值与 seen。
+// 显式 bool 区分“主源已探测且无命中”和“仅备用源取得出口、主源未知”。
 // 注意：本函数不改 status——订阅流程依赖 Disable/Enable 分离，恢复启用由调用点显式处理。
-func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int, aiReachability string) error {
+func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
 	grade := CalculateQualityGrade(latencyMs)
 	region := regionFromExitLocation(exitLocation)
-	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region, ipapiisScore, ipapiisScore, ipapiFlags, cfBlocked, cfBlocked, aiReachability, aiReachability}
+	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region, ipapiisScore, ipapiisScore, ipapiFlagsKnown, ipapiFlags, ipapiFlagsKnown, cfBlocked, cfBlocked, aiReachability, aiReachability}
 	queryArgs = append(queryArgs, args...)
 	// 健康检查/验证成功时同样清零 fail_count（BUG-53）：只有到达此处才代表
 	// 探测通过，之前累积的失败应清除，节点方能重新参与选路/后续检查。
@@ -114,11 +165,12 @@ func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, 
 	// ai_reachability 仅在非空串时更新：空串代表本次未探测(未知)，不得覆盖已有有效 JSON（与 cf_blocked 的 -1 不覆盖同理）。
 	res, err := s.db.Exec(
 		`UPDATE proxies
-		 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
+			 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
+			     last_check = CURRENT_TIMESTAMP,
 		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END,
 		     ipapiis_score = CASE WHEN ? >= 0 THEN ? ELSE ipapiis_score END,
-		     ipapi_flags = ?,
-		     ipapi_flags_seen = 1,
+		     ipapi_flags = CASE WHEN ? THEN ? ELSE ipapi_flags END,
+		     ipapi_flags_seen = CASE WHEN ? THEN 1 ELSE ipapi_flags_seen END,
 		     cf_blocked = CASE WHEN ? >= 0 THEN ? ELSE cf_blocked END,
 		     ai_reachability = CASE WHEN ? != '' THEN ? ELSE ai_reachability END
 		 WHERE `+where,
@@ -208,7 +260,8 @@ func (s *Storage) RecordProxyFailureByID(id int64, threshold int) error {
 		 SET use_count = use_count + 1,
 		     fail_count = fail_count + 1,
 		     status = CASE WHEN fail_count + 1 >= ? THEN 'disabled' ELSE status END,
-		     last_used = CURRENT_TIMESTAMP
+		     last_used = CURRENT_TIMESTAMP,
+		     last_check = CURRENT_TIMESTAMP
 		 WHERE id = ?`,
 		threshold, id,
 	)
@@ -360,8 +413,14 @@ func (s *Storage) enableProxyWhere(where string, args ...interface{}) error {
 	res, err := s.db.Exec(
 		`UPDATE proxies SET status = 'active', fail_count = 0
 		 WHERE `+where+` AND status = 'disabled'
-		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
-		args...,
+		   AND (
+			   source != ? OR EXISTS (
+				   SELECT 1 FROM subscriptions
+				   WHERE subscriptions.id = proxies.subscription_id
+				     AND subscriptions.status != 'paused'
+			   )
+		   )`,
+		append(args, SourceSubscription)...,
 	)
 	if err != nil {
 		return err
@@ -416,7 +475,7 @@ func (s *Storage) UnpauseProxyByID(id int64) error {
 	return requireRowsAffected(res.RowsAffected())
 }
 
-// ErrAmbiguousProxyAddress is returned when more than one proxy shares an address.
+// ErrAmbiguousProxyAddress 在多个节点共享同一地址时返回。
 var ErrAmbiguousProxyAddress = errors.New("ambiguous proxy address")
 
 func (s *Storage) requireUnambiguousAddress(address string) error {

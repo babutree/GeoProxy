@@ -2,6 +2,7 @@ package selector
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -193,6 +194,135 @@ func TestResolveDifferentSessionsSpread(t *testing.T) {
 	}
 	if len(seen) < 2 {
 		t.Fatalf("sessions did not spread across nodes, only saw: %v", seen)
+	}
+}
+
+// 新 session 必须在全部合格节点间分配，不能把较慢节点永久排除在固定 top-K 外。
+func TestPickForSessionUsesAllEligibleNodes(t *testing.T) {
+	proxies := make([]storage.Proxy, 0, 16)
+	for id := int64(1); id <= 16; id++ {
+		proxies = append(proxies, storage.Proxy{
+			ID:      id,
+			Address: fmt.Sprintf("jp-%02d:8080", id),
+			Region:  "jp",
+			Latency: int(id) * 10,
+			Status:  "active",
+		})
+	}
+
+	seen := make(map[int64]struct{})
+	outsideOldTopFive := false
+	for i := 0; i < 256; i++ {
+		proxy, err := pickForSession(
+			fakeStore{proxies: proxies}, nil, "jp", fmt.Sprintf("spread-%03d", i), nil, 0, 0, nil,
+		)
+		if err != nil {
+			t.Fatalf("pickForSession() error = %v", err)
+		}
+		seen[proxy.ID] = struct{}{}
+		outsideOldTopFive = outsideOldTopFive || proxy.ID > 5
+	}
+
+	if len(seen) <= 5 || !outsideOldTopFive {
+		t.Fatalf("256 sessions covered IDs %v (count=%d), want >5 nodes including an ID outside old top-5", seen, len(seen))
+	}
+}
+
+func TestPickForSessionUsesStableIDAcrossAddressChanges(t *testing.T) {
+	before := []storage.Proxy{
+		{ID: 10, Address: "a:8080", Region: "jp", Latency: 20, Status: "active"},
+		{ID: 20, Address: "b:8080", Region: "jp", Latency: 20, Status: "active"},
+	}
+	after := []storage.Proxy{
+		{ID: 10, Address: "z:8080", Region: "jp", Latency: 20, Status: "active"},
+		{ID: 20, Address: "a:8080", Region: "jp", Latency: 20, Status: "active"},
+	}
+
+	pickedBefore, err := pickForSession(fakeStore{proxies: before}, nil, "jp", "stable-id", nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("pickForSession(before) error = %v", err)
+	}
+	pickedAfter, err := pickForSession(fakeStore{proxies: after}, nil, "jp", "stable-id", nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("pickForSession(after) error = %v", err)
+	}
+	if pickedBefore.ID != pickedAfter.ID {
+		t.Fatalf("same session changed from ID %d to %d after address-only update", pickedBefore.ID, pickedAfter.ID)
+	}
+}
+
+func TestPickForSessionFallsBackToNodeKeyWhenIDMissing(t *testing.T) {
+	before := []storage.Proxy{
+		{Address: "a:8080", NodeKey: "node-a", Region: "jp", Latency: 20, Status: "active"},
+		{Address: "b:8080", NodeKey: "node-b", Region: "jp", Latency: 20, Status: "active"},
+	}
+	after := []storage.Proxy{
+		{Address: "z:8080", NodeKey: "node-a", Region: "jp", Latency: 20, Status: "active"},
+		{Address: "a:8080", NodeKey: "node-b", Region: "jp", Latency: 20, Status: "active"},
+	}
+
+	pickedBefore, err := pickForSession(fakeStore{proxies: before}, nil, "jp", "stable-key", nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("pickForSession(before) error = %v", err)
+	}
+	pickedAfter, err := pickForSession(fakeStore{proxies: after}, nil, "jp", "stable-key", nil, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("pickForSession(after) error = %v", err)
+	}
+	if pickedBefore.NodeKey != pickedAfter.NodeKey {
+		t.Fatalf("same session changed from NodeKey %q to %q after address-only update", pickedBefore.NodeKey, pickedAfter.NodeKey)
+	}
+}
+
+func TestPickForSessionLatencyWeightIsEffectiveButDoesNotStarve(t *testing.T) {
+	const samples = 4096
+	fastFirst := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "one:8080", Region: "jp", Latency: 20, Status: "active"},
+		{ID: 2, Address: "two:8080", Region: "jp", Latency: 2000, Status: "active"},
+	}}
+	slowFirst := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "one:8080", Region: "jp", Latency: 2000, Status: "active"},
+		{ID: 2, Address: "two:8080", Region: "jp", Latency: 20, Status: "active"},
+	}}
+	unknownFirst := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "one:8080", Region: "jp", Latency: 0, Status: "active"},
+		{ID: 2, Address: "two:8080", Region: "jp", Latency: 20, Status: "active"},
+	}}
+
+	var fastIDOne, slowIDOne, unknownIDOne int
+	for i := 0; i < samples; i++ {
+		session := fmt.Sprintf("weight-%04d", i)
+		picked, err := pickForSession(fastFirst, nil, "jp", session, nil, 0, 0, nil)
+		if err != nil {
+			t.Fatalf("pickForSession(fast) error = %v", err)
+		}
+		if picked.ID == 1 {
+			fastIDOne++
+		}
+		picked, err = pickForSession(slowFirst, nil, "jp", session, nil, 0, 0, nil)
+		if err != nil {
+			t.Fatalf("pickForSession(slow) error = %v", err)
+		}
+		if picked.ID == 1 {
+			slowIDOne++
+		}
+		picked, err = pickForSession(unknownFirst, nil, "jp", session, nil, 0, 0, nil)
+		if err != nil {
+			t.Fatalf("pickForSession(unknown) error = %v", err)
+		}
+		if picked.ID == 1 {
+			unknownIDOne++
+		}
+	}
+
+	if fastIDOne <= slowIDOne+512 {
+		t.Fatalf("latency did not materially affect selection: ID 1 fast=%d slow=%d", fastIDOne, slowIDOne)
+	}
+	if slowIDOne == 0 || fastIDOne == samples {
+		t.Fatalf("latency weight starved a candidate: ID 1 fast=%d slow=%d", fastIDOne, slowIDOne)
+	}
+	if unknownIDOne >= 1800 {
+		t.Fatalf("unknown latency was favored too often: ID 1 unknown=%d of %d", unknownIDOne, samples)
 	}
 }
 

@@ -17,10 +17,8 @@ const failDisableThreshold = 3
 
 // healthStore 健康检查对存储的最小依赖，便于单测注入假实现。
 type healthStore interface {
-	GetQualityDistribution() (map[string]int, error)
-	CountAll() (int, error)
-	GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]storage.Proxy, error)
-	UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, cfBlocked int, aiReachability string) error
+	GetBatchForHealthCheck(batchSize int) ([]storage.Proxy, error)
+	UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error
 	RecordProxyUseByID(id int64, success bool) error
 	RecordProxyFailureByID(id int64, threshold int) error
 }
@@ -36,10 +34,10 @@ type HealthChecker struct {
 	validator healthValidator
 	cfg       *config.Config
 
-	// running 防止 RunOnce 重叠：已有检查在进行时后发调用直接跳过。
+	// 防止 RunOnce 重叠：已有检查在进行时，后发调用直接跳过。
 	running atomic.Bool
 
-	// background 只允许启动一次 ticker 循环，避免重复 StartBackground 泄漏 goroutine。
+	// 后台循环只允许启动一次，避免重复 StartBackground 泄漏协程。
 	bgMu         sync.Mutex
 	bgStarted    bool
 	bgStartCount int
@@ -86,26 +84,8 @@ func (hc *HealthChecker) RunOnce() {
 	start := time.Now()
 	log.Println("[health] 开始健康检查...")
 
-	// 健康状态且S级占比高时，跳过S级代理检查
-	skipSGrade := false
-	dist, err := hc.storage.GetQualityDistribution()
-	if err != nil {
-		log.Printf("[health] 获取质量分布失败: %v", err)
-		// 分布失败时不跳过 S 级，继续用全量候选，避免静默改变检查策略。
-		dist = map[string]int{}
-	}
-	sGradeCount := dist["S"]
-	totalCount, err := hc.storage.CountAll()
-	if err != nil {
-		log.Printf("[health] 获取代理数量失败: %v", err)
-		return
-	}
-	if totalCount > 0 && float64(sGradeCount)/float64(totalCount) > 0.3 {
-		skipSGrade = true
-	}
-
 	// 批量获取需要检查的代理
-	proxies, err := hc.storage.GetBatchForHealthCheck(hc.cfg.HealthCheckBatchSize, skipSGrade)
+	proxies, err := hc.storage.GetBatchForHealthCheck(hc.cfg.HealthCheckBatchSize)
 	if err != nil {
 		log.Printf("[health] 获取检查批次失败: %v", err)
 		return
@@ -116,7 +96,7 @@ func (hc *HealthChecker) RunOnce() {
 		return
 	}
 
-	log.Printf("[health] 检查 %d 个代理（跳过S级=%v）", len(proxies), skipSGrade)
+	log.Printf("[health] 检查 %d 个代理", len(proxies))
 
 	// 执行验证
 	validCount := 0
@@ -128,7 +108,7 @@ func (hc *HealthChecker) RunOnce() {
 			validCount++
 			// 更新延迟和质量等级
 			latencyMs := int(result.Latency.Milliseconds())
-			if err := hc.storage.UpdateProxyExitInfo(result.Proxy.ID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
+			if err := hc.storage.UpdateProxyExitInfo(result.Proxy.ID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.FlagsKnown, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
 				log.Printf("[health] 更新出口信息失败 id=%d: %v", result.Proxy.ID, err)
 			} else {
 				updateCount++
@@ -147,7 +127,7 @@ func (hc *HealthChecker) RunOnce() {
 		len(proxies), validCount, updateCount, disableCount, elapsed)
 }
 
-// StartBackground 后台定时健康检查；重复调用是幂等的，不会再启 ticker。
+// StartBackground 启动后台定时健康检查；重复调用幂等，不会创建第二个定时器。
 func (hc *HealthChecker) StartBackground() {
 	hc.bgMu.Lock()
 	if hc.bgStarted {
@@ -180,7 +160,7 @@ func (hc *HealthChecker) StartBackground() {
 	log.Printf("[health] 健康检查器已启动，间隔 %d 分钟", intervalMin)
 }
 
-// StopBackground 停止后台 ticker（测试与优雅关闭用）；未启动时为 no-op。
+// StopBackground 停止后台定时器（测试与优雅关闭用）；未启动时直接返回。
 func (hc *HealthChecker) StopBackground() {
 	hc.bgMu.Lock()
 	if !hc.bgStarted {

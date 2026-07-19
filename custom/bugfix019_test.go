@@ -10,8 +10,7 @@ import (
 	"github.com/babutree/GeoProxy/validator"
 )
 
-// TestBUGFIX019ReloadKeepsBuildableNodes verifies one rejected node does not
-// prevent a buildable sibling from reaching the sing-box runtime.
+// TestBUGFIX019ReloadKeepsBuildableNodes：验证一个被拒绝节点不会阻止同批可构建节点进入 sing-box 运行态。
 func TestBUGFIX019ReloadKeepsBuildableNodes(t *testing.T) {
 	s := NewSingBoxProcess("sing-box", t.TempDir(), testSingBoxBasePort)
 	good := tunnelNode("good", "good.example.com", "good-password")
@@ -30,8 +29,67 @@ func TestBUGFIX019ReloadKeepsBuildableNodes(t *testing.T) {
 	}
 }
 
-// TestBUGFIX019ShardedCommitSkipsRejectedNode verifies assignedKeys records
-// only the accepted part of a partially rejected target.
+// TestBUGFIX019AssemblyDiagnosticsKeepRejectedSeparateFromSegmentFull
+// 锁定装配证据：明确 buildOutbound 失败属于 rejected，不能混入 segmentFull。
+func TestBUGFIX019AssemblyDiagnosticsKeepRejectedSeparateFromSegmentFull(t *testing.T) {
+	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	good := tunnelNode("diag-good", "diag-good.example.com", "password")
+	bad := unsupportedXHTTPNode()
+
+	_, portMap, diagnostics := s.assembleConfigWithDiagnostics([]ParsedNode{good, bad})
+	if len(diagnostics.accepted) != 1 || diagnostics.accepted[0].NodeKey() != good.NodeKey() {
+		t.Fatalf("accepted=%v, want only good", keysOf(diagnostics.accepted))
+	}
+	if len(diagnostics.rejected) != 1 || diagnostics.rejected[0].node.NodeKey() != bad.NodeKey() {
+		t.Fatalf("rejected=%v, want only bad", diagnostics.rejected)
+	}
+	if len(diagnostics.segmentFull) != 0 {
+		t.Fatalf("build rejection entered segmentFull: %v", keysOf(diagnostics.segmentFull))
+	}
+	if _, ok := portMap[good.NodeKey()]; !ok {
+		t.Fatalf("accepted good node missing port: %v", portMap)
+	}
+	if _, ok := portMap[bad.NodeKey()]; ok {
+		t.Fatalf("rejected bad node unexpectedly has port: %v", portMap)
+	}
+
+	err := incompletePortAllocationErrorWithDiagnostics([]ParsedNode{bad}, portMap, diagnostics)
+	if err == nil || !strings.Contains(err.Error(), "构建失败") {
+		t.Fatalf("rejected node must report build failure, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "端口段已满") {
+		t.Fatalf("rejected node was misreported as segment full: %v", err)
+	}
+}
+
+// TestBUGFIX019AssemblyDiagnosticsRequireAllocatorEvidenceForSegmentFull
+// 锁定真实容量不足：只有 allocPort 返回 0 的节点进入 segmentFull。
+func TestBUGFIX019AssemblyDiagnosticsRequireAllocatorEvidenceForSegmentFull(t *testing.T) {
+	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	filled := fillSegmentPortMap(s)
+	overflow := tunnelNode("overflow", "overflow.example.com", "password")
+
+	_, portMap, diagnostics := s.assembleConfigWithDiagnostics(append(append([]ParsedNode(nil), filled...), overflow))
+	if len(diagnostics.segmentFull) != 1 || diagnostics.segmentFull[0].NodeKey() != overflow.NodeKey() {
+		t.Fatalf("segmentFull=%v, want only overflow", keysOf(diagnostics.segmentFull))
+	}
+	if len(diagnostics.rejected) != 0 {
+		t.Fatalf("allocator overflow entered rejected: %v", diagnostics.rejected)
+	}
+	if len(diagnostics.accepted) != len(filled) {
+		t.Fatalf("accepted count=%d, want %d retained nodes", len(diagnostics.accepted), len(filled))
+	}
+
+	err := incompletePortAllocationErrorWithDiagnostics([]ParsedNode{overflow}, portMap, diagnostics)
+	if err == nil || !strings.Contains(err.Error(), "端口段已满") {
+		t.Fatalf("allocator-proven overflow must report segment full, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "构建失败") || strings.Contains(err.Error(), "未知端口缺失") {
+		t.Fatalf("segment-full node entered another category: %v", err)
+	}
+}
+
+// TestBUGFIX019ShardedCommitSkipsRejectedNode：验证 assignedKeys 只记录部分拒绝目标中的已接受节点。
 func TestBUGFIX019ShardedCommitSkipsRejectedNode(t *testing.T) {
 	shard := &diagnosticSpyShard{spyShard: newSpyShard()}
 	sb := newShardedSingBoxWithFactory(testSingBoxBasePort, 1, func(int, int) singBoxShard {
@@ -52,8 +110,32 @@ func TestBUGFIX019ShardedCommitSkipsRejectedNode(t *testing.T) {
 	}
 }
 
-// TestBUGFIX019ShardedUnknownPortMissingRollsBack verifies a missing port with
-// no assembly evidence remains strict and restores the prior committed state.
+// TestBUGFIX019ZeroAcceptedFailsBothCommitGates 防止全拒绝被当作空目标成功提交。
+func TestBUGFIX019ZeroAcceptedFailsBothCommitGates(t *testing.T) {
+	bad := unsupportedXHTTPNode()
+	diagnostics := assemblyDiagnostics{
+		rejected: []assemblyRejectedNode{{node: bad, err: errUnsupportedTransport}},
+	}
+	shard := &diagnosticSpyShard{spyShard: newSpyShard(), diagnostics: diagnostics}
+
+	accepted, err := shardReloadCommitError([]ParsedNode{bad}, shard)
+	if err == nil {
+		t.Fatalf("shard commit accepted zero nodes: %v", accepted)
+	}
+	if len(accepted) != 0 || !strings.Contains(err.Error(), "所有隧道节点均被拒绝") {
+		t.Fatalf("shard zero-accepted result = %v, %v", accepted, err)
+	}
+
+	accepted, err = acceptedNodesForCommit(shard, []ParsedNode{bad}, map[string]int{})
+	if err == nil {
+		t.Fatalf("subscription commit accepted zero nodes: %v", accepted)
+	}
+	if len(accepted) != 0 || !strings.Contains(err.Error(), "所有隧道节点均被拒绝") {
+		t.Fatalf("subscription zero-accepted result = %v, %v", accepted, err)
+	}
+}
+
+// TestBUGFIX019ShardedUnknownPortMissingRollsBack：验证缺失端口且没有装配证据时仍严格失败，并恢复此前已提交状态。
 func TestBUGFIX019ShardedUnknownPortMissingRollsBack(t *testing.T) {
 	shard := newSpyShard()
 	sb := newShardedSingBoxWithFactory(testSingBoxBasePort, 1, func(int, int) singBoxShard {
@@ -74,8 +156,7 @@ func TestBUGFIX019ShardedUnknownPortMissingRollsBack(t *testing.T) {
 	}
 }
 
-// TestBUGFIX019ManagerCommitsAcceptedTunnelAndKeepsBadOutOfDB verifies the
-// subscription boundary persists only accepted tunnel nodes.
+// TestBUGFIX019ManagerCommitsAcceptedTunnelAndKeepsBadOutOfDB：验证订阅边界只持久化已接受的隧道节点。
 func TestBUGFIX019ManagerCommitsAcceptedTunnelAndKeepsBadOutOfDB(t *testing.T) {
 	store := newTestStorage(t)
 	file := writeSubscriptionFile(t, strings.Join([]string{
@@ -186,8 +267,7 @@ type unsupportedTransportError struct{}
 
 func (unsupportedTransportError) Error() string { return "unsupported transport" }
 
-// TestBUGFIX019UnknownMissingPortIsNotReportedAsSegmentFull requires evidence
-// from the allocator before classifying a missing port as a full segment.
+// TestBUGFIX019UnknownMissingPortIsNotReportedAsSegmentFull：验证只有分配器提供证据后，缺失端口才可归类为端口段已满。
 func TestBUGFIX019UnknownMissingPortIsNotReportedAsSegmentFull(t *testing.T) {
 	node := tunnelNode("unknown", "unknown.example.com", "password")
 	err := incompletePortAllocationError([]ParsedNode{node}, map[string]int{})
@@ -202,8 +282,7 @@ func TestBUGFIX019UnknownMissingPortIsNotReportedAsSegmentFull(t *testing.T) {
 	}
 }
 
-// TestBUGFIX019IncompleteDiagnosticDoesNotMutateNode verifies diagnostics do
-// not change identity-bearing parsed input while forcing TLS for trojan.
+// TestBUGFIX019IncompleteDiagnosticDoesNotMutateNode：验证诊断不会修改承载身份的解析输入，同时为 trojan 强制启用 TLS。
 func TestBUGFIX019IncompleteDiagnosticDoesNotMutateNode(t *testing.T) {
 	node := ParsedNode{
 		Name:   "immutable",

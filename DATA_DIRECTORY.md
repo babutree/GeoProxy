@@ -1,290 +1,167 @@
-# Data 目录说明
+# 数据目录与持久化
 
-GeoProxy 的所有运行时数据和配置存储在数据目录中。
+GeoProxy 的运行时状态由配置文件、SQLite 数据库和订阅文件组成。本文以当前
+`config/config.go`、`storage/storage.go`、`storage/migrations.go` 与
+`docker-compose.yml` 为事实源。
 
-**默认配置**（`docker-compose.yml`）：使用 bind mount，将宿主机 `${HOST_DATA_DIR:-./data}` 挂载到容器 `/app/data`。Named Volume 仅在你改写 compose 时可选。
+## 数据目录选择
 
-## 📁 目录内容
+### 原生运行
 
-### 1. SQLite 数据库文件
+`DATA_DIR` 非空时，程序使用该路径（相对路径按进程当前工作目录解释；生产环境
+建议使用绝对路径）。`Load` 和 `Save` 会先创建目录；路径不可创建、是普通文件或
+权限不足时会立即报错，不会静默改写到别处。
 
-**`proxy.db`** - 主数据库文件（约 1-10MB，取决于池子大小）
+`DATA_DIR` 未设置或为空时，默认目录为：
 
-包含两张表：
+`os.UserConfigDir()/GeoProxy`
 
-**`proxies` 表**：上游节点数据（手动节点 + 订阅节点）
-- 节点地址、协议类型
-- 地域（region）、地域来源（region_source: manual/auto）、备注（note）
-- 出口 IP、地理位置
-- 延迟、质量等级
-- 使用统计（使用次数、成功次数、失败次数）
-- 状态信息（active/degraded/disabled）
-- 来源（source: manual/subscription）、所属订阅 ID
-- 时间戳（最后使用、最后检查、创建时间）
+典型位置由 Go 的 `os.UserConfigDir` 决定：
 
-**`subscriptions` 表**：订阅信息
-- 名称、URL、本地文件路径、格式
-- 刷新间隔、最后拉取时间、最后成功时间
-- 状态（active/paused）、节点数
+- Windows：`%AppData%\GeoProxy`
+- macOS：`~/Library/Application Support/GeoProxy`
+- Linux/Unix：`$XDG_CONFIG_HOME/GeoProxy`，未设置时通常为
+  `~/.config/GeoProxy`
 
-> 注：旧版 `source_status`（公共源断路器）表已在本网关模型中废弃，启动时会自动 `DROP`。
+正常启动入口 `config.Load` 会创建该目录；首次成功启动会生成并写入 `config.json`。
+单独调用 `DefaultConfig` 只解析路径，不代表已完成持久化。
 
-### 2. SQLite WAL 模式文件
+注意：订阅上传入口已经使用同一解析规则；`custom.NewManager` 的 sing-box 生命周期
+仍直接读取 `DATA_DIR`，未设置时不会自动继承该原生默认目录。原生部署在该入口
+完成收敛前应显式设置 `DATA_DIR`，避免 sing-box 临时配置落到 CWD（跟踪项：
+`BUGFIX-075`）。
 
-**`proxy.db-shm`** - 共享内存文件（临时）
-- WAL 模式的索引文件
-- 进程运行时存在，停止后可能自动删除
+为避免升级时生成一套无法解释的新身份，若未设置 `DATA_DIR` 且当前工作目录已经
+存在 `config.json`、`proxy.db`、WAL/SHM 文件、`data.db` 或
+`subscriptions/` 等旧运行时标记，启动会显式失败。错误会列出检测到的标记并提示：
+设置 `DATA_DIR` 指向旧目录，或人工迁移后再启动；程序不会自动迁移、复制或删除
+旧文件。迁移前先停止服务并保留可回滚备份。
 
-**`proxy.db-wal`** - 预写日志文件（临时）
-- 存储未提交的数据库事务
-- checkpoint 后会合并到主数据库
-- 提高并发性能
+### Docker Compose
 
-### 3. 配置文件
-
-**`config.json`** - 运行时配置（通过 WebUI 修改的配置）
-
-包含：
-- 端口配置（http_port、socks5_port、webui_port）
-- 代理认证（proxy_auth_enabled、proxy_auth_username、proxy_auth_password）
-- 会话与地域（session_ttl_minutes、default_region）
-- 健康检查间隔（health_check_interval）、最大重试（max_retry）
-- sing-box 路径（singbox_path）
-- 地域过滤（allowed_countries、blocked_countries）
-
-> 💡 **注意**：`config.json` 是运行时生成的，首次启动时不存在，使用默认配置。通过 WebUI 修改配置后会自动保存到此文件。
-
-## 📍 数据位置
-
-### Dokploy / 生产部署（Named Volume）
-
-**卷名称**：`geoproxy-data`
-
-**实际位置**（Linux）：
-```bash
-/var/lib/docker/volumes/geoproxy-data/_data/
-```
-
-**查看数据**：
-```bash
-# 进入运行中的容器
-docker exec -it geoproxy sh
-
-# 查看数据目录
-ls -lh /app/data/
-
-# 查看数据库
-sqlite3 /app/data/proxy.db "SELECT COUNT(*) FROM proxies;"
-```
-
-**备份数据**：
-```bash
-# 从运行中的 compose 服务导出数据目录
-docker compose exec -T geoproxy tar czf - -C /app/data . > geoproxy-backup-$(date +%Y%m%d).tar.gz
-```
-
-**恢复数据**：
-```bash
-# 停止服务
-docker compose down
-
-# 恢复备份到 compose 管理的数据卷
-docker compose run --rm --no-deps --entrypoint sh geoproxy -c "cd /app/data && tar xzf -" < geoproxy-backup-20260328.tar.gz
-
-# 重启服务
-docker compose up -d
-```
-
-### 本地开发（可选相对路径挂载）
-
-默认 `docker-compose.yml` 使用 Docker named volume。若你手动把 compose 的 `volumes` 改成 `./data:/app/data`，数据会保存在项目目录的 `./data` 文件夹中。
-
-**查看数据**：
-```bash
-# 直接查看宿主机目录
-ls -lh data/
-
-# 查看数据库
-sqlite3 data/proxy.db "SELECT COUNT(*) FROM proxies;"
-```
-
-**备份数据**：
-```bash
-# 简单打包
-tar czf geoproxy-backup-$(date +%Y%m%d).tar.gz data/
-
-# 或仅备份数据库
-cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
-```
-
-## 🐳 Docker 挂载配置
-
-### 使用 Named Volume（推荐）
-
-在 `docker-compose.yml` 中：
+默认 Compose 使用 bind mount，不声明 named volume：
 
 ```yaml
 volumes:
-  - geoproxy-data:/app/data  # Named Volume
-
-volumes:
-  geoproxy-data:              # 定义卷
+  - type: bind
+    source: ${HOST_DATA_DIR:-./data}
+    target: /app/data
+environment:
+  - DATA_DIR=/app/data
 ```
 
-**优势**：
-- ✅ 数据持久化，容器删除不丢失
-- ✅ Docker 自动管理，无需关心具体路径
-- ✅ 支持备份和迁移
-- ✅ 适合生产环境和自动化部署
+因此默认宿主机目录是 Compose 文件旁的 `./data`（即 `${HOST_DATA_DIR:-./data}`）；可在 `.env` 中设置
+`HOST_DATA_DIR` 覆盖宿主机路径。容器内路径固定为 `/app/data`，除非同时修改
+挂载目标和 `DATA_DIR=/app/data`。named volume 只能作为运维方自行改写 Compose
+后的部署选择，不能按当前文件推断其名称或位置。
 
-### 为什么需要持久化？
+## 文件与首次启动
 
-**持久化数据**：
-- 容器重启/更新后手动节点与订阅节点数据不丢失
-- 配置修改持久保存
-- 订阅的最后成功刷新时间持续跟踪
+### `config.json`
 
-**不挂载的后果**：
-- ❌ 每次重启都需要重新拉取并验证订阅节点（耗时、耗资源）
-- ❌ WebUI 的配置修改会丢失
-- ❌ 手动录入的节点与订阅记录丢失
+首次成功执行 `config.Load` 会生成随机 WebUI 登录凭据和代理凭据并保存。实际
+持久化键来自 `config.savedConfig`：
 
-### Docker Compose 配置
+- `http_port`、`socks5_port`、`webui_port`
+- `webui_password_hash`
+- `proxy_auth_enabled`、`proxy_auth_username`、`proxy_auth_password`、
+  `proxy_auth_password_hash`
+- `session_ttl_minutes`、`max_sessions_per_proxy`、
+  `proxy_cooldown_minutes`
+- `default_region`、`blocked_countries`、`allowed_countries`
+- `health_check_interval`、`max_retry`
+- `singbox_path`、`singbox_shard_count`
+- `readonly_api_keys`、`public_host`、`readonly_api_rate_per_min`
 
-```yaml
-volumes:
-  - ${DATA_DIR:-./data}:/app/data
+WebUI 密码只保存哈希；代理密码为了生成可复制的完整代理 URL，按当前产品
+合同以明文保存。只读 API Key 只保存哈希。文件在 POSIX 系统由 `Save` 以
+0600 权限写入；Windows 的访问控制以宿主机 ACL 为准。不要把该文件提交到 Git
+或写入日志。
+
+### SQLite 文件
+
+- `proxy.db`：主数据库。
+- `proxy.db-wal`、`proxy.db-shm`：SQLite WAL 模式的临时伴随文件。服务运行
+  时可能存在，备份前应先停止服务或使用 SQLite 一致性备份流程。
+
+### `subscriptions/`
+
+WebUI 上传的本地订阅内容写入数据目录下的 `subscriptions/`，数据库只保存
+文件路径和订阅元数据。不要把订阅 URL、请求头或文件内容写入日志、测试 fixture
+或 Git。
+
+## SQLite schema
+
+以下列清单由 `storage.New` 初始化并由 migrations 补齐；启动迁移会检查缺失列，
+不会要求人工执行 ALTER。旧的 `source_status` 表会在初始化时删除。应用不使用
+独立 `schema_version` 表，迁移顺序以源码中的幂等检查为准。
+
+### `proxies`
+
+`id`、`address`、`protocol`、`region`、`region_source`、`note`、
+`exit_ip`、`exit_location`、`latency`、`quality_grade`、`use_count`、
+`success_count`、`fail_count`、`last_used`、`last_check`、`created_at`、
+`status`、`user_paused`、`source`、`subscription_id`、`ipapiis_score`、
+`ipapi_flags`、`ipapi_flags_seen`、`starred`、`cf_blocked`、
+`dual_protocol`、`ai_reachability`、`proxy_username`、`proxy_password`、
+`node_key`
+
+说明：
+
+- `source` 为 `manual` 或 `subscription`；`subscription_id=0` 表示手动节点。
+- `dual_protocol=1` 表示 sing-box mixed 入站同时支持 HTTP 与 SOCKS5；它不是
+  对 `protocol` 字段的替换。
+- `ipapiis_score=-1`、`cf_blocked=-1` 和空的 `ai_reachability` 表示尚未
+  得到对应探测结果。
+- `proxy_username`、`proxy_password` 是上游认证凭据，只用于拨号，不得记录
+  到日志；`node_key` 是稳定节点身份，临时 mixed 端口变化不应改变它。
+
+### `subscriptions`
+
+`id`、`name`、`url`、`file_path`、`format`、`refresh_min`、
+`last_fetch`、`status`、`proxy_count`、`created_at`、`contributed`、
+`last_success`、`headers`
+
+`headers` 保存经校验的自定义请求头 JSON；`last_success` 只在本次刷新得到
+可用节点时推进。订阅 URL、文件路径和请求头均属于敏感配置，备份包应按部署的
+访问控制保护。
+
+## 备份与恢复
+
+备份必须在服务停止后进行，以便把 WAL 内容合并到主库或一并保留：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+docker compose stop geoproxy
+Compress-Archive -Path .\data\* -DestinationPath .\geoproxy-backup.zip
+docker compose start geoproxy
 ```
 
-**说明**：
-- 宿主机目录：`./data`（docker-compose.yml 所在目录下）
-- 容器内路径：`/app/data`
-- 首次启动会自动创建 `data/` 目录
+如果设置了 `HOST_DATA_DIR`，将示例中的 `.\data` 替换为实际宿主机目录。恢复
+前停止并关闭 Compose，再把备份解压回同一目录，确认文件权限后启动：
 
-## 📊 数据大小
-
-根据池子配置，预计文件大小：
-
-| 池子大小 | proxy.db | proxy.db-wal | config.json | 总计 |
-|---------|----------|--------------|-------------|------|
-| 50 个代理 | ~1 MB | ~200 KB | ~500 B | ~1.2 MB |
-| 100 个代理 | ~2 MB | ~400 KB | ~500 B | ~2.4 MB |
-| 200 个代理 | ~4 MB | ~800 KB | ~500 B | ~4.8 MB |
-| 500 个代理 | ~10 MB | ~2 MB | ~500 B | ~12 MB |
-
-> 💡 **注意**：WAL 文件大小会动态变化，checkpoint 后会重置。
-
-## 🔍 查看数据
-
-### 查看数据库内容
-
-```bash
-# 进入 data 目录
-cd data/
-
-# 查看所有代理
-sqlite3 proxy.db "SELECT address, protocol, exit_location, latency, quality_grade FROM proxies LIMIT 10;"
-
-# 查看质量分布
-sqlite3 proxy.db "SELECT quality_grade, COUNT(*) FROM proxies GROUP BY quality_grade;"
-
-# 查看地域分布
-sqlite3 proxy.db "SELECT region, COUNT(*) FROM proxies WHERE region != '' GROUP BY region ORDER BY COUNT(*) DESC;"
-
-# 查看订阅状态
-sqlite3 proxy.db "SELECT name, status, proxy_count, last_success FROM subscriptions;"
-```
-
-### 查看配置文件
-
-```bash
-cat data/config.json | jq .
-```
-
-如果还没有通过 WebUI 修改配置，这个文件可能不存在（使用默认配置）。
-
-## 🧹 清理数据
-
-### 重置代理池（保留配置）
-
-```bash
-# 仅清空代理表
-sqlite3 data/proxy.db "DELETE FROM proxies;"
-
-# 或删除整个数据库（下次启动重新创建）
-rm -f data/proxy.db*
-```
-
-### 完全重置（包括配置）
-
-```bash
-# 删除整个 data 目录
-rm -rf data/
-
-# 下次启动会自动创建并使用默认配置
-```
-
-### Docker 容器重置
-
-```bash
-# 停止并删除容器
+```powershell
+$ErrorActionPreference = 'Stop'
 docker compose down
-
-# 删除数据卷
-rm -rf data/
-
-# 重新启动（全新环境）
+Expand-Archive -Path .\geoproxy-backup.zip -DestinationPath .\data -Force
 docker compose up -d
 ```
 
-## 🔒 备份数据
+恢复到不同服务器时，先核对 `HOST_DATA_DIR`、容器 `/app/data` 挂载和读写权限。
+不要把旧 `config.json` 与新目录中的文件混合覆盖；需要迁移时整体复制并保留原
+目录备份。
 
-### 手动备份
+## 排障与重置
 
-```bash
-# 备份整个 data 目录
-tar -czf geoproxy-backup-$(date +%Y%m%d).tar.gz data/
+- 日志提示未设置 `DATA_DIR` 且发现 CWD 旧文件：先设置 `DATA_DIR` 指向旧目录，
+  或停服后人工迁移；不要反复重启生成新目录。
+- 日志提示无法创建数据目录：检查路径是否为普通文件、父目录权限和磁盘空间。
+- 仅重置配置：停服后备份并删除目标数据目录中的 `config.json`，下次启动会重新
+  生成凭据；`proxy.db` 不会因此删除。
+- 重置节点库：停服后备份并删除 `proxy.db` 及其 WAL/SHM 文件；下次启动会按
+  当前 schema 重建空库。
+- 完全重置会同时删除配置、数据库和 `subscriptions/`；这是破坏性操作，必须先
+  确认备份可读。
 
-# 或仅备份数据库
-cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
-```
-
-### 定时备份脚本
-
-```bash
-#!/bin/bash
-# backup.sh
-
-BACKUP_DIR="backups"
-DATE=$(date +%Y%m%d-%H%M%S)
-
-mkdir -p $BACKUP_DIR
-cp data/proxy.db "$BACKUP_DIR/proxy-$DATE.db"
-
-# 保留最近 7 天的备份
-find $BACKUP_DIR -name "proxy-*.db" -mtime +7 -delete
-
-echo "✅ 备份完成: $BACKUP_DIR/proxy-$DATE.db"
-```
-
-### 恢复数据
-
-```bash
-# 停止服务
-docker compose down
-
-# 恢复数据库
-cp backups/proxy-20260328.db data/proxy.db
-
-# 重启服务
-docker compose up -d
-```
-
-## ⚠️ 注意事项
-
-1. **WAL 文件**：停止服务前会自动 checkpoint，无需手动处理
-2. **并发安全**：多个容器不要共享同一个 data 目录（SQLite 不支持多进程写入）
-3. **权限问题**：确保容器有权限读写 data 目录
-4. **备份时机**：建议在服务停止时备份，避免数据不一致
-5. **迁移数据**：直接复制整个 data 目录到新服务器即可
-
+运行时文件、数据库、订阅内容和凭据均不应提交到 Git。变更数据目录策略时，必须
+同步更新 Compose、`.env.example`、本页和相关测试合同。

@@ -1,9 +1,10 @@
 package validator
 
 import (
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,17 +39,241 @@ func TestValidateAllWithClampedConcurrencyReturnsForInvalidProxy(t *testing.T) {
 	}
 }
 
-func TestGetExitIPInfoRejectsNon2xx(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte(`{"status":"success","query":"203.0.113.9","countryCode":"US","city":"Ashburn"}`))
-	}))
-	defer server.Close()
-
-	client := server.Client()
-	client.Transport = rewriteIPAPITransport{base: client.Transport, target: server.URL}
+func TestGetExitIPInfoRejectsWhenAllProvidersReturnNon2xx(t *testing.T) {
+	var requests atomic.Int32
+	client := &http.Client{Transport: exitInfoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return exitInfoHTTPResponse(req, http.StatusBadGateway, `{}`), nil
+	})}
 	if got := getExitIPInfo(client); got.OK {
-		t.Fatalf("getExitIPInfo() = %#v for HTTP 502, want failed lookup", got)
+		t.Fatalf("getExitIPInfo() = %#v when all providers return HTTP 502, want failed lookup", got)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("provider requests = %d, want 2", got)
+	}
+}
+
+func TestGetExitIPInfoFallsBackWhenPrimaryFails(t *testing.T) {
+	var requests atomic.Int32
+	client := &http.Client{Transport: exitInfoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		switch req.URL.Host {
+		case "ip-api.com":
+			return exitInfoHTTPResponse(req, http.StatusBadGateway, `{}`), nil
+		case "api.ipapi.is":
+			return exitInfoHTTPResponse(req, http.StatusOK, `{
+				"ip":"203.0.113.42",
+				"location":{"country_code":"JP","city":"Tokyo"},
+				"is_proxy":true,
+				"is_datacenter":true
+			}`), nil
+		default:
+			t.Fatalf("unexpected exit-info provider: %s", req.URL.Host)
+			return nil, nil
+		}
+	})}
+
+	got := getExitIPInfo(client)
+	if !got.OK || got.IP != "203.0.113.42" || got.Location != "JP Tokyo" {
+		t.Fatalf("getExitIPInfo() = %#v, want backup exit 203.0.113.42 in JP Tokyo", got)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("provider requests = %d, want 2", got)
+	}
+}
+
+func TestGetExitIPInfoFallsBackWhenPrimaryTimesOut(t *testing.T) {
+	client := &http.Client{
+		Timeout: 30 * time.Millisecond,
+		Transport: exitInfoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Host {
+			case "ip-api.com":
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			case "api.ipapi.is":
+				return exitInfoHTTPResponse(req, http.StatusOK, `{
+					"ip":"203.0.113.43",
+					"location":{"country_code":"SG","city":"Singapore"}
+				}`), nil
+			default:
+				t.Fatalf("unexpected exit-info provider: %s", req.URL.Host)
+				return nil, nil
+			}
+		}),
+	}
+
+	started := time.Now()
+	got := getExitIPInfo(client)
+	if !got.OK || got.IP != "203.0.113.43" || got.Location != "SG Singapore" {
+		t.Fatalf("getExitIPInfo() = %#v, want backup success after primary timeout", got)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("getExitIPInfo() elapsed = %v, want total deadline under 200ms", elapsed)
+	}
+}
+
+func TestGetExitIPInfoRejectsProviderConflicts(t *testing.T) {
+	tests := []struct {
+		name    string
+		primary string
+		backup  string
+	}{
+		{
+			name:    "exit IP mismatch",
+			primary: `{"status":"success","query":"203.0.113.10","countryCode":"JP","city":"Tokyo"}`,
+			backup:  `{"ip":"203.0.113.11","location":{"country_code":"JP","city":"Tokyo"}}`,
+		},
+		{
+			name:    "country mismatch",
+			primary: `{"status":"success","query":"203.0.113.10","countryCode":"JP","city":"Tokyo"}`,
+			backup:  `{"ip":"203.0.113.10","location":{"country_code":"US","city":"Ashburn"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: exitInfoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host {
+				case "ip-api.com":
+					return exitInfoHTTPResponse(req, http.StatusOK, tc.primary), nil
+				case "api.ipapi.is":
+					return exitInfoHTTPResponse(req, http.StatusOK, tc.backup), nil
+				default:
+					t.Fatalf("unexpected exit-info provider: %s", req.URL.Host)
+					return nil, nil
+				}
+			})}
+
+			if got := getExitIPInfo(client); got.OK {
+				t.Fatalf("getExitIPInfo() = %#v for conflicting providers, want fail-closed", got)
+			}
+		})
+	}
+}
+
+func TestGetExitIPInfoAcceptsConsensusAndQueriesBothProviders(t *testing.T) {
+	var requests atomic.Int32
+	client := &http.Client{Transport: exitInfoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		switch req.URL.Host {
+		case "ip-api.com":
+			return exitInfoHTTPResponse(req, http.StatusOK, `{
+				"status":"success",
+				"query":"203.0.113.10",
+				"countryCode":"JP",
+				"city":"Tokyo"
+			}`), nil
+		case "api.ipapi.is":
+			return exitInfoHTTPResponse(req, http.StatusOK, `{
+				"ip":"203.0.113.10",
+				"location":{"country_code":"JP","city":"Osaka"}
+			}`), nil
+		default:
+			t.Fatalf("unexpected exit-info provider: %s", req.URL.Host)
+			return nil, nil
+		}
+	})}
+
+	got := getExitIPInfo(client)
+	if !got.OK || got.IP != "203.0.113.10" || got.Location != "JP Tokyo" {
+		t.Fatalf("getExitIPInfo() = %#v, want consensus using primary location", got)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("provider requests = %d, want 2", got)
+	}
+}
+
+func TestGetExitIPInfoTimesOutFailClosedWithinBound(t *testing.T) {
+	client := &http.Client{
+		Timeout: 20 * time.Millisecond,
+		Transport: exitInfoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}),
+	}
+
+	started := time.Now()
+	got := getExitIPInfo(client)
+	elapsed := time.Since(started)
+	if got.OK {
+		t.Fatalf("getExitIPInfo() = %#v after provider timeouts, want fail-closed", got)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("getExitIPInfo() timeout elapsed = %v, want bounded under 200ms", elapsed)
+	}
+}
+
+func TestAssessRiskTracksPrimaryFlagsKnowledge(t *testing.T) {
+	tests := []struct {
+		name          string
+		primaryStatus int
+		primaryBody   string
+		backupStatus  int
+		backupBody    string
+		wantKnown     bool
+	}{
+		{
+			name:          "backup-only keeps ip-api flags unknown",
+			primaryStatus: http.StatusBadGateway,
+			primaryBody:   `{}`,
+			backupStatus:  http.StatusOK,
+			backupBody:    `{"ip":"203.0.113.44","location":{"country_code":"JP","city":"Tokyo"}}`,
+			wantKnown:     false,
+		},
+		{
+			name:          "primary clean response is known",
+			primaryStatus: http.StatusOK,
+			primaryBody:   `{"status":"success","query":"203.0.113.45","countryCode":"US","city":"Ashburn","proxy":false,"hosting":false,"mobile":false}`,
+			backupStatus:  http.StatusBadGateway,
+			backupBody:    `{}`,
+			wantKnown:     true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{
+				Timeout: 100 * time.Millisecond,
+				Transport: exitInfoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					switch req.URL.Host {
+					case "ip-api.com":
+						return exitInfoHTTPResponse(req, tc.primaryStatus, tc.primaryBody), nil
+					case "api.ipapi.is":
+						if req.URL.Query().Get("q") != "" {
+							return exitInfoHTTPResponse(req, http.StatusOK, `{"company":{"abuser_score":"0.01 (Low)"}}`), nil
+						}
+						return exitInfoHTTPResponse(req, tc.backupStatus, tc.backupBody), nil
+					default:
+						return exitInfoHTTPResponse(req, http.StatusUnauthorized, `{"error":{"message":"missing api key"}}`), nil
+					}
+				}),
+			}
+
+			ipInfo := getExitIPInfo(client)
+			if !ipInfo.OK {
+				t.Fatalf("getExitIPInfo() = %#v, want valid exit info", ipInfo)
+			}
+			risk := assessRisk(client, ipInfo)
+			if risk.FlagsKnown != tc.wantKnown {
+				t.Fatalf("assessRisk().FlagsKnown = %v, want %v", risk.FlagsKnown, tc.wantKnown)
+			}
+			if risk.Flags != "" {
+				t.Fatalf("assessRisk().Flags = %q, want clean/unknown empty value", risk.Flags)
+			}
+		})
+	}
+}
+
+type exitInfoRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f exitInfoRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func exitInfoHTTPResponse(req *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
 	}
 }
 

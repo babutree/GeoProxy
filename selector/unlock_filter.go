@@ -7,10 +7,10 @@ import (
 	"github.com/babutree/GeoProxy/storage"
 )
 
-// proxyMatchesUnlock returns true when the proxy satisfies every required unlock filter.
-// Required tokens use normalized names: openai/claude/grok/gemini/cf.
-// Missing/invalid AI JSON or unprobed (-1) does not satisfy a required AI filter.
-// CF requires cf_blocked == 0 (open); -1 unprobed and 1 blocked fail.
+// proxyMatchesUnlock 判断节点是否满足全部必需的解锁条件。
+// 必需令牌使用标准名称：openai/claude/grok/gemini/cf。
+// AI JSON 缺失或无效，或结果未探测（-1）时，不满足对应的 AI 解锁条件。
+// CF 要求 cf_blocked == 0（开放）；未探测（-1）和已阻断（1）均不满足。
 func proxyMatchesUnlock(proxy storage.Proxy, unlock []string) bool {
 	if len(unlock) == 0 {
 		return true

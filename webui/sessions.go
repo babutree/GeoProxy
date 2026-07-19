@@ -45,7 +45,7 @@ func sessionRouteLabel(region, sessionID string) string {
 	return "session-" + s
 }
 
-// proxyOccupancyRow is the per-node occupancy snapshot for lease observability.
+// proxyOccupancyRow 是用于租约可观测性的单节点占用快照。
 type proxyOccupancyRow struct {
 	ProxyID                  int64  `json:"proxy_id"`
 	Address                  string `json:"address"`
@@ -150,8 +150,8 @@ func isLocalMixedDisplayAddress(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// buildProxyOccupancyRows aggregates active bindings into per-proxy occupancy rows.
-// affinity==nil yields an empty slice. No credential fields.
+// buildProxyOccupancyRows 将活跃绑定聚合为逐节点占用记录。
+// affinity==nil 时返回空切片，且不包含凭据字段。
 func (s *Server) buildProxyOccupancyRows() []proxyOccupancyRow {
 	if s.affinity == nil {
 		return []proxyOccupancyRow{}
@@ -187,22 +187,20 @@ func (s *Server) buildProxyOccupancyRows() []proxyOccupancyRow {
 	return rows
 }
 
-// apiProxyOccupancy returns per-proxy active session counts for authenticated admins.
-// Only proxies with at least one non-expired binding are included. No credential fields.
+// apiProxyOccupancy 返回已认证管理员可见的逐节点活跃会话数。
+// 只包含至少一个未过期绑定的节点，且不包含凭据字段。
 func (s *Server) apiProxyOccupancy(w http.ResponseWriter, _ *http.Request) {
 	jsonOK(w, s.buildProxyOccupancyRows())
 }
 
-// apiV1Occupancy is the read-only external occupancy API (API key auth).
-// Private/internal node addresses (loopback, RFC1918, CGNAT 100.64/10,
-// link-local 169.254/16, IPv6 loopback ::1, IPv6 ULA fc00::/7 and IPv6
-// link-local fe80::/10) are redacted so external API-key callers cannot misuse
-// an internal bind address as a direct dial target or learn the gateway's
-// private topology. Public addresses are returned unchanged.
+// apiV1Occupancy 是只读外部占用 API，使用 API Key 鉴权。
+// 私有或内部节点地址会被脱敏，包括回环地址、RFC1918、CGNAT 100.64/10、
+// link-local 169.254/16、IPv6 回环 ::1、IPv6 ULA fc00::/7 和
+// IPv6 link-local fe80::/10，防止外部 API Key 调用方把内部绑定地址误作
+// 直连目标，或据此获知网关的私有拓扑。公网地址保持原样。
 //
-// This masking applies ONLY to the read-only endpoint. The admin endpoint
-// (apiProxyOccupancy) intentionally leaves buildProxyOccupancyRows untouched
-// and continues to show the real bind address.
+// 此脱敏仅应用于只读端点。管理员端点 apiProxyOccupancy 有意保留
+// buildProxyOccupancyRows 的原始结果，继续显示真实绑定地址。
 func (s *Server) apiV1Occupancy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -218,9 +216,8 @@ func (s *Server) apiV1Occupancy(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, rows)
 }
 
-// proxyAddressHost extracts the bare host from a proxy address, stripping any
-// "host:port" wrapper and IPv6 brackets. Returns the trimmed input if it has no
-// recognizable port separator.
+// proxyAddressHost 从代理地址中提取裸主机，去掉 host:port 包装和 IPv6 方括号。
+// 如果没有可识别的端口分隔符，则返回去除首尾空白后的输入。
 func proxyAddressHost(addr string) string {
 	host := strings.TrimSpace(addr)
 	if host == "" {
@@ -232,16 +229,13 @@ func proxyAddressHost(addr string) string {
 	return strings.Trim(host, "[]")
 }
 
-// isPrivateOrInternalProxyAddress reports whether the address should be redacted
-// from the read-only occupancy API. It covers loopback/localhost plus every
-// non-public range that a proxy could bind to but that must never be handed to
-// an external caller:
-//   - IPv4 loopback (127/8), RFC1918 (10/8, 172.16/12, 192.168/16),
-//     CGNAT (100.64/10), link-local (169.254/16), unspecified (0.0.0.0)
-//   - IPv6 loopback (::1), ULA (fc00::/7), link-local (fe80::/10),
-//     unspecified (::)
+// isPrivateOrInternalProxyAddress 判断地址是否应从只读占用 API 中脱敏。
+// 覆盖回环地址、localhost，以及代理可能绑定但绝不能交给外部调用方的所有非公网地址：
+//   - IPv4 回环（127/8）、RFC1918（10/8、172.16/12、192.168/16）、
+//     CGNAT（100.64/10）、link-local（169.254/16）、未指定地址（0.0.0.0）
+//   - IPv6 回环（::1）、ULA（fc00::/7）、link-local（fe80::/10）、未指定地址（::）
 //
-// Public/global-unicast addresses return false so they remain visible.
+// 公网或全局单播地址返回 false，因此保持可见。
 func isPrivateOrInternalProxyAddress(addr string) bool {
 	host := proxyAddressHost(addr)
 	if host == "" {
@@ -252,8 +246,8 @@ func isPrivateOrInternalProxyAddress(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		// Non-IP host (e.g. a hostname). Treat as non-public and redact to be
-		// safe: the read-only API only ever exposes public IP:port targets.
+		// 非 IP 主机（如主机名）按非公网地址处理并脱敏；
+		// 只读 API 只会公开公网 IP:port 目标。
 		return true
 	}
 	return isPrivateOrInternalIP(ip)
@@ -268,8 +262,8 @@ func isPrivateOrInternalIP(ip net.IP) bool {
 		ip.IsPrivate() {
 		return true
 	}
-	// net.IP.IsPrivate covers RFC1918 and IPv6 ULA (fc00::/7) but NOT CGNAT
-	// 100.64.0.0/10, which is shared address space that must not leak either.
+	// net.IP.IsPrivate 覆盖 RFC1918 和 IPv6 ULA（fc00::/7），但不覆盖 CGNAT
+	// 100.64.0.0/10；后者属于共享地址空间，也不能泄露。
 	if v4 := ip.To4(); v4 != nil {
 		if v4[0] == 100 && v4[1]&0xc0 == 0x40 {
 			return true

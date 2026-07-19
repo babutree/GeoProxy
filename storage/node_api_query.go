@@ -103,7 +103,7 @@ func buildNodeAPIWhere(filter NodeAPIFilter) (string, []interface{}) {
 	status := strings.TrimSpace(strings.ToLower(filter.Status))
 	if status != "all" {
 		where += ` AND status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
-			AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`
+			AND ` + selectableSubscriptionScopeSQL
 	}
 
 	if region := strings.TrimSpace(strings.ToLower(filter.Region)); region != "" {
@@ -111,8 +111,9 @@ func buildNodeAPIWhere(filter NodeAPIFilter) (string, []interface{}) {
 		args = append(args, region)
 	}
 	if protocol := strings.TrimSpace(strings.ToLower(filter.Protocol)); protocol != "" {
-		where += ` AND protocol = ?`
-		args = append(args, protocol)
+		protocolWhere, protocolArgs := inboundProtocolSQL(protocol)
+		where += ` AND ` + protocolWhere
+		args = append(args, protocolArgs...)
 	}
 	if source := strings.TrimSpace(strings.ToLower(filter.Source)); source != "" {
 		where += ` AND source = ?`

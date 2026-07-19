@@ -89,7 +89,7 @@ func TestUpdateProxyExitInfoWritesRiskSignals(t *testing.T) {
 		t.Fatalf("GetProxyByAddress() error = %v", err)
 	}
 
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.20", "US Ashburn", 42, 0.65, "proxy,hosting", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.20", "US Ashburn", 42, 0.65, "proxy,hosting", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-write:8080")
@@ -108,6 +108,77 @@ func TestUpdateProxyExitInfoWritesRiskSignals(t *testing.T) {
 	}
 }
 
+func TestUpdateProxyExitInfoPreservesUnknownFlagsAndClearsKnownClean(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "risk-knownness-id:8080", "http", "us", SourceManual, 100, "active", 0)
+	p, err := store.GetProxyByAddress("risk-knownness-id:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.60", "JP Tokyo", 60, -1, "", false, -1, ""); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(initial unknown flags) error = %v", err)
+	}
+	p, _ = store.GetProxyByID(p.ID)
+	if p.IPAPIFlags != "" || p.IPAPIFlagsSeen {
+		t.Fatalf("initial unknown flags update = flags %q seen %v, want empty/false", p.IPAPIFlags, p.IPAPIFlagsSeen)
+	}
+	if _, err := store.db.Exec("UPDATE proxies SET ipapi_flags = ?, ipapi_flags_seen = 1 WHERE id = ?", "hosting", p.ID); err != nil {
+		t.Fatalf("seed known flags: %v", err)
+	}
+
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.60", "JP Tokyo", 50, -1, "", false, -1, ""); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(unknown flags) error = %v", err)
+	}
+	p, _ = store.GetProxyByID(p.ID)
+	if p.IPAPIFlags != "hosting" || !p.IPAPIFlagsSeen {
+		t.Fatalf("unknown flags update = flags %q seen %v, want preserved hosting/true", p.IPAPIFlags, p.IPAPIFlagsSeen)
+	}
+
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.60", "JP Tokyo", 45, -1, "", true, -1, ""); err != nil {
+		t.Fatalf("UpdateProxyExitInfo(known clean) error = %v", err)
+	}
+	p, _ = store.GetProxyByID(p.ID)
+	if p.IPAPIFlags != "" || !p.IPAPIFlagsSeen {
+		t.Fatalf("known-clean flags update = flags %q seen %v, want empty/true", p.IPAPIFlags, p.IPAPIFlagsSeen)
+	}
+}
+
+func TestUpdateSubscriptionProxyExitInfoPreservesUnknownFlagsAndClearsKnownClean(t *testing.T) {
+	store := newTestStorage(t)
+	insertTestSubscription(t, store, 1, "active")
+	insertProxy(t, store, "risk-knownness-sub:8080", "http", "jp", SourceSubscription, 100, "active", 0)
+	p, err := store.GetProxyByIdentity("risk-knownness-sub:8080", SourceSubscription, 1)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() error = %v", err)
+	}
+	if err := store.UpdateSubscriptionProxyExitInfo(p.Address, p.SubscriptionID, "203.0.113.61", "JP Osaka", 65, -1, "", false, -1, ""); err != nil {
+		t.Fatalf("UpdateSubscriptionProxyExitInfo(initial unknown flags) error = %v", err)
+	}
+	p, _ = store.GetProxyByID(p.ID)
+	if p.IPAPIFlags != "" || p.IPAPIFlagsSeen {
+		t.Fatalf("initial unknown subscription flags = flags %q seen %v, want empty/false", p.IPAPIFlags, p.IPAPIFlagsSeen)
+	}
+	if _, err := store.db.Exec("UPDATE proxies SET ipapi_flags = ?, ipapi_flags_seen = 1 WHERE id = ?", "proxy", p.ID); err != nil {
+		t.Fatalf("seed subscription flags: %v", err)
+	}
+
+	if err := store.UpdateSubscriptionProxyExitInfo(p.Address, p.SubscriptionID, "203.0.113.61", "JP Osaka", 55, -1, "", false, -1, ""); err != nil {
+		t.Fatalf("UpdateSubscriptionProxyExitInfo(unknown flags) error = %v", err)
+	}
+	p, _ = store.GetProxyByID(p.ID)
+	if p.IPAPIFlags != "proxy" || !p.IPAPIFlagsSeen {
+		t.Fatalf("unknown subscription flags = flags %q seen %v, want preserved proxy/true", p.IPAPIFlags, p.IPAPIFlagsSeen)
+	}
+
+	if err := store.UpdateSubscriptionProxyExitInfo(p.Address, p.SubscriptionID, "203.0.113.61", "JP Osaka", 45, -1, "", true, -1, ""); err != nil {
+		t.Fatalf("UpdateSubscriptionProxyExitInfo(known clean) error = %v", err)
+	}
+	p, _ = store.GetProxyByID(p.ID)
+	if p.IPAPIFlags != "" || !p.IPAPIFlagsSeen {
+		t.Fatalf("known-clean subscription flags = flags %q seen %v, want empty/true", p.IPAPIFlags, p.IPAPIFlagsSeen)
+	}
+}
+
 // TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite 负向：ipapiis_score 降级/未知(-1)
 // 不得覆盖已有有效分；但 ipapi_flags 随每次成功探测覆盖（含清空，语义有效）。
 func TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite(t *testing.T) {
@@ -119,11 +190,11 @@ func TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite(t *testing.T) {
 	}
 
 	// 先写入有效分 0.80 + flags。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 42, 0.80, "proxy", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 42, 0.80, "proxy", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(0.80) error = %v", err)
 	}
 	// 再以 -1（ipapi.is 探测降级/失败）更新：ipapiis_score 应保持 0.80 不被覆盖。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(-1) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-keep:8080")
@@ -139,10 +210,10 @@ func TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite(t *testing.T) {
 	}
 
 	// 从 0 分再写 -1 也不得覆盖（0 是有效低分）。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, 0, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, 0, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(0) error = %v", err)
 	}
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.21", "US Ashburn", 50, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(-1 after 0) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-keep:8080")
@@ -163,7 +234,7 @@ func TestUpdateProxyExitInfoClearsFailCountAndMarksSeenButKeepsStatus(t *testing
 		t.Fatalf("GetProxyByAddress() error = %v", err)
 	}
 
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.22", "US Ashburn", 35, -1, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.22", "US Ashburn", 35, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("risk-reactivate:8080")
@@ -194,7 +265,7 @@ func TestUpdateProxyExitInfoClearsFailCountAndMarksSeenButKeepsStatus(t *testing
 func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	store := newTestStorage(t)
 	insertProxy(t, store, "cols-sync:8080", "http", "us", SourceManual, 123, "active", 0)
-	if err := store.UpdateProxyExitInfo(mustProxyID(t, store, "cols-sync:8080"), "203.0.113.30", "US Ashburn", 123, 0.55, "hosting", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(mustProxyID(t, store, "cols-sync:8080"), "203.0.113.30", "US Ashburn", 123, 0.55, "hosting", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
 
@@ -312,7 +383,7 @@ func TestUpdateProxyExitInfoWritesCFBlocked(t *testing.T) {
 		t.Fatalf("GetProxyByAddress() error = %v", err)
 	}
 
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", 1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", true, 1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(cf=1) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("cf-write:8080")
@@ -321,7 +392,7 @@ func TestUpdateProxyExitInfoWritesCFBlocked(t *testing.T) {
 	}
 
 	// -1 保护：本次未能探测(-1)不得覆盖之前的有效值 1。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(cf=-1) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("cf-write:8080")
@@ -330,7 +401,7 @@ func TestUpdateProxyExitInfoWritesCFBlocked(t *testing.T) {
 	}
 
 	// 有效值覆盖为 0（未拦截）。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", 0, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.40", "US Ashburn", 42, -1, "", true, 0, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(cf=0) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("cf-write:8080")
@@ -350,7 +421,7 @@ func TestUpdateProxyExitInfoNegativeCFBlockedDoesNotOverwrite(t *testing.T) {
 	}
 
 	// 1) 先写入有效值 1（被拦截）。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 42, -1, "", 1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 42, -1, "", true, 1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(cf=1) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("cf-keep:8080")
@@ -359,7 +430,7 @@ func TestUpdateProxyExitInfoNegativeCFBlockedDoesNotOverwrite(t *testing.T) {
 	}
 
 	// 2) 以 -1（本次未能探测）更新：cf_blocked 应保持 1 不被覆盖。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 50, -1, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 50, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(cf=-1) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("cf-keep:8080")
@@ -372,7 +443,7 @@ func TestUpdateProxyExitInfoNegativeCFBlockedDoesNotOverwrite(t *testing.T) {
 	}
 
 	// 3) 再以有效值 0（未拦截）更新：cf_blocked 应正常覆盖为 0。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 50, -1, "", 0, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.41", "US Ashburn", 50, -1, "", true, 0, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(cf=0) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("cf-keep:8080")
@@ -443,7 +514,7 @@ func TestUpdateProxyExitInfoWritesAIReachability(t *testing.T) {
 	}
 
 	const aiJSON = `{"claude":1,"gemini":0,"grok":-1,"openai":0}`
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.50", "US Ashburn", 42, -1, "", -1, aiJSON); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.50", "US Ashburn", 42, -1, "", true, -1, aiJSON); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(ai=json) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("ai-write:8080")
@@ -452,7 +523,7 @@ func TestUpdateProxyExitInfoWritesAIReachability(t *testing.T) {
 	}
 
 	// 空串保护：本次整体未探测（空串）不得覆盖之前的有效 JSON。
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.50", "US Ashburn", 50, -1, "", -1, ""); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.50", "US Ashburn", 50, -1, "", true, -1, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(ai=empty) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("ai-write:8080")
@@ -466,7 +537,7 @@ func TestUpdateProxyExitInfoWritesAIReachability(t *testing.T) {
 
 	// 有效值覆盖为新 JSON。
 	const aiJSON2 = `{"claude":0,"gemini":0,"grok":0,"openai":0}`
-	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.50", "US Ashburn", 50, -1, "", -1, aiJSON2); err != nil {
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.50", "US Ashburn", 50, -1, "", true, -1, aiJSON2); err != nil {
 		t.Fatalf("UpdateProxyExitInfo(ai=json2) error = %v", err)
 	}
 	p, _ = store.GetProxyByAddress("ai-write:8080")

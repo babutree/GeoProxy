@@ -70,6 +70,10 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_proxies_node_key ON proxies(node_key) WHERE node_key != ''`); err != nil {
 		return fmt.Errorf("create idx_proxies_node_key: %w", err)
 	}
+	// owner 查询按 source/subscription_id 过滤；复合索引保持跨订阅多 owner，不做全局唯一约束。
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_proxies_subscription_node_key ON proxies(source, subscription_id, node_key) WHERE node_key != ''`); err != nil {
+		return fmt.Errorf("create idx_proxies_subscription_node_key: %w", err)
+	}
 	return nil
 }
 
@@ -203,6 +207,9 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_proxies_node_key ON proxies(node_key) WHERE node_key != ''`); err != nil {
 		return fmt.Errorf("recreate idx_proxies_node_key after rebuild: %w", err)
 	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_proxies_subscription_node_key ON proxies(source, subscription_id, node_key) WHERE node_key != ''`); err != nil {
+		return fmt.Errorf("recreate idx_proxies_subscription_node_key after rebuild: %w", err)
+	}
 	return tx.Commit()
 }
 
@@ -294,7 +301,7 @@ func addProxyColumnIfMissing(db interface {
 	if exists > 0 {
 		return nil
 	}
-	log.Printf("[storage] migrating: adding %s column", name)
+	log.Printf("[storage] 迁移：添加 %s 列", name)
 	if _, err := db.Exec(alterSQL); err != nil {
 		return fmt.Errorf("add proxies.%s column: %w", name, err)
 	}
@@ -311,7 +318,7 @@ func (s *Storage) addSubscriptionColumnIfMissing(name, alterSQL string) error {
 	if exists > 0 {
 		return nil
 	}
-	log.Printf("[storage] migrating: adding subscriptions.%s column", name)
+	log.Printf("[storage] 迁移：添加 subscriptions.%s 列", name)
 	if _, err := s.db.Exec(alterSQL); err != nil {
 		return fmt.Errorf("add subscriptions.%s column: %w", name, err)
 	}

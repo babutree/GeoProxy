@@ -53,7 +53,7 @@ func TestParseUsername(t *testing.T) {
 		},
 		{
 			name: "node key stable identity (base64url wire)",
-			// NodeKey "trojan:a.example.com:443:deadbeef" → base64url
+			// 将 NodeKey "trojan:a.example.com:443:deadbeef" 编码为 base64url。
 			raw:  "username-node-key-" + EncodeNodeKeyPin("trojan:a.example.com:443:deadbeef"),
 			want: ParsedUsername{Base: "username", Node: "key-trojan:a.example.com:443:deadbeef"},
 		},
@@ -106,6 +106,8 @@ func TestParseUsernameRejectsMalformedDSL(t *testing.T) {
 		{name: "empty node key", raw: "username-node-key-"},
 		{name: "node key with illegal wire char", raw: "username-node-key-bad/key"},
 		{name: "node key invalid base64url payload", raw: "username-node-key-@@@@"},
+		{name: "node key with invalid base64url length", raw: "username-node-key-A"},
+		{name: "node key with forbidden padding", raw: "username-node-key-Zm8="},
 	}
 
 	for _, tt := range tests {

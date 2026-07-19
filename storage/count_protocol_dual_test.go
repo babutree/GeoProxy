@@ -47,4 +47,20 @@ func TestCountAvailableByProtocolIncludesDualMixed(t *testing.T) {
 	if socksN != 2 {
 		t.Fatalf("CountAvailableByProtocol(socks5)=%d, want 2 (1 pure socks5 + 1 dual)", socksN)
 	}
+
+	unknownN, err := store.CountAvailableByProtocol("trojan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknownN != 0 {
+		t.Fatalf("CountAvailableByProtocol(trojan)=%d, want 0 (dual must not widen unknown protocols)", unknownN)
+	}
+
+	normalizedHTTPN, err := store.CountAvailableByProtocol(" HTTP ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalizedHTTPN != 2 {
+		t.Fatalf("CountAvailableByProtocol(HTTP)=%d, want 2 after normalization", normalizedHTTPN)
+	}
 }

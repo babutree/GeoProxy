@@ -10,23 +10,19 @@ import (
 	"github.com/babutree/GeoProxy/config"
 )
 
-// apiKeyRateLimiter is an in-memory per-key token bucket.
+// apiKeyRateLimiter 是按 Key 隔离的内存令牌桶。
 //
-// ratePerMin is fixed at limiter
-// construction time (server startup) from config.ReadOnlyAPIRatePerMin. There is
-// no hot-reload path; a config change to the rate takes effect only after a
-// restart. This is intentional and documented in docs/READONLY_API_DESIGN.md so
-// callers are not misled into thinking a live edit re-tunes the limiter.
+// ratePerMin 在限流器首次构造时从 config.ReadOnlyAPIRatePerMin 读取并固定。
+// 当前没有热重载路径；限流器一旦创建，修改速率配置后需重启服务才会生效。
+// 该约束已记录在 docs/READONLY_API_DESIGN.md，避免调用方误以为在线编辑
+// 配置会立即调整已经运行的限流器。
 //
-// buckets is a per-key map. Without
-// eviction, forged/rotated/one-shot keys would accumulate buckets forever and
-// leak memory in a long-running process. We evict buckets that have been idle
-// longer than bucketIdleTTL. Eviction is safe for limiting semantics because a
-// bucket idle for >= 60s has already fully refilled to capacity; recreating it
-// lazily at full capacity on the next request is identical to keeping it. The
-// sweep runs under l.mu (reusing the existing lock), is throttled to at most
-// once per sweepInterval, and is forced whenever the map reaches maxBuckets so
-// growth is hard-bounded even under a burst of distinct keys.
+// buckets 按 Key 保存桶状态；若不清理，伪造、轮换或一次性 Key 会持续累积，
+// 最终造成长时间运行进程的内存泄漏。空闲超过 bucketIdleTTL 的桶会被清理。
+// 桶空闲至少 60 秒后已完全补满，因此下次请求时以满容量延迟重建，
+// 与保留原桶的限流语义一致。清理过程持有 l.mu，并复用既有互斥锁；
+// sweepInterval 将扫描限制为每个周期最多一次。桶数量达到 maxBuckets 时，
+// 即使尚未到周期也会强制清理，从而在不同 Key 突发请求下硬性限制增长。
 type apiKeyRateLimiter struct {
 	mu         sync.Mutex
 	ratePerMin int
@@ -41,15 +37,15 @@ type tokenBucket struct {
 }
 
 const (
-	// bucketIdleTTL is how long a bucket may be untouched before it is evicted.
-	// Any bucket idle this long has fully refilled to capacity (full refill from
-	// empty always takes 60s), so eviction never changes limiting behavior.
+	// bucketIdleTTL 表示桶在被清理前允许保持未访问状态的时长。
+	// 桶从空状态完全补满固定需要 60 秒，达到该空闲时长时已恢复容量，
+	// 因此清理不会改变限流语义。
 	bucketIdleTTL = 10 * time.Minute
-	// sweepInterval throttles how often the idle sweep runs, so a busy limiter
-	// does not walk the whole map on every request.
+	// sweepInterval 限制空闲扫描频率，避免繁忙限流器在每次请求时遍历全表。
+	// 该周期只影响清理成本，不改变单个桶的补充速率。
 	sweepInterval = time.Minute
-	// maxBuckets is a hard cap that forces an immediate sweep regardless of the
-	// throttle, bounding memory even under a flood of distinct (e.g. forged) keys.
+	// maxBuckets 是硬上限；达到上限时忽略扫描节流并立即清理，
+	// 即使不同的伪造 Key 大量涌入，也能限制桶映射占用的内存。
 	maxBuckets = 10000
 )
 
@@ -87,7 +83,7 @@ func (l *apiKeyRateLimiter) allow(keyID string) bool {
 	} else {
 		elapsed := now.Sub(b.lastSeen).Seconds()
 		if elapsed > 0 {
-			// Refill ratePerMin tokens per 60 seconds.
+			// 每 60 秒补充 ratePerMin 个令牌。
 			b.tokens += elapsed * float64(l.ratePerMin) / 60.0
 			if b.tokens > float64(l.ratePerMin) {
 				b.tokens = float64(l.ratePerMin)
@@ -102,10 +98,10 @@ func (l *apiKeyRateLimiter) allow(keyID string) bool {
 	return true
 }
 
-// evictStaleLocked removes buckets idle longer than bucketIdleTTL. It must be
-// called with l.mu held. The sweep is throttled to once per sweepInterval unless
-// the map has reached maxBuckets, in which case it runs immediately to keep
-// memory bounded.
+// evictStaleLocked 清理空闲时间不短于 bucketIdleTTL 的桶。
+// 调用方必须持有 l.mu。扫描通常按 sweepInterval 节流；
+// 映射达到 maxBuckets 时立即执行，不受节流限制，
+// 以保证内存占用有界。
 func (l *apiKeyRateLimiter) evictStaleLocked(now time.Time) {
 	forced := len(l.buckets) >= maxBuckets
 	if !forced && !l.lastSweep.IsZero() && now.Sub(l.lastSweep) < sweepInterval {
@@ -125,7 +121,7 @@ func extractAPIKey(r *http.Request) string {
 		if strings.HasPrefix(auth, prefix) {
 			return strings.TrimSpace(auth[len(prefix):])
 		}
-		// Also accept "bearer " case-insensitively for the scheme only.
+		// 仅对认证方案名大小写不敏感，同时接受 "bearer "。
 		if len(auth) > len(prefix) && strings.EqualFold(auth[:len(prefix)], prefix) {
 			return strings.TrimSpace(auth[len(prefix):])
 		}
@@ -133,10 +129,10 @@ func extractAPIKey(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-API-Key"))
 }
 
-// apiKeySHA256 is the webui-side seam for API-key hashing. Behavior is unchanged
-// (bare SHA-256 hex); it now delegates to config.HashAPIKey so there is a single
-// canonical implementation shared by both packages. The signature is
-// preserved so existing callers and tests are unaffected.
+// apiKeySHA256 是 webui 的 API Key 指纹适配点；当前仍生成裸 SHA-256
+// 十六进制兼容指纹，并委托给 config.HashAPIKey，确保两个包共用唯一实现。
+// 保留该函数签名以兼容现有调用方和测试；未来格式迁移必须由配置层版本化
+// 协调，不能在此形成独立算法。
 func apiKeySHA256(plain string) string {
 	return config.HashAPIKey(plain)
 }
@@ -146,7 +142,7 @@ type readOnlyAPIKeyMatch struct {
 	Hash string
 }
 
-// matchReadOnlyAPIKey returns the matched key index, or -1.
+// matchReadOnlyAPIKey 返回匹配的 Key 索引；无匹配时返回 -1。
 func matchReadOnlyAPIKey(cfg *config.Config, plain string) int {
 	if cfg == nil || plain == "" {
 		return -1
@@ -204,7 +200,7 @@ func (s *Server) ensureAPIKeyLimiter() *apiKeyRateLimiter {
 	return s.apiKeyLimiter
 }
 
-// apiKeyMiddleware authenticates read-only API keys and enforces per-key rate limits.
+// apiKeyMiddleware 鉴权只读 API Key，并按 Key 执行独立限流。
 func (s *Server) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		plain := extractAPIKey(r)
@@ -229,7 +225,7 @@ func (s *Server) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// apiV1Ping is a minimal stub for read-only API key middleware tests.
+// apiV1Ping 处理只读 API Key 鉴权后的最小探活请求。
 func (s *Server) apiV1Ping(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)

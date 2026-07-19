@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,6 +35,176 @@ func TestDefaultConfigUsesPRDPortsAndGatewaySettings(t *testing.T) {
 	if cfg.ProxyAuthUsername != "username" {
 		t.Fatalf("ProxyAuthUsername = %q, want username", cfg.ProxyAuthUsername)
 	}
+}
+
+func TestDefaultDataDirUsesUserConfigAndDoesNotUseWorkingDirectory(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", "")
+	userConfig := t.TempDir()
+	setUserConfigEnv(t, userConfig)
+	workingDir := t.TempDir()
+	t.Chdir(workingDir)
+
+	cfg := DefaultConfig()
+	wantDir := filepath.Join(userConfig, "GeoProxy")
+	if got := filepath.Clean(filepath.Dir(cfg.DBPath)); got != filepath.Clean(wantDir) {
+		t.Fatalf("default DB directory = %q, want %q", got, wantDir)
+	}
+	if got := filepath.Clean(filepath.Dir(ConfigFile())); got != filepath.Clean(wantDir) {
+		t.Fatalf("default config directory = %q, want %q", got, wantDir)
+	}
+	for _, name := range []string{"config.json", "proxy.db"} {
+		if _, err := os.Stat(filepath.Join(workingDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("working directory contains %s after DefaultConfig: err=%v", name, err)
+		}
+	}
+}
+
+func TestDefaultConfigDoesNotPanicWhenUserConfigDirIsUnavailable(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", "")
+	for _, key := range []string{"APPDATA", "XDG_CONFIG_HOME", "HOME", "USERPROFILE"} {
+		t.Setenv(key, "")
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("DefaultConfig() panicked when user config directory was unavailable: %v", recovered)
+		}
+	}()
+	cfg := DefaultConfig()
+	if cfg == nil {
+		t.Fatal("DefaultConfig() = nil")
+	}
+	if cfg.DBPath != "" {
+		t.Fatalf("DefaultConfig DBPath = %q, want empty rather than CWD fallback", cfg.DBPath)
+	}
+}
+
+func TestLoadReportsUnavailableUserConfigDirectory(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", "")
+	for _, key := range []string{"APPDATA", "XDG_CONFIG_HOME", "HOME", "USERPROFILE"} {
+		t.Setenv(key, "")
+	}
+	t.Chdir(t.TempDir())
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("Load() accepted an unavailable user config directory")
+		}
+		if message := recoveredMessage(recovered); !strings.Contains(message, "resolve default data directory") {
+			t.Fatalf("Load() panic = %q, want explicit resolver error", message)
+		}
+	}()
+	Load()
+}
+
+func TestLoadRejectsLegacyWorkingDirectoryDataWithoutExplicitDataDir(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", "")
+	setUserConfigEnv(t, t.TempDir())
+	workingDir := t.TempDir()
+	t.Chdir(workingDir)
+	if err := os.WriteFile(filepath.Join(workingDir, "config.json"), []byte(`{"proxy_auth_username":"legacy"}`), 0600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("Load() accepted legacy CWD data without explicit DATA_DIR")
+		}
+		message := recoveredMessage(recovered)
+		for _, fragment := range []string{"DATA_DIR", "config.json", "不会自动迁移"} {
+			if !strings.Contains(message, fragment) {
+				t.Fatalf("legacy-data error %q missing %q", message, fragment)
+			}
+		}
+	}()
+	Load()
+}
+
+func TestLoadAllowsDefaultDataDirectoryAsWorkingDirectory(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", "")
+	userConfig := t.TempDir()
+	setUserConfigEnv(t, userConfig)
+	defaultDir := filepath.Join(userConfig, "GeoProxy")
+	if err := os.MkdirAll(defaultDir, 0755); err != nil {
+		t.Fatalf("create default data directory: %v", err)
+	}
+	t.Chdir(defaultDir)
+	persisted := `{"webui_password_hash":"web-hash","proxy_auth_username":"kept-user","proxy_auth_password":"kept-secret","proxy_auth_password_hash":"proxy-hash"}`
+	if err := os.WriteFile(filepath.Join(defaultDir, "config.json"), []byte(persisted), 0600); err != nil {
+		t.Fatalf("write default-directory config: %v", err)
+	}
+
+	cfg := Load()
+	if cfg.ProxyAuthUsername != "kept-user" {
+		t.Fatalf("ProxyAuthUsername = %q, want persisted default-directory config", cfg.ProxyAuthUsername)
+	}
+}
+
+func TestLoadCreatesDefaultDataDirAndPersistsOutsideWorkingDirectory(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", "")
+	userConfig := t.TempDir()
+	setUserConfigEnv(t, userConfig)
+	workingDir := t.TempDir()
+	t.Chdir(workingDir)
+
+	cfg := Load()
+	wantDir := filepath.Join(userConfig, "GeoProxy")
+	if got := filepath.Clean(filepath.Dir(cfg.DBPath)); got != filepath.Clean(wantDir) {
+		t.Fatalf("Load DB directory = %q, want %q", got, wantDir)
+	}
+	if _, err := os.Stat(filepath.Join(wantDir, "config.json")); err != nil {
+		t.Fatalf("default config was not persisted: %v", err)
+	}
+	for _, name := range []string{"config.json", "proxy.db"} {
+		if _, err := os.Stat(filepath.Join(workingDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("working directory contains %s after Load: err=%v", name, err)
+		}
+	}
+}
+
+func TestLoadReportsDataDirCreationFailure(t *testing.T) {
+	clearConfigEnv(t)
+	badDataDir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(badDataDir, []byte("file"), 0600); err != nil {
+		t.Fatalf("write invalid DATA_DIR marker: %v", err)
+	}
+	t.Setenv("DATA_DIR", badDataDir)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("Load() accepted a DATA_DIR path that is a file")
+		}
+		message := recoveredMessage(recovered)
+		if !strings.Contains(message, "create data directory") || !strings.Contains(message, badDataDir) {
+			t.Fatalf("DATA_DIR creation error = %q, want path and operation", message)
+		}
+	}()
+	Load()
+}
+
+func setUserConfigEnv(t *testing.T, path string) {
+	t.Helper()
+	// os.UserConfigDir uses APPDATA on Windows and XDG_CONFIG_HOME/HOME elsewhere.
+	t.Setenv("APPDATA", path)
+	t.Setenv("XDG_CONFIG_HOME", path)
+	t.Setenv("HOME", path)
+	t.Setenv("USERPROFILE", path)
+}
+
+func recoveredMessage(value interface{}) string {
+	if err, ok := value.(error); ok {
+		return err.Error()
+	}
+	return fmt.Sprint(value)
 }
 
 func TestSaveLoadRoundTripUsesActiveGatewayFieldsOnly(t *testing.T) {

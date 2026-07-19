@@ -1,10 +1,12 @@
 package validator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -73,58 +75,186 @@ type Result struct {
 	Risk         RiskInfo // 两源风险信号：ipapi.is 分数 + ip-api 命中标记，分开展示不聚合
 }
 
-// ipAPIInfo 是 ip-api.com 返回的出口信息（含风险信号）。
+// ipAPIInfo 是出口信息与可用的风险布尔信号。
 type ipAPIInfo struct {
-	IP       string
-	Location string
-	Proxy    bool // proxy=true：VPN/代理/Tor 出口
-	Hosting  bool // hosting=true：数据中心/托管
-	Mobile   bool // mobile=true：移动网络
-	OK       bool // 查询是否成功
+	IP         string
+	Location   string
+	Proxy      bool // proxy=true：VPN/代理/Tor 出口
+	Hosting    bool // hosting=true：数据中心/托管
+	Mobile     bool // mobile=true：移动网络
+	FlagsKnown bool // 主出口源 ip-api 是否成功返回风险标记字段
+	OK         bool // 查询是否成功
 }
 
-// getExitIPInfo 通过代理获取出口 IP、地理位置及风险信号（proxy/hosting/mobile）。
-// 使用 ip-api.com，fields 扩展 proxy,hosting,mobile 以支持风险分派生。
+const (
+	primaryExitInfoURL     = "http://ip-api.com/json/?fields=status,country,countryCode,city,query,proxy,hosting,mobile"
+	backupExitInfoURL      = "https://api.ipapi.is/"
+	defaultExitInfoLimit   = 64 << 10
+	defaultExitInfoTimeout = 5 * time.Second
+)
+
+// getExitIPInfo 通过代理查询两个独立出口信息源。
+// 两源都成功时必须对出口 IP 和国家码达成一致；单源失败或超时可由另一源接替，
+// 但两源都未在总时限内给出有效结果，或结果冲突时一律失败。
 func getExitIPInfo(client *http.Client) ipAPIInfo {
-	// 扩展 fields：新增 proxy,hosting,mobile 用于风险评估。
-	resp, err := client.Get("http://ip-api.com/json/?fields=status,country,countryCode,city,query,proxy,hosting,mobile")
+	if client == nil {
+		return ipAPIInfo{}
+	}
+	timeout := client.Timeout
+	if timeout <= 0 {
+		timeout = defaultExitInfoTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	sources := []func(context.Context, *http.Client) ipAPIInfo{
+		queryPrimaryExitInfo,
+		queryBackupExitInfo,
+	}
+	type sourceResult struct {
+		index int
+		info  ipAPIInfo
+	}
+	resultCh := make(chan sourceResult, len(sources))
+	for index, source := range sources {
+		go func() {
+			resultCh <- sourceResult{index: index, info: source(ctx, client)}
+		}()
+	}
+
+	results := make([]ipAPIInfo, len(sources))
+	remaining := len(sources)
+	for remaining > 0 {
+		select {
+		case result := <-resultCh:
+			results[result.index] = result.info
+			remaining--
+		case <-ctx.Done():
+			// 截止时刻只采用已经完成的结果；缓冲通道保证迟到协程不会阻塞。
+			for {
+				select {
+				case result := <-resultCh:
+					results[result.index] = result.info
+				default:
+					return mergeCompletedExitIPInfos(results)
+				}
+			}
+		}
+	}
+	return mergeCompletedExitIPInfos(results)
+}
+
+func mergeCompletedExitIPInfos(results []ipAPIInfo) ipAPIInfo {
+	completed := make([]ipAPIInfo, 0, len(results))
+	for _, result := range results {
+		if result.OK {
+			completed = append(completed, result)
+		}
+	}
+	return mergeExitIPInfos(completed)
+}
+
+func queryPrimaryExitInfo(ctx context.Context, client *http.Client) ipAPIInfo {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, primaryExitInfoURL, nil)
+	if err != nil {
+		return ipAPIInfo{}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return ipAPIInfo{}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ipAPIInfo{}
 	}
 
 	var result struct {
 		Status      string `json:"status"`
-		Query       string `json:"query"` // IP 地址
-		Country     string `json:"country"`
+		Query       string `json:"query"`
 		CountryCode string `json:"countryCode"`
 		City        string `json:"city"`
 		Proxy       bool   `json:"proxy"`
 		Hosting     bool   `json:"hosting"`
 		Mobile      bool   `json:"mobile"`
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, defaultExitInfoLimit+1))
+	if err != nil || len(body) > defaultExitInfoLimit || json.Unmarshal(body, &result) != nil || result.Status != "success" {
+		return ipAPIInfo{}
+	}
+	return newExitIPInfo(result.Query, result.CountryCode, result.City, result.Proxy, result.Hosting, result.Mobile, true)
+}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Status != "success" {
+func queryBackupExitInfo(ctx context.Context, client *http.Client) ipAPIInfo {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, backupExitInfoURL, nil)
+	if err != nil {
+		return ipAPIInfo{}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ipAPIInfo{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ipAPIInfo{}
 	}
 
-	// 返回格式：IP, "国家代码 城市"
-	location := result.CountryCode
-	if result.City != "" {
-		location = fmt.Sprintf("%s %s", result.CountryCode, result.City)
+	var result struct {
+		IP       string `json:"ip"`
+		Location struct {
+			CountryCode string `json:"country_code"`
+			City        string `json:"city"`
+		} `json:"location"`
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, defaultExitInfoLimit+1))
+	if err != nil || len(body) > defaultExitInfoLimit || json.Unmarshal(body, &result) != nil {
+		return ipAPIInfo{}
+	}
+	return newExitIPInfo(result.IP, result.Location.CountryCode, result.Location.City, false, false, false, false)
+}
 
-	return ipAPIInfo{
-		IP:       result.Query,
-		Location: location,
-		Proxy:    result.Proxy,
-		Hosting:  result.Hosting,
-		Mobile:   result.Mobile,
-		OK:       true,
+func newExitIPInfo(ip, countryCode, city string, proxyFlag, hosting, mobile, flagsKnown bool) ipAPIInfo {
+	parsedIP := net.ParseIP(strings.TrimSpace(ip))
+	countryCode = config.NormalizeCountryCode(countryCode)
+	if parsedIP == nil || countryCode == "" {
+		return ipAPIInfo{}
 	}
+	location := countryCode
+	if city = strings.TrimSpace(city); city != "" {
+		location = fmt.Sprintf("%s %s", countryCode, city)
+	}
+	return ipAPIInfo{
+		IP:         parsedIP.String(),
+		Location:   location,
+		Proxy:      proxyFlag,
+		Hosting:    hosting,
+		Mobile:     mobile,
+		FlagsKnown: flagsKnown,
+		OK:         true,
+	}
+}
+
+func mergeExitIPInfos(infos []ipAPIInfo) ipAPIInfo {
+	if len(infos) == 0 {
+		return ipAPIInfo{}
+	}
+	merged := infos[0]
+	for _, candidate := range infos[1:] {
+		if candidate.IP != merged.IP || exitCountryCode(candidate.Location) != exitCountryCode(merged.Location) {
+			return ipAPIInfo{}
+		}
+		if len(strings.Fields(merged.Location)) == 1 && len(strings.Fields(candidate.Location)) > 1 {
+			merged.Location = candidate.Location
+		}
+	}
+	return merged
+}
+
+func exitCountryCode(location string) string {
+	fields := strings.Fields(location)
+	if len(fields) == 0 {
+		return ""
+	}
+	return config.NormalizeCountryCode(fields[0])
 }
 
 // ipapiIsInfo 是 ipapi.is 返回的风险信号。
@@ -139,7 +269,7 @@ type ipapiIsInfo struct {
 }
 
 // queryIPAPIIs 经同一 proxy client 请求 ipapi.is，显式指定出口 IP (?q=<exitIP>)，
-// 确保查到的是节点出口 IP 而非网关自身 IP。exitIP 由 ip-api 已先行取得。
+// 确保查到的是节点出口 IP 而非网关自身 IP。exitIP 由出口信息查询已先行取得。
 // 查询失败/超时/解析失败时返回 OK=false，供上层降级。
 func queryIPAPIIs(client *http.Client, exitIP string) ipapiIsInfo {
 	if exitIP == "" {
@@ -620,13 +750,13 @@ func containsAll(text string, signals []string) bool {
 }
 
 // assessRisk 收集两源风险信号，分开返回（不聚合）：
-//   - ip-api 的 proxy/hosting/mobile 命中标记（来自已取得的 ipInfo）
+//   - 主出口源 ip-api 的 proxy/hosting/mobile 命中标记（来自已取得的 ipInfo）
 //   - ipapi.is 的 abuser_score（经同一 client 走节点代理请求；失败则记 IPAPIIsUnknown）
 //   - Cloudflare 拦截探测（经同一 client 走节点代理请求）
 //   - AI 服务可达性探测（经同一 client 走节点代理请求）
 func assessRisk(client *http.Client, ipInfo ipAPIInfo) RiskInfo {
-	risk := RiskInfo{IPAPIIsScore: IPAPIIsUnknown}
-	if ipInfo.OK {
+	risk := RiskInfo{IPAPIIsScore: IPAPIIsUnknown, FlagsKnown: ipInfo.FlagsKnown}
+	if ipInfo.FlagsKnown {
 		risk.Flags = ipapiFlags(ipInfo.Proxy, ipInfo.Hosting, ipInfo.Mobile)
 	}
 	if ipInfo.OK && ipInfo.IP != "" {
@@ -722,7 +852,8 @@ func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
 }
 
 // ValidateOne 验证单个代理是否可用，返回是否有效、延迟、出口IP、地理位置和 IP 风险信号。
-// 风险信号：验证通过路径经同一 proxy client 分别探测 ip-api.com（命中标记）与 ipapi.is（滥用分），
+// 风险信号：验证通过路径经同一 proxy client 探测多源出口信息，并分别探测 ip-api.com（命中标记）
+// 与 ipapi.is（滥用分），
 // 两源分开不聚合；未走到风险探测的失败路径统一返回 UnknownRisk()。
 func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, string, RiskInfo) {
 	var client *http.Client
@@ -734,7 +865,7 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 	case "socks5":
 		client, err = newSOCKS5Client(p.Address, p.Username, p.Password, v.timeout)
 	default:
-		log.Printf("unknown protocol %s for %s", p.Protocol, p.Address)
+		log.Printf("[validator] 未知协议 %s，节点 %s", p.Protocol, p.Address)
 		return false, 0, "", "", UnknownRisk()
 	}
 
@@ -773,7 +904,7 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		}
 	}
 
-	// 风险信号探测：经同一 proxy client 分别取两源；出口 IP 已从 ip-api 取得。
+	// 风险信号探测：经同一 proxy client 分别取两源；出口 IP 已由多源出口查询取得。
 	risk := assessRisk(client, ipInfo)
 
 	return true, latency, exitIP, exitLocation, risk

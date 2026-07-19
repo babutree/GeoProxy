@@ -19,7 +19,7 @@ func (s *Storage) GetByRegion(region string, excludes []int64) ([]Proxy, error) 
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
-		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`
+		   AND ` + selectableSubscriptionScopeSQL
 	args := []interface{}{}
 	if normalized := normalizeRegion(region); normalized != "" {
 		query += ` AND region = ?`
@@ -47,7 +47,7 @@ func (s *Storage) CountByRegion() (map[string]int, error) {
 		SELECT region, COUNT(*)
 		FROM proxies
 		WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND region != ''
-		  AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
+		  AND ` + selectableSubscriptionScopeSQL + `
 		GROUP BY region`)
 	if err != nil {
 		return nil, err
@@ -71,7 +71,7 @@ func (s *Storage) GetRegionsWithCount() ([]RegionCount, error) {
 		SELECT region, COUNT(*)
 		FROM proxies
 		WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND region != ''
-		  AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
+		  AND ` + selectableSubscriptionScopeSQL + `
 		GROUP BY region
 		ORDER BY region ASC`)
 	if err != nil {
@@ -173,28 +173,70 @@ func (s *Storage) GetProxyByNodeKey(nodeKey string) (*Proxy, error) {
 	if nodeKey == "" {
 		return nil, fmt.Errorf("proxy node_key empty")
 	}
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM proxies WHERE node_key = ?`, nodeKey).Scan(&n); err != nil {
-		return nil, err
-	}
-	if n == 0 {
-		return nil, fmt.Errorf("proxy node_key %s not found", nodeKey)
-	}
-	if n > 1 {
-		return nil, fmt.Errorf("proxy node_key %s is ambiguous (%d rows)", nodeKey, n)
-	}
-	row := s.db.QueryRow(
-		`SELECT `+proxyColumns+` FROM proxies WHERE node_key = ?`,
+	rows, err := s.db.Query(
+		`SELECT `+proxyColumns+` FROM proxies WHERE node_key = ? ORDER BY id ASC LIMIT 2`,
 		nodeKey,
 	)
-	proxy, err := scanProxy(row)
-	if err == nil {
-		return proxy, nil
+	if err != nil {
+		return nil, err
 	}
-	if err == sql.ErrNoRows {
+	defer rows.Close()
+	matches := make([]*Proxy, 0, 2)
+	for rows.Next() {
+		proxy, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		matches = append(matches, proxy)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(matches) == 0 {
 		return nil, fmt.Errorf("proxy node_key %s not found", nodeKey)
 	}
-	return nil, err
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("proxy node_key %s is ambiguous (at least 2 rows)", nodeKey)
+	}
+	return matches[0], nil
+}
+
+// HasOtherSubscriptionProxyOwner 判断某订阅移除后，运行态 key/address 是否仍有其它 owner。
+// 允许跨订阅共享 NodeKey；空 key 的旧数据按相同 address 保守保留运行态。
+func (s *Storage) HasOtherSubscriptionProxyOwner(nodeKey, address string, subscriptionID int64) (bool, error) {
+	nodeKey = strings.TrimSpace(nodeKey)
+	address = strings.TrimSpace(address)
+	if nodeKey == "" && address == "" {
+		return false, nil
+	}
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM proxies
+		 WHERE NOT (source = ? AND subscription_id = ?)
+		   AND ((? != '' AND node_key = ?)
+		        OR (? != '' AND node_key = '' AND address = ?))`,
+		SourceSubscription, subscriptionID, nodeKey, nodeKey, address, address,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// HasOtherProxyOwner 判断删除单行后，运行态 key/address 是否仍有其它 owner。
+// 查询失败必须由调用方上抛，禁止在无法确认所有权时回收运行态。
+func (s *Storage) HasOtherProxyOwner(nodeKey, address string, proxyID int64) (bool, error) {
+	nodeKey = strings.TrimSpace(nodeKey)
+	address = strings.TrimSpace(address)
+	if nodeKey == "" && address == "" {
+		return false, nil
+	}
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM proxies
+		 WHERE id != ?
+		   AND ((? != '' AND node_key = ?)
+		        OR (? != '' AND node_key = '' AND address = ?))`,
+		proxyID, nodeKey, nodeKey, address, address,
+	).Scan(&count)
+	return count > 0, err
 }
 
 // IsSubscriptionPaused 报告父订阅是否暂停。id<=0 表示手工节点，无父订阅。

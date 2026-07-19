@@ -11,10 +11,10 @@ import (
 	"github.com/babutree/GeoProxy/config"
 )
 
-// TestAPIKeyCreateRejectsEmptyName verifies that creating an API key with an
-// empty or whitespace-only name must be rejected with HTTP 400 BEFORE any key
-// is generated or saved. Positive control (valid name) is covered by
-// TestAPIKeyCreateReturnsPlaintextOnceAndStoresHashOnly.
+// TestAPIKeyCreateRejectsEmptyName 验证创建 API Key 时，
+// 空名称或全空白名称必须在生成、保存任何 Key 前返回 HTTP 400。
+// 有效名称的正向对照由
+// TestAPIKeyCreateReturnsPlaintextOnceAndStoresHashOnly 覆盖。
 func TestAPIKeyCreateRejectsEmptyName(t *testing.T) {
 	cases := []struct {
 		name string
@@ -38,7 +38,7 @@ func TestAPIKeyCreateRejectsEmptyName(t *testing.T) {
 				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 			}
 
-			// No key must have been generated or persisted on the reject path.
+			// 拒绝路径不得生成或持久化任何 Key。
 			if got := len(config.Get().ReadOnlyAPIKeys); got != 0 {
 				t.Fatalf("keys persisted on empty-name reject = %d, want 0", got)
 			}
@@ -46,8 +46,8 @@ func TestAPIKeyCreateRejectsEmptyName(t *testing.T) {
 				t.Fatalf("live keys mutated on empty-name reject = %d, want 0", got)
 			}
 
-			// Error body must not echo any generated plaintext secret; it is a
-			// fixed validation message only.
+			// 错误响应不得回显任何生成的明文秘密，
+			// 只能包含固定的校验消息。
 			body := rec.Body.String()
 			var payload map[string]string
 			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -63,14 +63,14 @@ func TestAPIKeyCreateRejectsEmptyName(t *testing.T) {
 	}
 }
 
-// TestAPIKeyCreateAcceptsValidNameAfterReject is the positive counterpart:
-// after a rejected empty-name attempt, a valid name still succeeds and stores
-// exactly one hashed key.
+// TestAPIKeyCreateAcceptsValidNameAfterReject 是对应的正向测试：
+// 空名称请求被拒绝后，有效名称仍可创建成功，
+// 并且只保存一个 Key 指纹。
 func TestAPIKeyCreateAcceptsValidNameAfterReject(t *testing.T) {
 	server := newTestServer(t)
 	setTestGlobalConfig(t, server.cfg)
 
-	// Reject first.
+	// 先验证拒绝路径。
 	rej := authenticatedJSONRequest(http.MethodPost, "/api/apikey/create", `{"name":"  "}`)
 	recRej := httptest.NewRecorder()
 	server.routes().ServeHTTP(recRej, rej)
@@ -78,7 +78,7 @@ func TestAPIKeyCreateAcceptsValidNameAfterReject(t *testing.T) {
 		t.Fatalf("empty-name status = %d, want 400", recRej.Code)
 	}
 
-	// Then a valid create.
+	// 再验证有效创建路径。
 	ok := authenticatedJSONRequest(http.MethodPost, "/api/apikey/create", `{"name":"prod"}`)
 	recOK := httptest.NewRecorder()
 	server.routes().ServeHTTP(recOK, ok)
@@ -90,8 +90,8 @@ func TestAPIKeyCreateAcceptsValidNameAfterReject(t *testing.T) {
 	}
 }
 
-// TestWebUIAPIKeyHashUsesConfigCanonical proves the webui hashing seam and the
-// config canonical helper produce identical output.
+// TestWebUIAPIKeyHashUsesConfigCanonical 验证 webui 指纹适配点与
+// config 规范辅助函数产生完全相同的输出。
 func TestWebUIAPIKeyHashUsesConfigCanonical(t *testing.T) {
 	for _, plain := range []string{"abc", "another-secret", "  spaced  "} {
 		if apiKeySHA256(plain) != config.HashAPIKey(plain) {
@@ -99,17 +99,17 @@ func TestWebUIAPIKeyHashUsesConfigCanonical(t *testing.T) {
 				plain, apiKeySHA256(plain), config.HashAPIKey(plain))
 		}
 	}
-	// Adversarial: distinct inputs must not collide.
+	// 反例对照：这两个固定的不同输入不应产生相同指纹。
 	if apiKeySHA256("x") == apiKeySHA256("y") {
 		t.Fatal("distinct plaintext collided in apiKeySHA256")
 	}
 }
 
-// TestLegacyBareSHA256KeyStillAuthenticates is the mandatory backward-compat
-// proof: a key persisted as a bare SHA-256 hex digest (the pre-change
-// scheme) must still authenticate through the read-only API middleware after the
-// hash centralization change. The hash is a fixed known-answer vector, NOT
-// produced by the code under test, so this test would fail if the scheme drifted.
+// TestLegacyBareSHA256KeyStillAuthenticates 固化当前向后兼容合同：
+// 以裸 SHA-256 十六进制指纹持久化的旧 Key，在集中指纹实现后仍可通过
+// 只读 API 中间件鉴权。legacyHash 是独立于被测代码的固定已知答案，
+// 因而当前格式意外漂移时测试会失败；未来若采用版本化迁移，则应同时
+// 更新迁移路径和该兼容性测试，而非永久禁止格式演进。
 func TestLegacyBareSHA256KeyStillAuthenticates(t *testing.T) {
 	const (
 		plain      = "legacy-persisted-key"
@@ -121,7 +121,7 @@ func TestLegacyBareSHA256KeyStillAuthenticates(t *testing.T) {
 		Hash: legacyHash,
 	}}, 60)
 
-	// Positive: the legacy key authenticates.
+	// 正向对照：旧 Key 可以通过鉴权。
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/ping", nil)
 	req.Header.Set("Authorization", "Bearer "+plain)
 	rec := httptest.NewRecorder()
@@ -130,7 +130,7 @@ func TestLegacyBareSHA256KeyStillAuthenticates(t *testing.T) {
 		t.Fatalf("legacy bare-SHA256 key rejected: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Negative: a wrong key against the same legacy hash is rejected.
+	// 反向对照：同一旧指纹必须拒绝错误 Key。
 	bad := httptest.NewRequest(http.MethodGet, "/api/v1/ping", nil)
 	bad.Header.Set("Authorization", "Bearer not-the-legacy-key")
 	recBad := httptest.NewRecorder()
@@ -140,16 +140,16 @@ func TestLegacyBareSHA256KeyStillAuthenticates(t *testing.T) {
 	}
 }
 
-// TestLegacyEnvImportedKeyPersistsAndAuthenticates proves an env-imported key
-// (READONLY_API_KEYS) persisted as bare SHA-256 in config.json still validates
-// after reload through config.ValidateReadOnlyAPIKey, and that the on-disk hash
-// equals the canonical helper output (no divergent scheme).
+// TestLegacyEnvImportedKeyPersistsAndAuthenticates 验证环境变量导入的 Key
+// 以裸 SHA-256 指纹保存到 config.json 后，仍能通过
+// config.ValidateReadOnlyAPIKey 校验；同时检查磁盘指纹与规范辅助函数
+// 输出相同，防止出现分叉格式。
 func TestLegacyEnvImportedKeyPersistsAndAuthenticates(t *testing.T) {
 	server := newTestServer(t)
 	setTestGlobalConfig(t, server.cfg)
 
 	plain := "env-style-legacy-key"
-	// Simulate a previously persisted env-imported key: stored by hash only.
+	// 模拟此前已持久化的环境变量导入 Key：只保存指纹。
 	server.cfg.ReadOnlyAPIKeys = []config.APIKey{{
 		ID:   "env-import",
 		Name: "env-import",
