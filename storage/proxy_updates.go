@@ -85,15 +85,22 @@ func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs
 	if err := s.requireUnambiguousAddress(address); err != nil {
 		return err
 	}
-	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability)
+	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability, true)
 }
 
 func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
-	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability)
+	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability, true)
 }
 
 func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
-	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability)
+	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability, true)
+}
+
+// UpdateDisabledSubscriptionProxyExitInfo 写回仍需保持禁用的订阅节点元数据。
+// last_check 是 disabled 节点的回收起点；地理过滤探测不得续期已有时钟，
+// 但历史空值必须初始化，否则节点永远无法达到长期禁用回收阈值。
+func (s *Storage) UpdateDisabledSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
+	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ? AND status = 'disabled'`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability, false)
 }
 
 // RecoverSubscriptionProxyWithExitInfo 原子写回探测结果并恢复订阅节点。
@@ -151,11 +158,11 @@ func (s *Storage) RecoverSubscriptionProxyWithExitInfo(address string, subscript
 // ipapiis_score 仅在 ipapiisScore >= 0 时更新：探测降级/未知(-1)不得覆盖已有有效分。
 // ipapiFlagsKnown=true 时覆盖 ipapi_flags（含空串）并置 seen=1；false 时保留旧值与 seen。
 // 显式 bool 区分“主源已探测且无命中”和“仅备用源取得出口、主源未知”。
-// 注意：本函数不改 status——订阅流程依赖 Disable/Enable 分离，恢复启用由调用点显式处理。
-func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
+// 注意：本函数不改 status；renewLastCheck=false 保留已有时钟，仅为空值初始化回收起点。
+func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string, renewLastCheck bool) error {
 	grade := CalculateQualityGrade(latencyMs)
 	region := regionFromExitLocation(exitLocation)
-	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region, ipapiisScore, ipapiisScore, ipapiFlagsKnown, ipapiFlags, ipapiFlagsKnown, cfBlocked, cfBlocked, aiReachability, aiReachability}
+	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, renewLastCheck, region, region, ipapiisScore, ipapiisScore, ipapiFlagsKnown, ipapiFlags, ipapiFlagsKnown, cfBlocked, cfBlocked, aiReachability, aiReachability}
 	queryArgs = append(queryArgs, args...)
 	// 健康检查/验证成功时同样清零 fail_count（BUG-53）：只有到达此处才代表
 	// 探测通过，之前累积的失败应清除，节点方能重新参与选路/后续检查。
@@ -166,7 +173,7 @@ func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, 
 	res, err := s.db.Exec(
 		`UPDATE proxies
 			 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
-			     last_check = CURRENT_TIMESTAMP,
+			     last_check = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE COALESCE(last_check, CURRENT_TIMESTAMP) END,
 		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END,
 		     ipapiis_score = CASE WHEN ? >= 0 THEN ? ELSE ipapiis_score END,
 		     ipapi_flags = CASE WHEN ? THEN ? ELSE ipapi_flags END,
@@ -252,23 +259,32 @@ func (s *Storage) RecordProxyUseByID(id int64, success bool) error {
 // 计数和状态更新必须在同一条语句中完成，避免并发失败时出现
 // fail_count 已达阈值但节点仍处于 active 的状态。
 func (s *Storage) RecordProxyFailureByID(id int64, threshold int) error {
+	_, err := s.RecordProxyFailureByIDWithStatus(id, threshold)
+	return err
+}
+
+// RecordProxyFailureByIDWithStatus 原子累加失败次数，并返回写入完成后的
+// 数据库权威禁用状态；调用方不得再使用写入前的 Proxy 快照推断结果。
+func (s *Storage) RecordProxyFailureByIDWithStatus(id int64, threshold int) (bool, error) {
 	if threshold <= 0 {
-		return fmt.Errorf("failure threshold must be positive, got %d", threshold)
+		return false, fmt.Errorf("failure threshold must be positive, got %d", threshold)
 	}
-	res, err := s.db.Exec(
+	var status string
+	err := s.db.QueryRow(
 		`UPDATE proxies
 		 SET use_count = use_count + 1,
 		     fail_count = fail_count + 1,
 		     status = CASE WHEN fail_count + 1 >= ? THEN 'disabled' ELSE status END,
 		     last_used = CURRENT_TIMESTAMP,
 		     last_check = CURRENT_TIMESTAMP
-		 WHERE id = ?`,
+		 WHERE id = ?
+		 RETURNING status`,
 		threshold, id,
-	)
+	).Scan(&status)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return requireRowsAffected(res.RowsAffected())
+	return status == "disabled", nil
 }
 
 // CalculateQualityGrade 根据延迟计算质量等级
@@ -301,7 +317,7 @@ func (s *Storage) DisableBlockedCountries(countryCodes []string) (int64, error) 
 	var total int64
 	for _, code := range countryCodes {
 		res, err := tx.Exec(
-			`UPDATE proxies SET status = 'disabled' WHERE status IN ('active', 'degraded') AND (region = ? OR exit_location = ? OR exit_location LIKE ?)`,
+			`UPDATE proxies SET status = 'disabled', last_check = CURRENT_TIMESTAMP WHERE status IN ('active', 'degraded') AND (region = ? OR exit_location = ? OR exit_location LIKE ?)`,
 			normalizeRegion(code), strings.ToUpper(code), strings.ToUpper(code)+" %",
 		)
 		if err != nil {
@@ -331,7 +347,7 @@ func (s *Storage) DisableNotAllowedCountries(allowedCodes []string) (int64, erro
 		conditions = append(conditions, "region = ?", "exit_location = ?", "exit_location LIKE ?")
 		args = append(args, normalizeRegion(code), upper, upper+" %")
 	}
-	query := `UPDATE proxies SET status = 'disabled' WHERE status IN ('active', 'degraded') AND (region != '' OR exit_location != '') AND NOT (` + strings.Join(conditions, " OR ") + `)`
+	query := `UPDATE proxies SET status = 'disabled', last_check = CURRENT_TIMESTAMP WHERE status IN ('active', 'degraded') AND (region != '' OR exit_location != '') AND NOT (` + strings.Join(conditions, " OR ") + `)`
 	res, err := s.db.Exec(query, args...)
 	if err != nil {
 		return 0, err
@@ -380,11 +396,17 @@ func (s *Storage) DisableSubscriptionProxy(address string, subscriptionID int64)
 }
 
 func (s *Storage) disableProxyWhere(where string, args ...interface{}) error {
-	// 禁用必写 last_check：禁用只发生在验证/健康检查失败路径（见 checker、manager、
-	// api refresh），前端 nodeState 以 last_check 是否存在区分「已验证失败(不可用)」与
+	// 禁用必写 last_check：验证/健康检查失败与地理过滤/策略路径均会写入。
+	// 前端 nodeState 以 last_check 是否存在区分「已验证失败(不可用)」与
 	// 「从未验证(待验证)」。漏写会让验证失败的节点永远显示为待验证。
 	res, err := s.db.Exec(
-		`UPDATE proxies SET status = 'disabled', last_check = CURRENT_TIMESTAMP WHERE `+where,
+		`UPDATE proxies
+		 SET status = 'disabled',
+		     last_check = CASE
+		         WHEN status = 'disabled' AND last_check IS NOT NULL THEN last_check
+		         ELSE CURRENT_TIMESTAMP
+		     END
+		 WHERE `+where,
 		args...,
 	)
 	if err != nil {

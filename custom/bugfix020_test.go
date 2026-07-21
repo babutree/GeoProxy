@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/babutree/GeoProxy/config"
 	"github.com/babutree/GeoProxy/storage"
 	"github.com/babutree/GeoProxy/validator"
 )
@@ -305,6 +306,105 @@ func TestProbeTargetStillCurrentRejectsReusedTunnelPort(t *testing.T) {
 	}
 }
 
+func TestProbeDisabledDropsStaleDirectResultAfterSameIdentityRouteRebind(t *testing.T) {
+	installManagerTestConfig(t)
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("direct-probe-rebind", "", writeSubscriptionFile(t, "proxies: []"), "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+	const address = "direct-probe-rebind.example:8080"
+	const nodeKey = "stable-direct-probe-key"
+	if _, err := store.GetDB().Exec(`
+		INSERT INTO proxies (
+			address, protocol, source, subscription_id, status,
+			proxy_username, proxy_password, node_key
+		) VALUES (?, 'http', ?, ?, 'disabled', 'old-user', 'old-pass', ?)
+	`, address, storage.SourceSubscription, subID, nodeKey); err != nil {
+		t.Fatalf("seed disabled direct proxy: %v", err)
+	}
+	before, err := store.GetProxyByIdentity(address, storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(before): %v", err)
+	}
+
+	probe := newBlockingSingleProbeValidator()
+	t.Cleanup(probe.release)
+	m := &Manager{storage: store, validator: probe, singbox: newSpyShard()}
+	done := make(chan struct{})
+	go func() {
+		m.probeDisabled()
+		close(done)
+	}()
+	select {
+	case <-probe.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("direct probe did not enter validator")
+	}
+
+	m.refreshMu.Lock()
+	replaced, replaceErr := m.replaceSubscriptionProxies(subID, []subscriptionProxyEntry{{
+		addr: address, proto: "socks5", username: "new-user", password: "new-pass", nodeKey: nodeKey,
+	}})
+	m.refreshMu.Unlock()
+	if replaceErr != nil {
+		probe.release()
+		t.Fatalf("replaceSubscriptionProxies: %v", replaceErr)
+	}
+	if len(replaced) != 1 || replaced[0].ID != before.ID {
+		probe.release()
+		t.Fatalf("same-identity rebind IDs = old:%d new:%+v", before.ID, replaced)
+	}
+	probe.release()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("probeDisabled did not finish")
+	}
+
+	after, err := store.GetProxyByIdentity(address, storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(after): %v", err)
+	}
+	if after.Status != "disabled" || after.Protocol != "socks5" ||
+		after.Username != "new-user" || after.Password != "new-pass" {
+		t.Fatalf("rebound route changed unexpectedly: %+v", after)
+	}
+	if !after.LastCheck.IsZero() || after.ExitIP != "" || after.ExitLocation != "" || after.Latency != 0 {
+		t.Fatalf("stale direct probe wrote result to rebound route: last=%v ip=%q location=%q latency=%d",
+			after.LastCheck, after.ExitIP, after.ExitLocation, after.Latency)
+	}
+}
+
+type blockingSingleProbeValidator struct {
+	entered   chan struct{}
+	releaseCh chan struct{}
+}
+
+func newBlockingSingleProbeValidator() *blockingSingleProbeValidator {
+	return &blockingSingleProbeValidator{entered: make(chan struct{}), releaseCh: make(chan struct{})}
+}
+
+func (v *blockingSingleProbeValidator) ValidateOne(storage.Proxy) (bool, time.Duration, string, string, validator.RiskInfo) {
+	close(v.entered)
+	<-v.releaseCh
+	return true, 45 * time.Millisecond, testValidationExitIP, testValidationExitLocation, validator.UnknownRisk()
+}
+
+func (v *blockingSingleProbeValidator) ValidateStream([]storage.Proxy) <-chan validator.Result {
+	results := make(chan validator.Result)
+	close(results)
+	return results
+}
+
+func (v *blockingSingleProbeValidator) release() {
+	select {
+	case <-v.releaseCh:
+	default:
+		close(v.releaseCh)
+	}
+}
+
 // TestBUGFIX020IsLongTermDisabledHelper 锁定阈值语义。
 func TestBUGFIX020IsLongTermDisabledHelper(t *testing.T) {
 	now := time.Now()
@@ -329,5 +429,176 @@ func TestBUGFIX020IsLongTermDisabledHelper(t *testing.T) {
 				t.Fatalf("isLongTermDisabledProxy = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBUGFIXGeoBlockedProbeDoesNotRenewDisabledRetentionClock 锁定地理过滤节点的回收时钟：
+// probeDisabled 验证成功但命中地理屏蔽时只应更新出口元数据，不得刷新首次禁用时间。
+func TestBUGFIXGeoBlockedProbeDoesNotRenewDisabledRetentionClock(t *testing.T) {
+	installManagerTestConfig(t)
+	cfg := config.DefaultConfig()
+	cfg.AllowedCountries = nil
+	cfg.BlockedCountries = []string{"JP"}
+	config.SetGlobal(cfg)
+
+	store := newTestStorage(t)
+	sb := newSpyShard()
+	node := tunnelNode("geo-retention", "geo-retention.example.com", "pw")
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("seed runtime: %v", err)
+	}
+	port, ok := sb.GetPortMap()[node.NodeKey()]
+	if !ok {
+		t.Fatal("seed runtime did not assign tunnel port")
+	}
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+
+	subID, err := store.AddSubscription("geo-retention", "", writeSubscriptionFile(t, "proxies: []"), "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+	if err := store.AddProxyWithSource(address, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource: %v", err)
+	}
+	if err := store.DisableSubscriptionProxy(address, subID); err != nil {
+		t.Fatalf("DisableSubscriptionProxy: %v", err)
+	}
+
+	checkedAt := time.Now().UTC().Add(-23 * time.Hour).Truncate(time.Second)
+	if _, err := store.GetDB().Exec(
+		"UPDATE proxies SET last_check = ? WHERE address = ? AND source = ? AND subscription_id = ?",
+		checkedAt.Format("2006-01-02 15:04:05"), address, storage.SourceSubscription, subID,
+	); err != nil {
+		t.Fatalf("set disabled retention clock: %v", err)
+	}
+
+	fake := newBlockingProxyValidator(map[string]bool{address: true})
+	m := &Manager{storage: store, validator: fake, singbox: sb}
+	m.probeDisabled()
+
+	proxy, err := store.GetProxyByIdentity(address, storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity: %v", err)
+	}
+	if proxy.Status != "disabled" {
+		t.Fatalf("geo-blocked probe changed status to %q, want disabled", proxy.Status)
+	}
+	if proxy.ExitIP != testValidationExitIP || proxy.ExitLocation != testValidationExitLocation || proxy.Latency != 45 {
+		t.Fatalf("geo-blocked probe metadata = ip:%q location:%q latency:%d, want %q/%q/45",
+			proxy.ExitIP, proxy.ExitLocation, proxy.Latency, testValidationExitIP, testValidationExitLocation)
+	}
+	if !proxy.LastCheck.Equal(checkedAt) {
+		t.Fatalf("geo-blocked probe renewed disabled retention clock: got %s, want %s", proxy.LastCheck, checkedAt)
+	}
+	if !isLongTermDisabledProxy(*proxy, checkedAt.Add(25*time.Hour)) {
+		t.Fatal("geo-blocked disabled proxy did not become reclaimable after the retention period")
+	}
+}
+
+func TestBUGFIXInvalidDisabledProbeInitializesClockWithoutRenewal(t *testing.T) {
+	installManagerTestConfig(t)
+	store := newTestStorage(t)
+	sb := newSpyShard()
+	node := tunnelNode("invalid-retention", "invalid-retention.example.com", "pw")
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("seed runtime: %v", err)
+	}
+	port, ok := sb.GetPortMap()[node.NodeKey()]
+	if !ok {
+		t.Fatal("seed runtime did not assign tunnel port")
+	}
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	subID, err := store.AddSubscription("invalid-retention", "", writeSubscriptionFile(t, "proxies: []"), "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+	if err := store.AddProxyWithSource(address, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource: %v", err)
+	}
+	if _, err := store.GetDB().Exec(
+		"UPDATE proxies SET status = 'disabled', last_check = NULL WHERE address = ? AND source = ? AND subscription_id = ?",
+		address, storage.SourceSubscription, subID,
+	); err != nil {
+		t.Fatalf("seed pending disabled proxy: %v", err)
+	}
+
+	fake := newBlockingProxyValidator(map[string]bool{address: false})
+	m := &Manager{storage: store, validator: fake, singbox: sb}
+	m.probeDisabled()
+	proxy, err := store.GetProxyByIdentity(address, storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(after first invalid): %v", err)
+	}
+	if proxy.LastCheck.IsZero() {
+		t.Fatal("invalid disabled probe left pending last_check NULL")
+	}
+
+	preservedAt := time.Date(2026, time.July, 3, 4, 5, 6, 0, time.UTC)
+	if _, err := store.GetDB().Exec(
+		"UPDATE proxies SET last_check = ? WHERE address = ? AND source = ? AND subscription_id = ?",
+		preservedAt.Format("2006-01-02 15:04:05"), address, storage.SourceSubscription, subID,
+	); err != nil {
+		t.Fatalf("seed established disabled clock: %v", err)
+	}
+	m.probeDisabled()
+	proxy, err = store.GetProxyByIdentity(address, storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(after repeated invalid): %v", err)
+	}
+	if !proxy.LastCheck.Equal(preservedAt) {
+		t.Fatalf("repeated invalid probe renewed retention clock: got %v, want %v", proxy.LastCheck, preservedAt)
+	}
+}
+
+func TestBUGFIXGeoBlockedRefreshValidationDoesNotRenewDisabledClock(t *testing.T) {
+	installManagerTestConfig(t)
+	cfg := config.DefaultConfig()
+	cfg.AllowedCountries = nil
+	cfg.BlockedCountries = []string{"JP"}
+	config.SetGlobal(cfg)
+
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("geo-refresh-retention", "", writeSubscriptionFile(t, "proxies: []"), "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
+	const address = "geo-refresh-retention.example:8080"
+	if err := store.AddProxyWithSource(address, "http", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource: %v", err)
+	}
+	preservedAt := time.Date(2026, time.July, 4, 5, 6, 7, 0, time.UTC)
+	if _, err := store.GetDB().Exec(
+		`UPDATE proxies
+		 SET status = 'disabled', last_check = ?, exit_ip = '198.51.100.1',
+		     exit_location = 'JP Tokyo', latency = 100
+		 WHERE address = ? AND source = ? AND subscription_id = ?`,
+		preservedAt.Format("2006-01-02 15:04:05"), address, storage.SourceSubscription, subID,
+	); err != nil {
+		t.Fatalf("seed disabled retention state: %v", err)
+	}
+	proxy, err := store.GetProxyByIdentity(address, storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(before): %v", err)
+	}
+	fake := newBlockingProxyValidator(map[string]bool{address: true})
+	fake.Release()
+	m := &Manager{storage: store, validator: fake}
+
+	if got := m.validateCustomProxies([]storage.Proxy{*proxy}, subID); got != 0 {
+		t.Fatalf("valid count=%d, want 0 for geo-blocked proxy", got)
+	}
+	after, err := store.GetProxyByIdentity(address, storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(after): %v", err)
+	}
+	if after.Status != "disabled" {
+		t.Fatalf("geo-blocked status=%q, want disabled", after.Status)
+	}
+	if !after.LastCheck.Equal(preservedAt) {
+		t.Fatalf("geo-blocked refresh renewed retention clock: got %v, want %v", after.LastCheck, preservedAt)
+	}
+	if after.ExitIP != testValidationExitIP || after.ExitLocation != testValidationExitLocation || after.Latency != 45 {
+		t.Fatalf("geo-blocked refresh metadata=%q/%q/%d, want %q/%q/45",
+			after.ExitIP, after.ExitLocation, after.Latency, testValidationExitIP, testValidationExitLocation)
 	}
 }

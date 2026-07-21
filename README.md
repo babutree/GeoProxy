@@ -265,7 +265,7 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `MAX_RETRY` | `3` | Retry count for failed upstream attempts. |
 | `SINGBOX_PATH` | `sing-box` | `sing-box` binary path. |
 | `SINGBOX_SHARD_COUNT` | `4` | Number of independent `sing-box` processes for encrypted tunnel nodes. |
-| `DATA_DIR` | empty | Optional directory for SQLite DB and generated subscription files. |
+| `DATA_DIR` | `os.UserConfigDir()/GeoProxy` when unset | Runtime directory for SQLite, `config.json`, subscriptions, and sing-box state. Docker Compose overrides it with `/app/data`; `HOST_DATA_DIR` controls the host bind source. |
 | `TZ` | `Asia/Shanghai` | Container timezone. |
 
 Credentials (WebUI password, proxy auth username/password) are **not** set via

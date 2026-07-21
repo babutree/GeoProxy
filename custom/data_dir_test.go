@@ -64,14 +64,18 @@ func TestNewShardedSingBoxRejectsBlankRootDataDir(t *testing.T) {
 	if process.configDir != "" {
 		t.Errorf("空白根数据目录生成了 configDir=%q，禁止分片链回退到相对/CWD 路径", process.configDir)
 	}
+	initial := sb.GetRuntimeStatus()
+	if initial.Status != SingBoxStatusFailed || initial.Reason != "data_dir_invalid" {
+		t.Fatalf("空根分片初始运行态 = %+v，期望 failed/data_dir_invalid", initial)
+	}
 
 	err := sb.Reload([]ParsedNode{tunnelNode("blank-root", "blank-root.example.com", "password")})
 	if err == nil || !strings.Contains(err.Error(), "数据目录") {
 		t.Fatalf("分片 Reload 错误 = %v，期望显式的数据目录错误", err)
 	}
 	rs := sb.GetRuntimeStatus()
-	if rs.Status != SingBoxStatusFailed || rs.Reason != "data_dir_invalid" {
-		t.Fatalf("空根分片运行态 = %+v，期望 failed/data_dir_invalid", rs)
+	if rs.Status != SingBoxStatusNoTunnelNodes || rs.Reason != SingBoxStatusNoTunnelNodes || rs.Running {
+		t.Fatalf("空旧目标回滚后的运行态 = %+v，期望 no_tunnel_nodes/非运行", rs)
 	}
 }
 

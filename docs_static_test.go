@@ -6,6 +6,7 @@ import (
 	stdhtml "html"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -232,6 +233,67 @@ func TestDataDirectoryDocumentationMatchesRuntimeContracts(t *testing.T) {
 	assertDocumentedConfigJSONKeys(t, document)
 	assertDocumentedSQLiteColumns(t, document, "proxies", "### `proxies`", "### `subscriptions`")
 	assertDocumentedSQLiteColumns(t, document, "subscriptions", "### `subscriptions`", "## 备份与恢复")
+}
+
+func TestDataDirectoryDocumentationDoesNotDescribeResolvedManagerAsCWDDrift(t *testing.T) {
+	document := strings.Join(strings.Fields(readRepositoryDocument(t, "DATA_DIRECTORY.md")), " ")
+	if !strings.Contains(document, "`custom.NewManager` 均使用 `config.DataDir()` 的解析结果") {
+		t.Error("DATA_DIRECTORY.md 未明确 custom.NewManager 使用 config.DataDir() 的解析结果")
+	}
+	for _, stale := range []string{
+		"`custom.NewManager` 的 sing-box 生命周期 仍直接读取 `DATA_DIR`",
+		"未设置时不会自动继承该原生默认目录",
+		"避免 sing-box 临时配置落到 CWD",
+		"`BUGFIX-075`",
+	} {
+		if strings.Contains(document, stale) {
+			t.Errorf("DATA_DIRECTORY.md 仍把已统一的数据目录链写成未完成：%s", stale)
+		}
+	}
+}
+
+func TestPRDHasNoLegacyTenMinuteSessionTTL(t *testing.T) {
+	prd := readRepositoryDocument(t, "docs/PRD.md")
+	legacySessionTTL := regexp.MustCompile(`(?im)(?:TTL|会话)[^\r\n]{0,80}(?:^|[^0-9])10\s*分钟|(?:^|[^0-9])10\s*分钟[^\r\n]{0,80}(?:TTL|会话)`)
+	if matches := legacySessionTTL.FindAllString(prd, -1); len(matches) > 0 {
+		t.Fatalf("docs/PRD.md 仍含 10 分钟会话 TTL 旧合同：%q", matches)
+	}
+	for _, stale := range []string{"会话 TTL 10 分钟", "TTL 10 分钟", "10 分钟会话 TTL"} {
+		if !legacySessionTTL.MatchString(stale) {
+			t.Errorf("10 分钟会话 TTL 旧合同未被正则捕获：%q", stale)
+		}
+	}
+	for _, legal := range []string{"会话 TTL 110 分钟", "会话 TTL 210 分钟", "会话 TTL 1010 分钟"} {
+		if matches := legacySessionTTL.FindAllString(legal, -1); len(matches) > 0 {
+			t.Fatalf("合法的多位数会话 TTL 被误报：%q -> %q", legal, matches)
+		}
+	}
+}
+
+func TestReadmeDocumentsNativeDefaultDataDirectory(t *testing.T) {
+	section := documentSection(t, readRepositoryDocument(t, "README.md"), "## Configuration", "### Lost the WebUI password?")
+	var dataDirRow string
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "| `DATA_DIR` |") {
+			dataDirRow = strings.Join(strings.Fields(line), " ")
+			break
+		}
+	}
+	if dataDirRow == "" {
+		t.Fatal("README.md Configuration 表缺少 DATA_DIR 行")
+	}
+	for _, required := range []string{
+		"`os.UserConfigDir()/GeoProxy` when unset",
+		"`/app/data`",
+		"`HOST_DATA_DIR`",
+	} {
+		if !strings.Contains(dataDirRow, required) {
+			t.Errorf("README.md DATA_DIR 行缺少合同 %q：%s", required, dataDirRow)
+		}
+	}
+	if strings.Contains(dataDirRow, "| empty | Optional directory") {
+		t.Error("README.md DATA_DIR 行仍把默认写成 empty 的可选目录")
+	}
 }
 
 func assertDocumentedConfigJSONKeys(t *testing.T, document string) {

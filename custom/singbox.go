@@ -136,10 +136,6 @@ func NewSingBoxProcess(binPath, dataDir string, basePort int) *SingBoxProcess {
 func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.initErr != nil {
-		s.setStatusLocked(SingBoxStatusFailed, s.reason, 0)
-		return s.initErr
-	}
 
 	// 过滤出需要 sing-box 转换的节点
 	var tunnelNodes []ParsedNode
@@ -152,11 +148,16 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	if len(tunnelNodes) == 0 {
 		log.Println("[custom] 无需 sing-box 转换的节点，停止进程")
 		s.stopLocked()
+		s.running = false
 		s.nodes = nil
 		s.portMap = make(map[string]int)
 		s.assembly = assemblyDiagnostics{}
 		s.setStatusLocked(SingBoxStatusNoTunnelNodes, SingBoxStatusNoTunnelNodes, 0)
 		return nil
+	}
+	if s.initErr != nil {
+		s.setStatusLocked(SingBoxStatusFailed, s.reason, 0)
+		return s.initErr
 	}
 
 	// 保持当前端口范围，assembleConfig 会复用已加载节点端口并为新节点追加端口。

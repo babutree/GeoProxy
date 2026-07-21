@@ -112,7 +112,7 @@ func shardIndexForKey(key string, shardCount int) int {
 //
 // 算法：
 //  1. 过滤出 tunnel 节点（非 direct）。
-//  2. 若无 tunnel 节点：停止所有分片并清空各分片已分配 key 集，返回 nil。
+//  2. 若无 tunnel 节点：停止所有分片，以空重载清理运行态并清空已分配 key 集。
 //  3. 按 shardIndexForKey 把 tunnel 节点分区到各分片，并对每个分片的节点按 NodeKey 稳定排序。
 //  4. 逐分片：仅当目标 key 集与已分配 key 集不同才调用 shard.Reload；成功则更新已分配集，
 //     失败则收集错误并保持已分配集不变（下次重试），不回滚其他分片（故障隔离）。
@@ -151,10 +151,19 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 				rejectedNodesOnly(preRejected), map[string]int{}, assemblyDiagnostics{rejected: preRejected}))
 		}
 
-		// 无 tunnel 节点：全部停止并清空已分配集。
+		// 无 tunnel 节点：先停止进程，再复用分片的空重载语义清理节点、端口、
+		// 装配诊断与失败状态。仅成功清理的分片才提交空 assignedKeys。
+		var errs []error
 		for i, shard := range sb.shards {
 			shard.Stop()
+			if err := shard.Reload(nil); err != nil {
+				errs = append(errs, fmt.Errorf("shard %d clear: %w", i, err))
+				continue
+			}
 			sb.assignedKeys[i] = make(map[string]bool)
+		}
+		if len(errs) > 0 {
+			return errors.Join(errs...)
 		}
 		sb.assembly = assemblyDiagnostics{}
 		return nil
@@ -217,6 +226,9 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 			sb.assignedKeys[i] = copyKeySet(oldKeysByShard[i])
 			if len(oldNodesByShard[i]) == 0 {
 				sb.shards[i].Stop()
+				if err := sb.shards[i].Reload(nil); err != nil {
+					rbErrs = append(rbErrs, fmt.Errorf("shard %d rollback clear: %w", i, err))
+				}
 				continue
 			}
 			if err := sb.shards[i].Reload(oldNodesByShard[i]); err != nil {

@@ -43,10 +43,13 @@ func (v *slowValidator) ValidateStream(proxies []storage.Proxy) <-chan validator
 }
 
 type countingStore struct {
-	batchCalls atomic.Int32
-	batch      []storage.Proxy
-	mu         sync.Mutex
-	updates    int
+	batchCalls      atomic.Int32
+	failureCalls    atomic.Int32
+	batch           []storage.Proxy
+	failureDisabled bool
+	failureErr      error
+	mu              sync.Mutex
+	updates         int
 }
 
 func (s *countingStore) GetBatchForHealthCheck(int) ([]storage.Proxy, error) {
@@ -64,6 +67,58 @@ func (s *countingStore) UpdateProxyExitInfo(int64, string, string, int, float64,
 func (s *countingStore) RecordProxyUseByID(int64, bool) error { return nil }
 
 func (s *countingStore) RecordProxyFailureByID(int64, int) error { return nil }
+
+func (s *countingStore) RecordProxyFailureByIDWithStatus(int64, int) (bool, error) {
+	s.failureCalls.Add(1)
+	return s.failureDisabled, s.failureErr
+}
+
+type resultValidator struct {
+	results []validator.Result
+}
+
+func (v resultValidator) ValidateStream([]storage.Proxy) <-chan validator.Result {
+	ch := make(chan validator.Result, len(v.results))
+	for _, result := range v.results {
+		ch <- result
+	}
+	close(ch)
+	return ch
+}
+
+func TestCheckBatchUsesAuthoritativeDisabledStatus(t *testing.T) {
+	tests := []struct {
+		name                  string
+		snapshotFailCount     int
+		authoritativeDisabled bool
+		wantDisabled          int
+	}{
+		{name: "stale snapshot low", snapshotFailCount: 0, authoritativeDisabled: true, wantDisabled: 1},
+		{name: "stale snapshot high", snapshotFailCount: 2, authoritativeDisabled: false, wantDisabled: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := storage.Proxy{ID: 1, FailCount: tc.snapshotFailCount}
+			store := &countingStore{
+				batch:           []storage.Proxy{proxy},
+				failureDisabled: tc.authoritativeDisabled,
+			}
+			hc := newHealthCheckerForTest(
+				store,
+				resultValidator{results: []validator.Result{{Proxy: proxy, Valid: false}}},
+				&config.Config{},
+			)
+
+			summary := hc.checkBatch(store.batch)
+			if summary.disabled != tc.wantDisabled {
+				t.Fatalf("disabled=%d, want %d", summary.disabled, tc.wantDisabled)
+			}
+			if got := store.failureCalls.Load(); got != 1 {
+				t.Fatalf("failure writes=%d, want 1", got)
+			}
+		})
+	}
+}
 
 // TestRunOnceChecksSGradeNode 覆盖 BUG-024：健康检查必须处理批次中的 S 级节点，
 // 不能依据质量分布把它们永久排除。

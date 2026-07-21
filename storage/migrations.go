@@ -232,6 +232,22 @@ func (s *Storage) migrateSubscriptionIdentity() error {
 	return tx.Commit()
 }
 
+// backfillDisabledRetentionClocks 仅为有持久化失败计数的 disabled 订阅节点补齐长期回收起点。
+// NULL last_check 同时表达“待验证”，因此无法证明探测失败的 pending 节点必须保留 NULL；
+// 重复启动也不得续期已有时间或改变手工、active 节点。
+func (s *Storage) backfillDisabledRetentionClocks() error {
+	if _, err := s.db.Exec(
+		`UPDATE proxies
+		 SET last_check = CURRENT_TIMESTAMP
+		 WHERE source = ? AND status = 'disabled' AND last_check IS NULL
+		   AND fail_count > 0`,
+		SourceSubscription,
+	); err != nil {
+		return fmt.Errorf("backfill disabled retention clocks: %w", err)
+	}
+	return nil
+}
+
 func dedupeSubscriptionsByField(tx *sql.Tx, field string) error {
 	if field != "url" && field != "file_path" {
 		return fmt.Errorf("unsupported subscription dedupe field: %s", field)

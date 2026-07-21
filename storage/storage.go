@@ -249,6 +249,11 @@ func (s *Storage) initSchema() error {
 	if err := s.migrateProxyIdentity(); err != nil {
 		return err
 	}
+	// 旧库可能存在 disabled 订阅节点但没有回收起点；初始化一次当前时间，
+	// 给历史订阅数据完整的保留窗口，且不触碰手工、active 或已有时间的节点。
+	if err := s.backfillDisabledRetentionClocks(); err != nil {
+		return err
+	}
 
 	// 创建索引
 	if _, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_protocol_latency ON proxies(protocol, latency)`); err != nil {

@@ -837,6 +837,106 @@ func TestReloadNoTunnelNodesStopsAllShards(t *testing.T) {
 	}
 }
 
+func TestReloadNoTunnelNodesPropagatesShardClearErrorWithoutClearingAssignedKeys(t *testing.T) {
+	sb, spies := newSpyOrchestrator(10000, 1)
+	node := tunnelNode("clear-error", "clear-error.example.com", "password")
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("建立已分配节点失败: %v", err)
+	}
+	key := node.NodeKey()
+	if !sb.assignedKeys[0][key] {
+		t.Fatalf("初次成功后 assignedKeys 缺少 %q: %v", key, sb.assignedKeys[0])
+	}
+	stopBefore := spies[0].stops()
+	spies[0].reloadErr = errors.New("injected clear failure")
+
+	err := sb.Reload(nil)
+	if err == nil || !strings.Contains(err.Error(), "shard 0 clear") || !strings.Contains(err.Error(), "injected clear failure") {
+		t.Fatalf("空目标清理错误 = %v，期望传播 shard 0 clear/injected clear failure", err)
+	}
+	if !sb.assignedKeys[0][key] {
+		t.Fatalf("清理失败后不得假清空 assignedKeys，得到 %v", sb.assignedKeys[0])
+	}
+	if got := spies[0].stops(); got != stopBefore+1 {
+		t.Fatalf("清理失败后 Stop 次数=%d，期望 %d", got, stopBefore+1)
+	}
+}
+
+// TestReloadEmptyAfterRealShardStartFailureConvergesToNoTunnelNodes 锁定真实
+// SingBoxProcess 启动失败后清空目标的状态收敛；不能只依赖 spy 的 Stop 行为。
+func TestReloadEmptyAfterRealShardStartFailureConvergesToNoTunnelNodes(t *testing.T) {
+	sb := NewShardedSingBox("missing-sing-box", t.TempDir(), testSingBoxBasePort, 1)
+	t.Cleanup(sb.Stop)
+	process, ok := sb.shards[0].(*SingBoxProcess)
+	if !ok {
+		t.Fatalf("真实分片类型 = %T，期望 *SingBoxProcess", sb.shards[0])
+	}
+
+	if err := process.Reload([]ParsedNode{tunnelNode("missing-binary", "missing-binary.example.com", "password")}); err == nil {
+		t.Fatal("缺失 sing-box 二进制时 Reload 应返回启动错误")
+	}
+	failed := process.GetRuntimeStatus()
+	if failed.Status != SingBoxStatusFailed || failed.Reason != "binary_not_found" || failed.Running {
+		t.Fatalf("启动失败状态 = %+v，期望 failed/binary_not_found/非运行", failed)
+	}
+
+	if err := sb.Reload(nil); err != nil {
+		t.Fatalf("空目标 Reload 出错: %v", err)
+	}
+	got := sb.GetRuntimeStatus()
+	if got.Status != SingBoxStatusNoTunnelNodes || got.Reason != SingBoxStatusNoTunnelNodes || got.Running || got.Nodes != 0 || got.ReadyPorts != 0 || got.TotalPorts != 0 {
+		t.Fatalf("空目标收敛状态 = %+v，期望 no_tunnel_nodes 且无节点/端口", got)
+	}
+}
+
+func TestReloadEmptyAfterRealShardInitFailureConvergesToNoTunnelNodes(t *testing.T) {
+	sb := NewShardedSingBox("missing-sing-box", "", testSingBoxBasePort, 1)
+	t.Cleanup(sb.Stop)
+
+	failed := sb.GetRuntimeStatus()
+	if failed.Status != SingBoxStatusFailed || failed.Reason != "data_dir_invalid" {
+		t.Fatalf("初始化失败状态 = %+v，期望 failed/data_dir_invalid", failed)
+	}
+	if err := sb.Reload(nil); err != nil {
+		t.Fatalf("初始化失败后的空目标 Reload 出错: %v", err)
+	}
+	got := sb.GetRuntimeStatus()
+	if got.Status != SingBoxStatusNoTunnelNodes || got.Reason != SingBoxStatusNoTunnelNodes || got.Running || got.Nodes != 0 || got.ReadyPorts != 0 || got.TotalPorts != 0 {
+		t.Fatalf("初始化失败后的空目标状态 = %+v，期望 no_tunnel_nodes 且无节点/端口", got)
+	}
+}
+
+func TestReloadEmptyClearsRealShardRuntimeState(t *testing.T) {
+	process := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	node := tunnelNode("previously-running", "previously-running.example.com", "password")
+	key := node.NodeKey()
+	process.nodes = []ParsedNode{node}
+	process.portMap = map[string]int{key: testSingBoxBasePort}
+	process.assembly = assemblyDiagnostics{accepted: []ParsedNode{node}}
+	process.running = true
+	process.setStatusLocked(SingBoxStatusRunning, SingBoxStatusRunning, 1)
+
+	sb := newShardedSingBoxWithFactory(testSingBoxBasePort, 1, func(int, int) singBoxShard {
+		return process
+	})
+	sb.assignedKeys[0] = map[string]bool{key: true}
+
+	if err := sb.Reload(nil); err != nil {
+		t.Fatalf("已有运行态后的空目标 Reload 出错: %v", err)
+	}
+	got := process.GetRuntimeStatus()
+	if got.Status != SingBoxStatusNoTunnelNodes || got.Reason != SingBoxStatusNoTunnelNodes || got.Running || got.Nodes != 0 || got.ReadyPorts != 0 || got.TotalPorts != 0 {
+		t.Fatalf("真实分片清空后状态 = %+v，期望 no_tunnel_nodes 且无节点/端口", got)
+	}
+	if len(process.GetNodes()) != 0 || len(process.GetPortMap()) != 0 {
+		t.Fatalf("真实分片清空后仍有 nodes=%d portMap=%d", len(process.GetNodes()), len(process.GetPortMap()))
+	}
+	diagnostics := process.GetAssemblyDiagnostics()
+	if len(diagnostics.accepted) != 0 || len(diagnostics.rejected) != 0 || len(diagnostics.segmentFull) != 0 {
+		t.Fatalf("真实分片清空后仍有 assembly=%+v", diagnostics)
+	}
+}
+
 // TestRuntimeStatusRollup 验证运行态汇总的三种情形与数值求和。
 func TestRuntimeStatusRollup(t *testing.T) {
 	// 情形 1：所有活跃分片均 running → 聚合 Running。

@@ -39,3 +39,58 @@ func TestDisableProxyByIDSetsLastCheck(t *testing.T) {
 		t.Fatalf("last_check 时间戳异常: %v", got.LastCheck)
 	}
 }
+
+func TestDisableProxyByIDStartsNewClockWhenActiveHasOldCheck(t *testing.T) {
+	store := newTestStorage(t)
+	if err := store.AddManualProxy("1.2.3.5:3129", "http", "us", "note"); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	proxy, err := store.GetProxyByIdentity("1.2.3.5:3129", SourceManual, 0)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() error = %v", err)
+	}
+	oldCheck := time.Date(2026, time.July, 1, 1, 2, 3, 0, time.UTC)
+	if _, err := store.GetDB().Exec("UPDATE proxies SET status = 'active', last_check = ? WHERE id = ?", oldCheck.Format("2006-01-02 15:04:05"), proxy.ID); err != nil {
+		t.Fatalf("seed old active check: %v", err)
+	}
+
+	if err := store.DisableProxyByID(proxy.ID); err != nil {
+		t.Fatalf("DisableProxyByID() error = %v", err)
+	}
+	got, err := store.GetProxyByID(proxy.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID() error = %v", err)
+	}
+	if got.Status != "disabled" || !got.LastCheck.After(oldCheck) {
+		t.Fatalf("disabled active proxy = status:%q last_check:%v, want new clock after %v", got.Status, got.LastCheck, oldCheck)
+	}
+}
+
+func TestDisableProxyByIDDoesNotRenewExistingDisabledClock(t *testing.T) {
+	store := newTestStorage(t)
+	if err := store.AddManualProxy("1.2.3.6:3129", "http", "us", "note"); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	proxy, err := store.GetProxyByIdentity("1.2.3.6:3129", SourceManual, 0)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() error = %v", err)
+	}
+	if err := store.DisableProxyByID(proxy.ID); err != nil {
+		t.Fatalf("initial DisableProxyByID() error = %v", err)
+	}
+	preservedAt := time.Date(2026, time.July, 2, 4, 5, 6, 0, time.UTC)
+	if _, err := store.GetDB().Exec("UPDATE proxies SET last_check = ? WHERE id = ?", preservedAt.Format("2006-01-02 15:04:05"), proxy.ID); err != nil {
+		t.Fatalf("seed disabled clock: %v", err)
+	}
+
+	if err := store.DisableProxyByID(proxy.ID); err != nil {
+		t.Fatalf("repeated DisableProxyByID() error = %v", err)
+	}
+	got, err := store.GetProxyByID(proxy.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID() error = %v", err)
+	}
+	if got.Status != "disabled" || !got.LastCheck.Equal(preservedAt) {
+		t.Fatalf("repeated disable = status:%q last_check:%v, want disabled/%v", got.Status, got.LastCheck, preservedAt)
+	}
+}

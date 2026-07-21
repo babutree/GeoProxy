@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRecoverSubscriptionProxyWithExitInfoRollsBackOnMetadataFailure
@@ -229,5 +230,89 @@ func TestRecoverSubscriptionProxyWithExitInfoRejectsMissingSubscription(t *testi
 	}
 	if !reflect.DeepEqual(*after, *before) {
 		t.Fatalf("orphan recovery changed proxy:\n before=%#v\n after=%#v", *before, *after)
+	}
+}
+
+// TestUpdateDisabledSubscriptionProxyExitInfoInitializesMissingRetentionClock
+// 验证历史 disabled 订阅节点缺失 last_check 时，首次地理过滤写回会初始化回收起点；
+// 已有回收起点则必须保持不变，避免周期探测续期长期禁用保留窗口。
+func TestUpdateDisabledSubscriptionProxyExitInfoInitializesMissingRetentionClock(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("disabled-retention-clock", "", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	const address = "disabled-retention-clock:8080"
+	if err := store.AddProxyWithSource(address, "http", SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+	if err := store.DisableSubscriptionProxy(address, subID); err != nil {
+		t.Fatalf("DisableSubscriptionProxy() error = %v", err)
+	}
+	if _, err := store.GetDB().Exec(
+		"UPDATE proxies SET last_check = NULL WHERE address = ? AND source = ? AND subscription_id = ?",
+		address, SourceSubscription, subID,
+	); err != nil {
+		t.Fatalf("clear last_check: %v", err)
+	}
+
+	if err := store.UpdateDisabledSubscriptionProxyExitInfo(address, subID, "203.0.113.70", "JP Tokyo", 70, -1, "", true, -1, ""); err != nil {
+		t.Fatalf("initial disabled metadata write: %v", err)
+	}
+	proxy, err := store.GetProxyByIdentity(address, SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() after NULL write: %v", err)
+	}
+	if proxy.LastCheck.IsZero() {
+		t.Fatal("disabled metadata write left NULL last_check; node would never reach retention cutoff")
+	}
+
+	checkedAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	if _, err := store.GetDB().Exec(
+		"UPDATE proxies SET last_check = ? WHERE address = ? AND source = ? AND subscription_id = ?",
+		checkedAt.Format("2006-01-02 15:04:05"), address, SourceSubscription, subID,
+	); err != nil {
+		t.Fatalf("seed existing last_check: %v", err)
+	}
+	if err := store.UpdateDisabledSubscriptionProxyExitInfo(address, subID, "203.0.113.71", "JP Osaka", 71, -1, "", true, -1, ""); err != nil {
+		t.Fatalf("existing disabled metadata write: %v", err)
+	}
+	proxy, err = store.GetProxyByIdentity(address, SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() after existing clock write: %v", err)
+	}
+	if !proxy.LastCheck.Equal(checkedAt) {
+		t.Fatalf("existing disabled retention clock renewed: got %s, want %s", proxy.LastCheck, checkedAt)
+	}
+}
+
+func TestUpdateDisabledSubscriptionProxyExitInfoRejectsActiveTarget(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("active-retention-race", "", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	const address = "active-retention-race:8080"
+	if err := store.AddProxyWithSource(address, "http", SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+	if err := store.UpdateSubscriptionProxyExitInfo(address, subID, "198.51.100.80", "US Ashburn", 80, 0.2, "hosting", true, 0, "{}"); err != nil {
+		t.Fatalf("seed active metadata: %v", err)
+	}
+	before, err := store.GetProxyByIdentity(address, SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() before special write: %v", err)
+	}
+
+	err = store.UpdateDisabledSubscriptionProxyExitInfo(address, subID, "203.0.113.80", "JP Tokyo", 20, 0.9, "proxy", true, 1, `{"openai":1}`)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("active special write error = %v, want sql.ErrNoRows", err)
+	}
+	after, err := store.GetProxyByIdentity(address, SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() after special write: %v", err)
+	}
+	if !reflect.DeepEqual(*after, *before) {
+		t.Fatalf("active special write changed proxy:\n before=%#v\n after=%#v", *before, *after)
 	}
 }

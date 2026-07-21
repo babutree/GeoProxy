@@ -136,6 +136,7 @@ func TestReplaceSubscriptionProxiesPreservesOnlyTrustedUnchangedRoute(t *testing
 	tests := []struct {
 		name         string
 		mutate       func(*subscriptionProxyEntry)
+		wantReset    bool
 		oldStatus    string
 		oldPaused    bool
 		oldFailCount int
@@ -145,12 +146,12 @@ func TestReplaceSubscriptionProxiesPreservesOnlyTrustedUnchangedRoute(t *testing
 		wantStatus   string
 	}{
 		{name: "trusted unchanged", hasLastCheck: true, wantStatus: "active"},
-		{name: "address changed", mutate: func(e *subscriptionProxyEntry) { e.addr = "route-new.example:8080" }, hasLastCheck: true, wantStatus: "disabled"},
-		{name: "protocol changed", mutate: func(e *subscriptionProxyEntry) { e.proto = "socks5" }, hasLastCheck: true, wantStatus: "disabled"},
-		{name: "dual capability changed", mutate: func(e *subscriptionProxyEntry) { e.dual = false }, hasLastCheck: true, wantStatus: "disabled"},
-		{name: "username changed", mutate: func(e *subscriptionProxyEntry) { e.username = "new-user" }, hasLastCheck: true, wantStatus: "disabled"},
-		{name: "password changed", mutate: func(e *subscriptionProxyEntry) { e.password = "new-pass" }, hasLastCheck: true, wantStatus: "disabled"},
-		{name: "node key changed", mutate: func(e *subscriptionProxyEntry) { e.nodeKey = "new-key" }, hasLastCheck: true, wantStatus: "disabled"},
+		{name: "address changed", mutate: func(e *subscriptionProxyEntry) { e.addr = "route-new.example:8080" }, wantReset: true, hasLastCheck: true, wantStatus: "disabled"},
+		{name: "protocol changed", mutate: func(e *subscriptionProxyEntry) { e.proto = "socks5" }, wantReset: true, hasLastCheck: true, wantStatus: "disabled"},
+		{name: "dual capability changed", mutate: func(e *subscriptionProxyEntry) { e.dual = false }, wantReset: true, hasLastCheck: true, wantStatus: "disabled"},
+		{name: "username changed", mutate: func(e *subscriptionProxyEntry) { e.username = "new-user" }, wantReset: true, hasLastCheck: true, wantStatus: "disabled"},
+		{name: "password changed", mutate: func(e *subscriptionProxyEntry) { e.password = "new-pass" }, wantReset: true, hasLastCheck: true, wantStatus: "disabled"},
+		{name: "node key changed", mutate: func(e *subscriptionProxyEntry) { e.nodeKey = "new-key" }, wantReset: true, hasLastCheck: true, wantStatus: "disabled"},
 		{name: "old degraded", oldStatus: "degraded", hasLastCheck: true, wantStatus: "disabled"},
 		{name: "old disabled", oldStatus: "disabled", hasLastCheck: true, wantStatus: "disabled"},
 		{name: "old user paused", oldPaused: true, hasLastCheck: true, wantStatus: "disabled"},
@@ -224,6 +225,68 @@ func TestReplaceSubscriptionProxiesPreservesOnlyTrustedUnchangedRoute(t *testing
 			}
 			if row.Status != tt.wantStatus || proxies[0].Status != tt.wantStatus {
 				t.Fatalf("statuses db/returned = %q/%q, want %q (old id=%d new id=%d)", row.Status, proxies[0].Status, tt.wantStatus, oldID, proxies[0].ID)
+			}
+			if tt.wantReset {
+				if !row.LastCheck.IsZero() || row.ExitIP != "" || row.ExitLocation != "" || row.Latency != 0 || row.FailCount != 0 {
+					t.Fatalf("changed route retained validation evidence: last=%v ip=%q location=%q latency=%d fail=%d",
+						row.LastCheck, row.ExitIP, row.ExitLocation, row.Latency, row.FailCount)
+				}
+			}
+		})
+	}
+}
+
+func TestReplaceSubscriptionProxiesStartsClockWhenUnchangedRouteBecomesDisabled(t *testing.T) {
+	for _, oldStatus := range []string{"active", "degraded"} {
+		t.Run(oldStatus, func(t *testing.T) {
+			store := newTestStorage(t)
+			subID, err := store.AddSubscription("retention-transition-"+oldStatus, "", "", "auto", 60, "")
+			if err != nil {
+				t.Fatalf("AddSubscription: %v", err)
+			}
+			const address = "retention-transition.example:8080"
+			const nodeKey = "retention-transition-key"
+			oldCheck := time.Date(2026, time.July, 1, 2, 3, 4, 0, time.UTC)
+			failCount := 0
+			if oldStatus == "active" {
+				failCount = 1
+			}
+			if _, err := store.GetDB().Exec(`
+				INSERT INTO proxies (
+					address, protocol, source, subscription_id, region_source,
+					status, fail_count, last_check, exit_ip, exit_location, latency, node_key
+				) VALUES (?, 'http', ?, ?, 'auto', ?, ?, ?, ?, ?, 45, ?)
+			`, address, storage.SourceSubscription, subID, oldStatus, failCount,
+				oldCheck.Format("2006-01-02 15:04:05"), testValidationExitIP, testValidationExitLocation, nodeKey); err != nil {
+				t.Fatalf("seed unchanged route: %v", err)
+			}
+
+			proxies, err := (&Manager{storage: store}).replaceSubscriptionProxies(subID, []subscriptionProxyEntry{{
+				addr: address, proto: "http", nodeKey: nodeKey,
+			}})
+			if err != nil {
+				t.Fatalf("replaceSubscriptionProxies: %v", err)
+			}
+			if len(proxies) != 1 || proxies[0].Status != "disabled" {
+				t.Fatalf("replacement = %+v, want one disabled proxy", proxies)
+			}
+			first, err := store.GetProxyByID(proxies[0].ID)
+			if err != nil {
+				t.Fatalf("GetProxyByID(first): %v", err)
+			}
+			if first.Status != "disabled" || !first.LastCheck.After(oldCheck) {
+				t.Fatalf("transition clock = status:%q last:%v, want disabled after %v", first.Status, first.LastCheck, oldCheck)
+			}
+
+			if err := store.DisableSubscriptionProxy(address, subID); err != nil {
+				t.Fatalf("repeated DisableSubscriptionProxy: %v", err)
+			}
+			repeated, err := store.GetProxyByID(proxies[0].ID)
+			if err != nil {
+				t.Fatalf("GetProxyByID(repeated): %v", err)
+			}
+			if !repeated.LastCheck.Equal(first.LastCheck) {
+				t.Fatalf("repeated disable renewed clock: first=%v repeated=%v", first.LastCheck, repeated.LastCheck)
 			}
 		})
 	}

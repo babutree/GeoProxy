@@ -181,8 +181,56 @@ func (s *Server) releaseFailedBinding(route auth.ParsedUsername, p *storage.Prox
 	s.sessions.RemoveIfProxyID(route.Session, p.ID)
 }
 
+// validateForwardRequest 在选路前验证下游请求能否被 net/http 构造。
+// 这类确定性的本地输入错误不应消耗节点重试次数或创建会话绑定。
+func validateForwardRequest(r *http.Request) error {
+	if r == nil || r.URL == nil {
+		return errors.New("request URL is nil")
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), nil)
+	if err != nil {
+		return err
+	}
+	scheme := strings.ToLower(req.URL.Scheme)
+	if (scheme != "http" && scheme != "https") || req.URL.Hostname() == "" {
+		return fmt.Errorf("unsupported forward URL scheme=%q host=%q", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+// copyHTTPResponse 区分上游读取错误与客户端写入错误。
+// io.Copy 只返回一个 error，无法据此决定是否污染节点健康状态。
+func copyHTTPResponse(dst io.Writer, src io.Reader) (bytes int64, readErr, writeErr error) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			written, errWrite := dst.Write(buf[:n])
+			bytes += int64(written)
+			if errWrite != nil {
+				return bytes, nil, errWrite
+			}
+			if written != n {
+				return bytes, nil, io.ErrShortWrite
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return bytes, nil, nil
+			}
+			return bytes, err, nil
+		}
+	}
+}
+
 // handleHTTP 处理普通 HTTP 请求（带自动重试）
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.ParsedUsername) {
+	if err := validateForwardRequest(r); err != nil {
+		log.Printf("[proxy] 下游请求构造失败: %v", err)
+		http.Error(w, "invalid forward request", http.StatusBadRequest)
+		return
+	}
+	forwardURL := r.URL.String()
 	buffered, stream, replayable, err := readReusableBody(r)
 	if err != nil {
 		http.Error(w, "read request body failed", http.StatusBadRequest)
@@ -222,10 +270,11 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		}
 
 		// 转发请求（使用完整 URL，上游代理通过 client transport 设置）
-		req, err := http.NewRequest(r.Method, r.URL.String(), forwardBody(buffered, stream, replayable))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, forwardURL, forwardBody(buffered, stream, replayable))
 		if err != nil {
 			client.CloseIdleConnections()
-			continue
+			http.Error(w, "invalid forward request", http.StatusBadRequest)
+			return
 		}
 		// 超限流式 body 长度未知，显式标记为分块传输，避免被当作 0 长度。
 		if !replayable && stream != nil {
@@ -237,11 +286,29 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		resp, err := client.Do(req)
 		if err != nil {
 			client.CloseIdleConnections()
+			if r.Context().Err() != nil {
+				log.Printf("[proxy] 下游请求已取消 request=%s", r.RequestURI)
+				return
+			}
 			log.Printf("[proxy] 请求 %s 通过节点 %s 失败", r.RequestURI, p.Address)
 			recordProxyFailure(s.storage, p)
 			s.releaseFailedBinding(route, p)
 			if !replayable {
 				// body 已在本次尝试中被消费，不能重放，直接失败。
+				http.Error(w, "all proxies failed", http.StatusBadGateway)
+				return
+			}
+			continue
+		}
+
+		// HTTP 上游的 407 表示节点代理认证失败；SOCKS5 通道中的同名
+		// 源站状态仍属于可达响应，不应误判节点。
+		if p.Protocol == "http" && resp.StatusCode == http.StatusProxyAuthRequired {
+			_ = resp.Body.Close()
+			client.CloseIdleConnections()
+			recordProxyFailure(s.storage, p)
+			s.releaseFailedBinding(route, p)
+			if !replayable {
 				http.Error(w, "all proxies failed", http.StatusBadGateway)
 				return
 			}
@@ -255,10 +322,31 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		bytesCopied, readErr, writeErr := copyHTTPResponse(w, resp.Body)
 		_ = resp.Body.Close()
 		client.CloseIdleConnections()
-		s.storage.RecordProxyUseByID(p.ID, true)
+		if writeErr != nil {
+			// 客户端断开或写入失败不代表上游节点故障，也不记成功。
+			log.Printf("[proxy] 客户端写入响应失败 request=%s bytes=%d: %v", r.RequestURI, bytesCopied, writeErr)
+			return
+		}
+		if readErr != nil {
+			if r.Context().Err() != nil {
+				log.Printf("[proxy] 下游请求在读取响应时已取消 request=%s bytes=%d", r.RequestURI, bytesCopied)
+				return
+			}
+			log.Printf("[proxy] 上游响应体读取失败 request=%s proxy=%s bytes=%d: %v", r.RequestURI, p.Address, bytesCopied, readErr)
+			recordProxyFailure(s.storage, p)
+			s.releaseFailedBinding(route, p)
+			return
+		}
+		if r.Context().Err() != nil {
+			log.Printf("[proxy] 下游请求在响应完成时已取消 request=%s", r.RequestURI)
+			return
+		}
+		if err := s.storage.RecordProxyUseByID(p.ID, true); err != nil {
+			log.Printf("[proxy] 记录节点成功使用失败 id=%d: %v", p.ID, err)
+		}
 		if resp.StatusCode == 429 {
 			log.Printf("[proxy] 节点返回 429 request=%s proxy=%s protocol=%s", r.RequestURI, p.Address, p.Protocol)
 		} else {
@@ -272,7 +360,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 
 // httpDirect 为内网/本地 HTTP 目标直连转发，不经上游节点、不重试（本地目标无需故障转移）。
 func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []byte, stream io.Reader, replayable bool) {
-	req, err := http.NewRequest(r.Method, r.URL.String(), forwardBody(buffered, stream, replayable))
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), forwardBody(buffered, stream, replayable))
 	if err != nil {
 		http.Error(w, "build direct request failed", http.StatusBadGateway)
 		return
@@ -303,7 +391,23 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	bytesCopied, readErr, writeErr := copyHTTPResponse(w, resp.Body)
+	if writeErr != nil {
+		log.Printf("[proxy] 直连客户端写入响应失败 request=%s bytes=%d: %v", r.RequestURI, bytesCopied, writeErr)
+		return
+	}
+	if readErr != nil {
+		if r.Context().Err() != nil {
+			log.Printf("[proxy] 直连请求在读取响应时已取消 request=%s bytes=%d", r.RequestURI, bytesCopied)
+			return
+		}
+		log.Printf("[proxy] 直连上游响应体读取失败 request=%s bytes=%d: %v", r.RequestURI, bytesCopied, readErr)
+		return
+	}
+	if r.Context().Err() != nil {
+		log.Printf("[proxy] 直连请求在响应完成时已取消 request=%s", r.RequestURI)
+		return
+	}
 	log.Printf("[proxy] 直连请求完成 request=%s status=%d", r.RequestURI, resp.StatusCode)
 }
 

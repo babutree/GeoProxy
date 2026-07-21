@@ -20,12 +20,18 @@ type healthStore interface {
 	GetBatchForHealthCheck(batchSize int) ([]storage.Proxy, error)
 	UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error
 	RecordProxyUseByID(id int64, success bool) error
-	RecordProxyFailureByID(id int64, threshold int) error
+	RecordProxyFailureByIDWithStatus(id int64, threshold int) (bool, error)
 }
 
 // healthValidator 健康检查对验证器的最小依赖。
 type healthValidator interface {
 	ValidateStream(proxies []storage.Proxy) <-chan validator.Result
+}
+
+type healthCheckSummary struct {
+	valid    int
+	updated  int
+	disabled int
 }
 
 // HealthChecker 健康检查器
@@ -98,33 +104,36 @@ func (hc *HealthChecker) RunOnce() {
 
 	log.Printf("[health] 检查 %d 个代理", len(proxies))
 
-	// 执行验证
-	validCount := 0
-	disableCount := 0
-	updateCount := 0
+	summary := hc.checkBatch(proxies)
 
+	elapsed := time.Since(start)
+	log.Printf("[health] 完成: 验证%d 有效%d 更新%d 禁用%d 耗时%v",
+		len(proxies), summary.valid, summary.updated, summary.disabled, elapsed)
+}
+
+// checkBatch 消费本批验证结果；禁用统计只采用存储写入返回的权威状态。
+func (hc *HealthChecker) checkBatch(proxies []storage.Proxy) healthCheckSummary {
+	var summary healthCheckSummary
 	for result := range hc.validator.ValidateStream(proxies) {
 		if result.Valid {
-			validCount++
+			summary.valid++
 			// 更新延迟和质量等级
 			latencyMs := int(result.Latency.Milliseconds())
 			if err := hc.storage.UpdateProxyExitInfo(result.Proxy.ID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.FlagsKnown, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
 				log.Printf("[health] 更新出口信息失败 id=%d: %v", result.Proxy.ID, err)
 			} else {
-				updateCount++
+				summary.updated++
 			}
 		} else {
-			if err := hc.storage.RecordProxyFailureByID(result.Proxy.ID, failDisableThreshold); err != nil {
+			disabled, err := hc.storage.RecordProxyFailureByIDWithStatus(result.Proxy.ID, failDisableThreshold)
+			if err != nil {
 				log.Printf("[health] 记录失败次数失败 id=%d: %v", result.Proxy.ID, err)
-			} else if result.Proxy.FailCount+1 >= failDisableThreshold {
-				disableCount++
+			} else if disabled {
+				summary.disabled++
 			}
 		}
 	}
-
-	elapsed := time.Since(start)
-	log.Printf("[health] 完成: 验证%d 有效%d 更新%d 禁用%d 耗时%v",
-		len(proxies), validCount, updateCount, disableCount, elapsed)
+	return summary
 }
 
 // StartBackground 启动后台定时健康检查；重复调用幂等，不会创建第二个定时器。
