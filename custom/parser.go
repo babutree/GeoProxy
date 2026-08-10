@@ -4,16 +4,21 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// errInvalidProxyEndpoint 标记会使一次订阅刷新失去身份完整性的端点错误。
+// 此类错误必须让上层 fail-closed，不能把旧节点误判为订阅已删除。
+var errInvalidProxyEndpoint = errors.New("无效代理端点")
 
 // ParsedNode 解析后的代理节点
 type ParsedNode struct {
@@ -153,13 +158,12 @@ func ParseSingleLink(link string) (*ParsedNode, error) {
 		return nil, err
 	}
 	if len(nodes) == 0 {
-		return nil, fmt.Errorf("无法解析节点链接: %s", safePreview(link, singleLinkPreviewLen))
+		return nil, fmt.Errorf("无法解析节点链接")
 	}
 	return &nodes[0], nil
 }
 
 // singleLinkPreviewLen 是错误信息中链接预览的最大长度。
-const singleLinkPreviewLen = 30
 
 // parseAutoDetect 自动检测订阅格式并解析
 func parseAutoDetect(data []byte) ([]ParsedNode, error) {
@@ -193,12 +197,17 @@ func parseAutoDetect(data []byte) ([]ParsedNode, error) {
 		return parseProxyLinks(content)
 	}
 
-	// 3. 尝试 Base64 解码
+	// 3. 原始 HTTP/SOCKS5/host:port 纯文本订阅。
+	// 必须在 Base64 前处理，否则普通节点行会因解码失败而被错误拒绝。
+	if nodes, err := parsePlain(data); err == nil && len(nodes) > 0 {
+		return nodes, nil
+	}
+
+	// 4. 尝试 Base64 解码
 	decoded, err := tryBase64Decode(content)
 	if err != nil {
 		// BUG-63: 区分 base64 失败与其他不可识别情况，给可诊断（脱敏）消息。
-		return nil, fmt.Errorf("无法识别订阅内容格式（非 JSON / 非 YAML / 非协议链接 / 非 Base64），内容预览: %s",
-			safePreview(content, singleLinkPreviewLen))
+		return nil, fmt.Errorf("无法识别订阅内容格式（非 JSON / 非 YAML / 非协议链接 / 非 Base64）")
 	}
 
 	decodedStr := strings.TrimSpace(string(decoded))
@@ -234,13 +243,6 @@ func parseAutoDetect(data []byte) ([]ParsedNode, error) {
 	return nil, fmt.Errorf("无法识别订阅内容格式（Base64 解码后既非 JSON / YAML / 协议链接 / 有效纯文本）")
 }
 
-func safePreview(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "..."
-	}
-	return s
-}
-
 // looksLikeProxyLinks 判断内容是否包含代理协议链接
 func looksLikeProxyLinks(s string) bool {
 	return strings.Contains(s, "vmess://") ||
@@ -271,12 +273,8 @@ func (c *clashConfig) getProxies() []map[string]interface{} {
 func parseClash(data []byte) ([]ParsedNode, error) {
 	content := strings.TrimSpace(string(data))
 
-	// 打印前 100 字符帮助调试
-	preview := content
-	if len(preview) > 100 {
-		preview = preview[:100]
-	}
-	log.Printf("[custom] 订阅内容预览: %s...", preview)
+	// 订阅内容可能含凭据；日志仅保留长度等结构性信息，不输出原文预览。
+	log.Printf("[custom] 解析 Clash 订阅内容：%d bytes", len(content))
 
 	// 自动检测：如果内容不像 YAML（不以常见 YAML 字段开头），尝试 base64 解码
 	if !looksLikeYAML(content) {
@@ -309,6 +307,9 @@ func parseClash(data []byte) ([]ParsedNode, error) {
 	for _, proxy := range proxies {
 		node, err := parseClashProxy(proxy)
 		if err != nil {
+			if errors.Is(err, errInvalidProxyEndpoint) {
+				return nil, fmt.Errorf("Clash 节点端点无效: %w", err)
+			}
 			log.Printf("[custom] 跳过无效节点: %v", err)
 			continue
 		}
@@ -342,11 +343,6 @@ func extractProxiesFromNode(doc *yaml.Node) []map[string]interface{} {
 		if keyNode.Value == "proxies" || keyNode.Value == "Proxy" {
 			log.Printf("[custom] 找到 %s 字段: kind=%d tag=%s 子节点数=%d",
 				keyNode.Value, valNode.Kind, valNode.Tag, len(valNode.Content))
-
-			// 把 proxies 段的原始 YAML 写到临时文件方便调试
-			debugData, _ := yaml.Marshal(valNode)
-			os.WriteFile("/tmp/geoproxy_debug_proxies.yaml", debugData, 0644)
-			log.Printf("[custom] 调试: proxies 原始数据已写入 /tmp/geoproxy_debug_proxies.yaml (%d bytes)", len(debugData))
 
 			if valNode.Kind != yaml.SequenceNode {
 				log.Printf("[custom] proxies 字段不是列表（kind=%d tag=%s）", valNode.Kind, valNode.Tag)
@@ -418,22 +414,14 @@ func parseClashProxy(proxy map[string]interface{}) (*ParsedNode, error) {
 		return nil, fmt.Errorf("缺少 type 或 server 字段")
 	}
 
-	port := 0
-	switch v := proxy["port"].(type) {
-	case int:
-		port = v
-	case float64:
-		port = int(v)
-	case string:
-		p, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, fmt.Errorf("无效端口: %s", v)
-		}
-		port = p
-	default:
-		return nil, fmt.Errorf("缺少 port 字段")
+	port, err := parseProxyPort(proxy["port"])
+	if err != nil {
+		return nil, err
 	}
 
+	if err := validateProxyEndpoint(server, port); err != nil {
+		return nil, err
+	}
 	// 标准化类型名
 	typ = strings.ToLower(typ)
 	switch typ {
@@ -499,6 +487,9 @@ func parsePlain(data []byte) ([]ParsedNode, error) {
 
 		protocol, host, port, username, password, err := parseDirectPlainLine(line)
 		if err != nil {
+			if errors.Is(err, errInvalidProxyEndpoint) {
+				return nil, fmt.Errorf("纯文本节点端点无效: %w", err)
+			}
 			continue
 		}
 		addr := net.JoinHostPort(host, strconv.Itoa(port))
@@ -549,6 +540,9 @@ func parseDirectPlainLine(line string) (protocol, host string, port int, usernam
 	if err != nil {
 		return "", "", 0, "", "", err
 	}
+	if err := validateProxyEndpoint(u.Hostname(), port); err != nil {
+		return "", "", 0, "", "", err
+	}
 	if u.User != nil {
 		username = u.User.Username()
 		if pw, ok := u.User.Password(); ok {
@@ -567,7 +561,52 @@ func splitDirectHostPort(addr string) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
+	if err := validateProxyEndpoint(host, port); err != nil {
+		return "", 0, err
+	}
 	return host, port, nil
+}
+
+// parseProxyPort 解析并严格校验代理端口，拒绝小数、越界及非数字值。
+func parseProxyPort(value interface{}) (int, error) {
+	var port int
+	switch v := value.(type) {
+	case int:
+		port = v
+	case float64:
+		if math.Trunc(v) != v || v < 1 || v > 65535 {
+			return 0, fmt.Errorf("%w: 无效端口: %v", errInvalidProxyEndpoint, v)
+		}
+		port = int(v)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0, fmt.Errorf("%w: 无效端口: %s", errInvalidProxyEndpoint, v)
+		}
+		port = n
+	default:
+		return 0, fmt.Errorf("%w: 无效端口: %v", errInvalidProxyEndpoint, value)
+	}
+	if err := validatePort(port); err != nil {
+		return 0, err
+	}
+	return port, nil
+}
+
+// validatePort 严格校验代理端口范围。
+func validatePort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%w: 无效端口: %d", errInvalidProxyEndpoint, port)
+	}
+	return nil
+}
+
+// validateProxyEndpoint 统一校验订阅节点的拨号端点。
+func validateProxyEndpoint(host string, port int) error {
+	if strings.TrimSpace(host) == "" {
+		return fmt.Errorf("%w: 缺少服务器地址", errInvalidProxyEndpoint)
+	}
+	return validatePort(port)
 }
 
 // parseProxyLinks 解析协议链接格式（vmess://, trojan://, ss://, vless:// 等）
@@ -583,6 +622,9 @@ func parseProxyLinks(content string) ([]ParsedNode, error) {
 
 		node, err := parseProxyLink(line)
 		if err != nil {
+			if errors.Is(err, errInvalidProxyEndpoint) {
+				return nil, fmt.Errorf("协议链接端点无效: %w", err)
+			}
 			continue
 		}
 		nodes = append(nodes, *node)
@@ -620,7 +662,7 @@ func parseProxyLink(link string) (*ParsedNode, error) {
 	case strings.HasPrefix(link, "tuic://"):
 		return parseStandardLink(link, "tuic")
 	default:
-		return nil, fmt.Errorf("不支持的协议链接: %s", link[:min(20, len(link))])
+		return nil, fmt.Errorf("不支持的协议链接")
 	}
 }
 
@@ -640,6 +682,9 @@ func parseVmessLink(link string) (*ParsedNode, error) {
 	server := fmt.Sprintf("%v", info["add"])
 	portStr := fmt.Sprintf("%v", info["port"])
 	port, _ := strconv.Atoi(portStr)
+	if err := validateProxyEndpoint(server, port); err != nil {
+		return nil, fmt.Errorf("vmess 节点地址无效: %w", err)
+	}
 	name := fmt.Sprintf("%v", info["ps"])
 	if name == "" || name == "<nil>" {
 		name = server
@@ -703,11 +748,20 @@ func parseStandardLink(link string, typ string) (*ParsedNode, error) {
 	}
 
 	host := u.Hostname()
-	port, _ := strconv.Atoi(u.Port())
-	if port == 0 {
-		port = 443
+	portText := u.Port()
+	port := 443
+	if portText != "" {
+		parsed, err := strconv.Atoi(portText)
+		if err != nil {
+			return nil, fmt.Errorf("%w: 无效端口: %s", errInvalidProxyEndpoint, portText)
+		}
+		port = parsed
+	}
+	if err := validateProxyEndpoint(host, port); err != nil {
+		return nil, err
 	}
 	name := u.Fragment
+
 	if name == "" {
 		name = host
 	}
@@ -737,9 +791,6 @@ func parseStandardLink(link string, typ string) (*ParsedNode, error) {
 
 	// TLS
 	security := params.Get("security")
-	if security == "" {
-		security = params.Get("type") // 有些链接用 type 表示
-	}
 	if security != "none" && security != "" || typ == "trojan" || typ == "hysteria2" {
 		raw["tls"] = true
 		if sni := params.Get("sni"); sni != "" {
@@ -830,6 +881,12 @@ func parseShadowsocksLink(link string) (*ParsedNode, error) {
 		link = link[:idx]
 	}
 
+	plugin, pluginOpts := "", ""
+	if idx := strings.Index(link, "?"); idx >= 0 {
+		plugin, pluginOpts = parseShadowsocksPlugin(link[idx+1:])
+		link = link[:idx]
+	}
+
 	var server, method, password string
 	var port int
 
@@ -850,10 +907,6 @@ func parseShadowsocksLink(link string) (*ParsedNode, error) {
 			password = parts[1]
 		}
 
-		// 分离 host:port（去掉查询参数）
-		if qIdx := strings.Index(hostPort, "?"); qIdx >= 0 {
-			hostPort = hostPort[:qIdx]
-		}
 		h, p, err := net.SplitHostPort(hostPort)
 		if err != nil {
 			return nil, fmt.Errorf("ss 地址解析失败: %w", err)
@@ -862,9 +915,6 @@ func parseShadowsocksLink(link string) (*ParsedNode, error) {
 		port, _ = strconv.Atoi(p)
 	} else {
 		// 格式2: 整个 base64 编码
-		if qIdx := strings.Index(link, "?"); qIdx >= 0 {
-			link = link[:qIdx]
-		}
 		decoded, err := tryBase64Decode(link)
 		if err != nil {
 			return nil, fmt.Errorf("ss base64 解码失败: %w", err)
@@ -888,6 +938,10 @@ func parseShadowsocksLink(link string) (*ParsedNode, error) {
 		port, _ = strconv.Atoi(p)
 	}
 
+	if err := validateProxyEndpoint(server, port); err != nil {
+		return nil, fmt.Errorf("ss 节点地址无效: %w", err)
+	}
+
 	if name == "" {
 		name = server
 	}
@@ -901,6 +955,13 @@ func parseShadowsocksLink(link string) (*ParsedNode, error) {
 		"password": password,
 	}
 
+	if plugin != "" {
+		raw["plugin"] = plugin
+		if pluginOpts != "" {
+			raw["plugin-opts-raw"] = pluginOpts
+		}
+	}
+
 	return &ParsedNode{
 		Name:   name,
 		Type:   "shadowsocks",
@@ -908,4 +969,39 @@ func parseShadowsocksLink(link string) (*ParsedNode, error) {
 		Port:   port,
 		Raw:    raw,
 	}, nil
+}
+
+// parseShadowsocksPlugin 提取 SIP002 plugin 名称及保持原顺序的原始选项字符串。
+// SIP002 用分号分隔插件参数；url.ParseQuery 会把某些分号变体视为无效查询，
+// 因而逐项解码 plugin 值，避免有效的 %3B 选项被静默丢弃。
+func parseShadowsocksPlugin(rawQuery string) (string, string) {
+	var rawPlugin string
+	for _, field := range strings.Split(rawQuery, "&") {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil || decodedKey != "plugin" {
+			continue
+		}
+		decodedValue, err := url.QueryUnescape(value)
+		if err != nil {
+			return "", ""
+		}
+		rawPlugin = strings.TrimSpace(decodedValue)
+		break
+	}
+	if rawPlugin == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(rawPlugin, ";", 2)
+	plugin := strings.TrimSpace(parts[0])
+	if plugin == "" {
+		return "", ""
+	}
+	if len(parts) == 1 {
+		return plugin, ""
+	}
+	return plugin, strings.TrimSpace(parts[1])
 }

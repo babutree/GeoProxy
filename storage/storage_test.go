@@ -499,8 +499,9 @@ func TestUserPausedAndSubscriptionPausedStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProxyByIdentity() error = %v", err)
 	}
-	if proxy.Status != "active" || !proxy.UserPaused {
-		t.Fatalf("proxy after subscription pause = %#v, want active plus user_paused", proxy)
+	// 暂停订阅必须禁用其节点；user_paused 可与 status=disabled 并存。
+	if proxy.Status != "disabled" || !proxy.UserPaused {
+		t.Fatalf("proxy after subscription pause = %#v, want disabled plus user_paused", proxy)
 	}
 	if err := store.UnpauseProxy("state:8080"); err != nil {
 		t.Fatalf("UnpauseProxy() error = %v", err)
@@ -511,8 +512,16 @@ func TestUserPausedAndSubscriptionPausedStateMachine(t *testing.T) {
 	if _, err := store.ToggleSubscription(subID); err != nil {
 		t.Fatalf("ToggleSubscription(active) error = %v", err)
 	}
-	if count, err := store.CountAll(); err != nil || count != 1 {
-		t.Fatalf("CountAll after subscription resume = %d, err=%v; want 1 nil", count, err)
+	// 恢复订阅只改 subscriptions.status；节点仍 disabled 直至验证 Enable。
+	if count, err := store.CountAll(); err != nil || count != 0 {
+		t.Fatalf("CountAll after subscription resume before revalidate = %d, err=%v; want 0 nil", count, err)
+	}
+	proxy, err = store.GetProxyByIdentity("state:8080", SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() after resume error = %v", err)
+	}
+	if proxy.Status != "disabled" {
+		t.Fatalf("proxy after subscription resume = %#v, want still disabled until revalidate", proxy)
 	}
 }
 
@@ -853,6 +862,9 @@ func TestUpdateProxyExitInfoAdvancesLastCheck(t *testing.T) {
 	}
 	if after.LastCheck.IsZero() || !after.LastCheck.After(before.LastCheck) {
 		t.Fatalf("last_check after success = %v, before = %v; want advanced timestamp", after.LastCheck, before.LastCheck)
+	}
+	if after.ExitCheckedAt.IsZero() {
+		t.Fatal("trusted exit update did not advance exit_checked_at")
 	}
 }
 

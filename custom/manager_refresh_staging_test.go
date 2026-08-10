@@ -36,10 +36,10 @@ func TestRefreshSubscriptionStagesVerifiedNodeUntilValidation(t *testing.T) {
 	}
 	if _, err := store.GetDB().Exec(`
 		INSERT INTO proxies (address, protocol, source, subscription_id, region_source,
-			status, user_paused, fail_count, last_check, exit_ip, exit_location, latency, node_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			status, user_paused, fail_count, last_check, exit_checked_at, exit_ip, exit_location, latency, node_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, oldAddr, "http", storage.SourceSubscription, subID, "auto",
-		"active", 0, 0, time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
+		"active", 0, 0, time.Now(), time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
 		t.Fatalf("seed verified proxy: %v", err)
 	}
 
@@ -180,9 +180,10 @@ func TestReplaceSubscriptionProxiesPreservesOnlyTrustedUnchangedRoute(t *testing
 			if tt.oldPaused {
 				oldPaused = 1
 			}
-			var lastCheck interface{}
+			var lastCheck, exitCheckedAt interface{}
 			if tt.hasLastCheck {
 				lastCheck = time.Now()
+				exitCheckedAt = lastCheck
 			}
 			exitIP, exitLocation, latency := testValidationExitIP, testValidationExitLocation, 45
 			if tt.missingProof {
@@ -190,12 +191,12 @@ func TestReplaceSubscriptionProxiesPreservesOnlyTrustedUnchangedRoute(t *testing
 			}
 			result, err := store.GetDB().Exec(`
 				INSERT INTO proxies (address, protocol, source, subscription_id, region_source,
-					status, user_paused, fail_count, last_check, exit_ip, exit_location, latency, dual_protocol,
+					status, user_paused, fail_count, last_check, exit_checked_at, exit_ip, exit_location, latency, dual_protocol,
 					proxy_username, proxy_password, node_key)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`,
 				"route.example:8080", "http", storage.SourceSubscription, subID, "auto",
-				oldStatus, oldPaused, tt.oldFailCount, lastCheck, exitIP, exitLocation, latency, true,
+				oldStatus, oldPaused, tt.oldFailCount, lastCheck, exitCheckedAt, exitIP, exitLocation, latency, true,
 				"old-user", "old-pass", "stable-key",
 			)
 			if err != nil {
@@ -227,16 +228,17 @@ func TestReplaceSubscriptionProxiesPreservesOnlyTrustedUnchangedRoute(t *testing
 				t.Fatalf("statuses db/returned = %q/%q, want %q (old id=%d new id=%d)", row.Status, proxies[0].Status, tt.wantStatus, oldID, proxies[0].ID)
 			}
 			if tt.wantReset {
-				if !row.LastCheck.IsZero() || row.ExitIP != "" || row.ExitLocation != "" || row.Latency != 0 || row.FailCount != 0 {
-					t.Fatalf("changed route retained validation evidence: last=%v ip=%q location=%q latency=%d fail=%d",
-						row.LastCheck, row.ExitIP, row.ExitLocation, row.Latency, row.FailCount)
+				if !row.LastCheck.IsZero() || !row.ExitCheckedAt.IsZero() || !row.DisabledAt.IsZero() ||
+					row.ExitIP != "" || row.ExitLocation != "" || row.Latency != 0 || row.FailCount != 0 {
+					t.Fatalf("changed route retained route evidence: last=%v exit_checked=%v disabled=%v ip=%q location=%q latency=%d fail=%d",
+						row.LastCheck, row.ExitCheckedAt, row.DisabledAt, row.ExitIP, row.ExitLocation, row.Latency, row.FailCount)
 				}
 			}
 		})
 	}
 }
 
-func TestReplaceSubscriptionProxiesStartsClockWhenUnchangedRouteBecomesDisabled(t *testing.T) {
+func TestReplaceSubscriptionProxiesDoesNotForgeClocksWhenUnchangedRouteBecomesDisabled(t *testing.T) {
 	for _, oldStatus := range []string{"active", "degraded"} {
 		t.Run(oldStatus, func(t *testing.T) {
 			store := newTestStorage(t)
@@ -274,8 +276,8 @@ func TestReplaceSubscriptionProxiesStartsClockWhenUnchangedRouteBecomesDisabled(
 			if err != nil {
 				t.Fatalf("GetProxyByID(first): %v", err)
 			}
-			if first.Status != "disabled" || !first.LastCheck.After(oldCheck) {
-				t.Fatalf("transition clock = status:%q last:%v, want disabled after %v", first.Status, first.LastCheck, oldCheck)
+			if first.Status != "disabled" || !first.LastCheck.Equal(oldCheck) || !first.DisabledAt.IsZero() {
+				t.Fatalf("staged state = status:%q last:%v disabled:%v, want disabled with unchanged probe clock and no system disable clock", first.Status, first.LastCheck, first.DisabledAt)
 			}
 
 			if err := store.DisableSubscriptionProxy(address, subID); err != nil {
@@ -365,10 +367,10 @@ func TestRefreshSubscriptionSuccessfulValidationKeepsPreservedProxyActive(t *tes
 	}
 	if _, err := store.GetDB().Exec(`
 		INSERT INTO proxies (address, protocol, source, subscription_id, region_source,
-			status, user_paused, fail_count, last_check, exit_ip, exit_location, latency, node_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			status, user_paused, fail_count, last_check, exit_checked_at, exit_ip, exit_location, latency, node_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, address, "http", storage.SourceSubscription, subID, "auto",
-		"active", 0, 0, time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
+		"active", 0, 0, time.Now(), time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
 		t.Fatalf("seed unchanged proxy: %v", err)
 	}
 	fake := newBlockingProxyValidator(map[string]bool{address: true})
@@ -425,10 +427,10 @@ func TestRefreshSubscriptionGeoBlockedPreservedProxyIsDisabledBeforeMetadataWrit
 	}
 	if _, err := store.GetDB().Exec(`
 		INSERT INTO proxies (address, protocol, source, subscription_id, region_source,
-			status, user_paused, fail_count, last_check, exit_ip, exit_location, latency, node_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			status, user_paused, fail_count, last_check, exit_checked_at, exit_ip, exit_location, latency, node_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, address, "http", storage.SourceSubscription, subID, "auto",
-		"active", 0, 0, time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
+		"active", 0, 0, time.Now(), time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
 		t.Fatalf("seed geo-blocked proxy: %v", err)
 	}
 	if _, err := store.GetDB().Exec(`
@@ -442,6 +444,7 @@ func TestRefreshSubscriptionGeoBlockedPreservedProxyIsDisabledBeforeMetadataWrit
 		t.Fatalf("create status observation trigger: %v", err)
 	}
 	fake := newBlockingProxyValidator(map[string]bool{address: true})
+	fake.failureReasons = map[string]validator.FailureReason{address: validator.FailureGeoRejected}
 	t.Cleanup(fake.Release)
 	m := &Manager{
 		storage: store, validator: fake,
@@ -482,10 +485,10 @@ func TestRefreshSubscriptionExitWriteFailureDisablesPreservedProxy(t *testing.T)
 	}
 	if _, err := store.GetDB().Exec(`
 		INSERT INTO proxies (address, protocol, source, subscription_id, region_source,
-			status, user_paused, fail_count, last_check, exit_ip, exit_location, latency, node_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			status, user_paused, fail_count, last_check, exit_checked_at, exit_ip, exit_location, latency, node_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, address, "http", storage.SourceSubscription, subID, "auto",
-		"active", 0, 0, time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
+		"active", 0, 0, time.Now(), time.Now(), testValidationExitIP, testValidationExitLocation, 45, nodes[0].NodeKey()); err != nil {
 		t.Fatalf("seed unchanged proxy: %v", err)
 	}
 	if _, err := store.GetDB().Exec(`
@@ -528,11 +531,12 @@ const (
 )
 
 type blockingProxyValidator struct {
-	valid       map[string]bool
-	entered     chan struct{}
-	release     chan struct{}
-	enterOnce   sync.Once
-	releaseOnce sync.Once
+	valid          map[string]bool
+	failureReasons map[string]validator.FailureReason
+	entered        chan struct{}
+	release        chan struct{}
+	enterOnce      sync.Once
+	releaseOnce    sync.Once
 }
 
 func newBlockingProxyValidator(valid map[string]bool) *blockingProxyValidator {
@@ -558,15 +562,18 @@ func (v *blockingProxyValidator) ValidateStream(proxies []storage.Proxy) <-chan 
 		<-v.release
 		for _, proxy := range snapshot {
 			valid, latency, exitIP, exitLocation, risk := v.ValidateOne(proxy)
+			reason := v.failureReasons[proxy.Address]
+			if reason != validator.FailureNone {
+				valid = false
+			}
 			results <- validator.Result{
 				Proxy: proxy, Valid: valid, Latency: latency,
-				ExitIP: exitIP, ExitLocation: exitLocation, Risk: risk,
+				ExitIP: exitIP, ExitLocation: exitLocation, Risk: risk, FailureReason: reason,
 			}
 		}
 	}()
 	return results
 }
-
 func (v *blockingProxyValidator) Release() {
 	v.releaseOnce.Do(func() { close(v.release) })
 }

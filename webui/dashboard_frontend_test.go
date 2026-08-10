@@ -25,9 +25,7 @@ func TestDashboardEscapesAPIFieldsBeforeInnerHTML(t *testing.T) {
 		"abuserBadge(p.ipapiis_score)",
 		"ipapiFlagsBadges(p.ipapi_flags,!!p.ipapi_flags_seen)",
 		"html(sub.name)",
-		"html(activeCount)",
-		"html(pausedCount)",
-		"html(disabledCount)",
+		"html(tf('sub_counts',{a:activeCount,p:pausedCount,d:disabledCount}))",
 		"html(line)",
 		"html(s.session_id)",
 		"html(region)",
@@ -62,15 +60,15 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 	checks := []string{
 		// 表头两列（ipapi.is 分数 + ip-api 标记）。
 		"ipapi.is 滥用分",
-		"<th>ip-api 标记</th>",
+		`data-i18n="th_ipapi_flags">ip-api 标记</th>`,
 		// 两处 colspan 为 14（加载中 + 无匹配节点）：勾选列 + 星标 + CF + AI。
-		"<td colspan=\"14\" class=\"empty\">加载中</td>",
-		"<td colspan=\"14\" class=\"empty\">没有匹配节点</td>",
+		`class="empty" data-i18n="loading">加载中</td>`,
+		"<td colspan=\"14\" class=\"empty\">'+html(t('no_match'))+'</td>",
 		// abuserBadge：<0 显示 "--"，否则两位小数 + 三色阈值(0.1/0.5)。
 		"function abuserBadge(score){const n=Number(score);if(!Number.isFinite(n)||n<0)return '<span class=\"muted\">--</span>';const cls=n<0.1?'ok':(n<=0.5?'warn':'danger');return '<span class=\"badge '+cls+'\">'+html(n.toFixed(2))+'</span>'}",
 		// ipapiFlagsBadges：空+seen 显"干净"、空+未探测显"--"、命中按类型着色。
 		"function ipapiFlagsBadges(flags,seen){",
-		"return seen?'<span class=\"badge ok\">干净</span>':'<span class=\"muted\">--</span>'",
+		"return seen?'<span class=\"badge ok\">'+html(t('badge_clean'))+'</span>':'<span class=\"muted\">--</span>'",
 		// 行渲染分别引用两列字段；ip-api 探测状态用 ipapi_flags_seen 判定。
 		"abuserBadge(p.ipapiis_score)",
 		"ipapiFlagsBadges(p.ipapi_flags,!!p.ipapi_flags_seen)",
@@ -104,11 +102,11 @@ func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 	checks := []string{
 		// 表头新增星标列与 Cloudflare 列（th-ico 图标+正规短标签）。
 		"<th>★</th>",
-		`<span class="th-ico" title="Cloudflare`,
+		`data-i18n-title="th_cf_title"`,
 		`<span class="tx">Cloudflare</span>`,
 		// 两处 colspan 为 14（含多选勾选列）。
-		"<td colspan=\"14\" class=\"empty\">加载中</td>",
-		"<td colspan=\"14\" class=\"empty\">没有匹配节点</td>",
+		`class="empty" data-i18n="loading">加载中</td>`,
+		"<td colspan=\"14\" class=\"empty\">'+html(t('no_match'))+'</td>",
 		// 新增 JS 函数。
 		"function cfBadge(",
 		"function copyProxyCred(",
@@ -126,7 +124,7 @@ func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 		"cfBadge(p.cf_blocked)",
 		"copyProxyCred('+id+')",
 		// 取消星标须应用内确认弹窗（替换浏览器 confirm）。
-		"const ok=await showConfirm('取消该节点星标？','取消星标')",
+		"const ok=await showConfirm(t('confirm_unstar'),t('btn_unstar'))",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -143,7 +141,7 @@ func TestDashboardLogsAutoScrollFollowsWhenVisible(t *testing.T) {
 		"function stickLogsToBottom(box){",
 		"requestAnimationFrame(function(){apply();requestAnimationFrame(apply)})",
 		"if(follow){if(isLogsTabVisible())stickLogsToBottom(box);return}",
-		"if(name==='logs'){runAsync('日志刷新失败',async()=>{await loadLogs();",
+		"if(name==='logs'){runAsync(t('err_log_refresh'),async()=>{await loadLogs();",
 		"if(auto&&auto.checked)stickLogsToBottom(document.getElementById('logs-box'))",
 		"auto.addEventListener('change',function(){if(this.checked)stickLogsToBottom(document.getElementById('logs-box'))})",
 	}
@@ -171,14 +169,14 @@ func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *test
 		// BUG-50: nodeState 主判据改为 user_paused（存储层新口径 status 仍为 active）。
 		"function hasLastCheck(p){",
 		"function nodeState(p){if(isParentSubscriptionPaused(p))return 'sub_paused';if(p&&p.source==='subscription'&&!isParentSubscriptionSelectable(p))return 'failed';if(isUserPaused(p)||p.status==='paused')return 'paused';if(isAvailable(p))return 'ok';if(Number(p.fail_count||0)>=3)return 'failed';if(p.status==='disabled')return hasLastCheck(p)?'failed':'pending';return 'pending'}",
-		"case 'sub_paused':return '<span class=\"badge warn\">订阅已暂停</span>'",
-		"if(st==='sub_paused'){toggleBtn='<button class=\"mini\" disabled title=\"请先在「订阅」页启用该订阅\">订阅已暂停</button>'}",
+		"case 'sub_paused':return '<span class=\"badge warn\">'+html(t('status_sub_paused'))+'</span>'",
+		"if(st==='sub_paused'){toggleBtn='<button class=\"mini\" disabled title=\"'+html(t('status_sub_paused'))+'\">'+html(t('status_sub_paused'))+'</button>'}",
 		"const showRegion=isKnownRegion(p)",
 		// BUG-51: allRegions/地域分布均经 isAvailable 过滤，因此不再计入 user_paused 节点。
 		"allRegions=Array.from(new Set(allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).map(regionOf))).sort()",
 		"allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).forEach",
-		"个可用",
-		"暂无可用地域数据",
+		"region_total_zero:",
+		"region_empty:",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -207,9 +205,9 @@ func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *test
 func TestDashboardPausedNodeTogglesToEnableButton(t *testing.T) {
 	checks := []string{
 		// toggleBtn 根据 nodeState 结果分支：paused -> 启用(true)，否则 停用(false)。
-		"const toggleBtn=(st==='paused')?",
-		",true)\">启用</button>'",
-		",false)\">停用</button>'",
+		"let toggleBtn;if(st==='sub_paused')",
+		",true)\">'+html(t('btn_enable'))+'</button>",
+		",false)\">'+html(t('btn_disable'))+'</button>",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -223,9 +221,9 @@ func TestDashboardPausedNodeTogglesToEnableButton(t *testing.T) {
 func TestDashboardShowsPausedSubscriptionCountsAndLabels(t *testing.T) {
 	checks := []string{
 		"const pausedCount=Number(sub.paused_count??Math.max(0,proxyCount-activeCount-disabledCount))",
-		"' 暂停 / '",
-		"html(disabledCount)+' 不可用",
-		"const badge=paused?'<span class=\"badge warn\">已暂停</span>'",
+		"sub_counts:'{a} 可用 / {p} 暂停 / {d} 不可用'",
+		"html(tf('sub_counts',{a:activeCount,p:pausedCount,d:disabledCount}))",
+		"const badge=paused?'<span class=\"badge warn\">'+html(t('sub_paused_badge'))+'</span>'",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -239,10 +237,10 @@ func TestDashboardShowsPausedSubscriptionCountsAndLabels(t *testing.T) {
 func TestDashboardShowsExplainedSingBoxStatusInsteadOfBoolFailure(t *testing.T) {
 	checks := []string{
 		"const status=String(st.singbox_status||(st.singbox_running?'running':'stopped'))",
-		"no_tunnel_nodes:'无需运行'",
-		"partial:'部分就绪'",
-		"failed:'启动失败'",
-		"<span class=\"k\">状态原因</span>",
+		"no_tunnel_nodes:t('singbox_no_tunnel')",
+		"partial:t('singbox_partial')",
+		"failed:t('singbox_failed')",
+		"html(t('singbox_reason'))",
 		"html(reason)",
 		"html(safe(st.singbox_ready_ports))+'/'+html(safe(st.singbox_total_ports))",
 	}
@@ -262,19 +260,19 @@ func TestDashboardShowsExplainedSingBoxStatusInsteadOfBoolFailure(t *testing.T) 
 func TestDashboardAsyncEntrypointsUseUnifiedErrorHandling(t *testing.T) {
 	checks := []string{
 		"async function runAsync(label, fn)",
-		"try{data=JSON.parse(text)}catch(err){if(!res.ok)throw new Error(res.statusText||('HTTP '+res.status));throw new Error('响应解析失败')}",
-		"async function refreshAll(){return runAsync('刷新失败'",
-		"async function addManualNode(){return runAsync('添加失败'",
-		"async function nodeModalSave(){return runAsync('保存失败'",
-		"async function toggleProxy(id,address,enable){return runAsync('操作失败'",
-		"async function addSubscription(){return runAsync('添加失败'",
-		"async function refreshSub(id){return runAsync('刷新失败'",
-		"async function refreshAllSubs(){return runAsync('刷新失败'",
-		"async function toggleSub(id){return runAsync('切换失败'",
-		"async function deleteSub(id){return runAsync('删除失败'",
-		"async function saveConfig(){return runAsync('保存失败'",
-		"setInterval(()=>runAsync('自动刷新失败'",
-		"setInterval(()=>runAsync('日志刷新失败'",
+		"try{data=JSON.parse(text)}catch(err){if(!res.ok)throw new Error(res.statusText||('HTTP '+res.status));throw new Error(t('err_op'))}",
+		"async function refreshAll(){return runAsync(t('err_op')",
+		"async function addManualNode(){return runAsync(t('err_add')",
+		"async function nodeModalSave(){return runAsync(t('err_save')",
+		"async function toggleProxy(id,address,enable){return runAsync(t('err_op')",
+		"async function addSubscription(){return runAsync(t('err_add')",
+		"async function refreshSub(id){return runAsync(t('err_refresh')",
+		"async function refreshAllSubs(){return runAsync(t('err_refresh')",
+		"async function toggleSub(id){return runAsync(t('err_toggle')",
+		"async function deleteSub(id){return runAsync(t('err_delete')",
+		"async function saveConfig(){return runAsync(t('err_save')",
+		"setInterval(()=>runAsync(t('err_op')",
+		"setInterval(()=>runAsync(t('err_log_refresh')",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -329,9 +327,9 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 
 func TestDashboardDoesNotShowOKBadgeForEmptySessionRegion(t *testing.T) {
 	checks := []string{
-		"const region=String(s.region||'').trim().toLowerCase()",
+		"const region=String(s.exit_region||'').trim().toLowerCase()",
 		// 空/unknown 地域不得渲染 ok 徽章；出口节点单独显示地址（不再拼 regionBadge+masked）。
-		"const regionBadge=region&&region!=='unknown'?'<span class=\"badge ok\">'+html(region).toUpperCase()+'</span>':'<span class=\"badge gray\">未知</span>'",
+		"const regionBadge=region&&region!=='unknown'?'<span class=\"badge ok\">'+html(region).toUpperCase()+'</span>':'<span class=\"badge gray\">'+html(t('session_unknown'))+'</span>'",
 		"s.route_label",
 		"sessionQualityBadge(s.quality_grade)",
 	}
@@ -439,7 +437,7 @@ func TestDashboardProtocolFilterUsesInboundCapabilities(t *testing.T) {
 // TestDashboardNodeOrbit 验证总览节点分布图：按可用地域+延迟档聚合，session 画连线，rAF 动画。
 func TestDashboardNodeOrbit(t *testing.T) {
 	checks := []string{
-		"<h3>节点分布</h3>",
+		`data-i18n="card_orbit"`,
 		`id="orbit-stage"`,
 		`id="orbit-svg"`,
 		`id="orbit-sats"`,
@@ -454,7 +452,7 @@ func TestDashboardNodeOrbit(t *testing.T) {
 		"orbitSessions",
 		"function renderWorldMap(){renderOrbitSystem()}",
 		"renderRegions();renderOrbitSystem()",
-		"orbitSessions=Array.isArray(sessions)?sessions:[];renderOrbitSystem()",
+		"function renderSessions(sessions){const list=Array.isArray(sessions)?sessions:[];orbitSessions=list;renderOrbitSystem()",
 		"S ≤200ms",
 		"会话连线（越粗绑定越多）",
 		"function updateSolarWind(",
@@ -538,7 +536,7 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 		"if(isDirectNode(p)){",
 		"const u=String(p.username||'')",
 		"const url=u?(scheme+'://'+encodeProxyUserInfo(u)+':'+encodeProxyUserInfo(String(p.password||''))+'@'+addr):(scheme+'://'+addr)",
-		"showToast('已复制直连地址')",
+		"showToast(t('toast_copied_direct'))",
 		// 网关复制：仍用 DSL + 密码（空则 PASSWORD 占位）。
 		"const rawPass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''",
 		"const pass=rawPass||'PASSWORD'",
@@ -578,17 +576,56 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 	}
 }
 
+// TestDashboardFormatAPIKeyTimeHidesGoZero 末次使用为零值时显示 --，不得出现 1/1/1。
+func TestDashboardFormatAPIKeyTimeHidesGoZero(t *testing.T) {
+	checks := []string{
+		"function formatAPIKeyTime(v)",
+		"if(s.indexOf('0001-')===0",
+		"if(d.getUTCFullYear()<1970)return '--'",
+		"const last=html(formatAPIKeyTime(k.last_used_at))",
+	}
+	for _, check := range checks {
+		if !strings.Contains(dashboardBundle, check) {
+			t.Fatalf("formatAPIKeyTime missing invariant %q", check)
+		}
+	}
+	// 回归：不得对任意非空字符串直接 new Date 后 toLocaleString（会把 0001 显示成 1/1/1）。
+	if strings.Contains(dashboardBundle, "function formatAPIKeyTime(v){if(!v)return '--';const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString()}") {
+		t.Fatal("formatAPIKeyTime still uses legacy form that renders Go zero time as year 1")
+	}
+}
+
+// TestDashboardProxyNameColumnIsNoteOnly 名称/备注列只显示用户备注；
+// 无备注必须留空，禁止回退 address（尤其 127.0.0.1 mixed 端口）。
+func TestDashboardProxyNameColumnIsNoteOnly(t *testing.T) {
+	if !strings.Contains(dashboardBundle, "function nodeLabel(p){return String((p&&p.note)||'').trim()}") {
+		t.Fatal("nodeLabel must read only note")
+	}
+	if !strings.Contains(dashboardBundle, "const noteText=nodeLabel(p);const label=noteText?html(noteText):''") {
+		t.Fatal("proxyRowHTML must use note-only label without address fallback")
+	}
+	if strings.Contains(dashboardBundle, "const labelText=noteText||addrText") {
+		t.Fatal("proxyRowHTML must not fall back name column to address")
+	}
+	if strings.Contains(dashboardBundle, "labelText=noteText||") {
+		t.Fatal("proxyRowHTML must not compose name label from non-note fields")
+	}
+}
+
 // TestDashboardProxyActionsUnifiedAcrossSources：
 // 手工与订阅节点共享测试/复制/停用；手工额外「管理」入口（地域/备注/删除），不再两套按钮列。
 func TestDashboardProxyActionsUnifiedAcrossSources(t *testing.T) {
 	checks := []string{
 		"const testBtn=",
-		"const copyBtn=",
-		"const toggleBtn=",
+		"let copyBtn",
+		"let toggleBtn",
+		"isGatewayNode(p)&&st!=='ok'",
+		"function gatewayCopyBlockedReason(p)",
+		"if(blocked){showToast(blocked);return}",
 		// 统一基础操作：测试 + 复制 + 停用/启用。
 		"const baseActions=testBtn+' '+copyBtn+' '+toggleBtn",
 		// 管理入口对所有来源开放（订阅节点与手工节点都可用），走统一应用内弹窗。
-		"const manageBtn='<button class=\"mini\" onclick=\"manageNode('+id+')\">管理</button>'",
+		"const manageBtn='<button class=\"mini\" onclick=\"manageNode('+id+')\">'+html(t('btn_manage'))+'</button>'",
 		"const actions=baseActions+' '+manageBtn",
 		"function manageNode(",
 	}
@@ -631,10 +668,10 @@ func TestDashboardHasSettingsEntry(t *testing.T) {
 func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 	checks := []string{
 		`AI 解锁：ChatGPT / Claude / Grok / Gemini（绿色畅通 / 红色阻断 / 淡灰未探测）`,
-		`<span class="tx">AI 解锁</span>`,
+		`data-i18n="th_ai">AI 解锁</span>`,
 		// 两处 colspan 为 14（加载中 + 无匹配节点，含勾选列）。
-		"<td colspan=\"14\" class=\"empty\">加载中</td>",
-		"<td colspan=\"14\" class=\"empty\">没有匹配节点</td>",
+		`class="empty" data-i18n="loading">加载中</td>`,
+		"<td colspan=\"14\" class=\"empty\">'+html(t('no_match'))+'</td>",
 		// 新增 aiBadges 函数。
 		"function aiBadges(",
 		// 行渲染引用 ai_reachability 字段。
@@ -650,7 +687,8 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 		`.ai-mark.na{color:var(--ai-unprobed)`,
 		`.filter-toggle{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border-radius:999px`,
 		`.filter-toggle[data-sel^="ai-"][data-state="unk"]{border-color:color-mix(in srgb,var(--ai-unprobed) 50%,var(--line));color:var(--ai-unprobed)`,
-		`const FILTER_CYCLE={'':'全部','unlocked':'畅通','blocked':'阻断','unprobed':'未探测','unknown':'未知'};`,
+		"function filterCycleLabel(v)",
+		"return t('filter_all')",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -683,10 +721,10 @@ func TestDashboardAdvancedFilterControls(t *testing.T) {
 		`id="status-filter"`,
 		`id="source-filter"`,
 		`id="purity-filter"`,
-		`<option value="clean">低风险`,
-		`<option value="caution">中风险`,
-		`<option value="risky">高风险`,
-		`<option value="unprobed">未探测`,
+		`value="clean" data-i18n="filter_purity_clean">低风险`,
+		`value="caution" data-i18n="filter_purity_caution">中风险`,
+		`value="risky" data-i18n="filter_purity_risky">高风险`,
+		`<option value="unprobed" data-i18n="filter_unprobed">未探测`,
 		`id="cf-filter"`,
 		`id="ai-openai-filter"`,
 		`id="ai-claude-filter"`,
@@ -751,8 +789,9 @@ func TestDashboardManualImportCopyAllowsAnyAnnotationPosition(t *testing.T) {
 
 func TestDashboardLogoutUsesPostFlow(t *testing.T) {
 	checks := []string{
-		`onclick="logout()" title="退出登录" aria-label="退出登录"`,
-		"async function logout(){return runAsync('退出失败'",
+		`onclick="logout()"`,
+		"data-i18n-title=\"logout\"",
+		"async function logout(){return runAsync(t('err_logout')",
 		"fetch('/logout',{method:'POST'})",
 	}
 	for _, check := range checks {
@@ -770,7 +809,7 @@ func TestDashboardLogoutUsesPostFlow(t *testing.T) {
 
 // TestDashboardAPIKeyManagementUI 验证任务7：API Key 管理 UI（列表/创建/吊销/删除）。
 // 列表展示名称、创建时间、末次使用、状态；创建后一次性明文 +「仅显示一次」；
-// 吊销/删除走 confirm；绝不在列表渲染 hash 字段。
+// 吊销/删除走应用内 showConfirm + i18n；绝不在列表渲染 hash 字段。
 func TestDashboardAPIKeyManagementUI(t *testing.T) {
 	checks := []string{
 		// API 路由调用。
@@ -785,8 +824,11 @@ func TestDashboardAPIKeyManagementUI(t *testing.T) {
 		"状态",
 		// 一次性明文提示。
 		"仅显示一次",
-		// 吊销/删除须 confirm。
-		"confirm(",
+		// 吊销/删除须应用内确认并走字典。
+		"showConfirm(t('confirm_revoke_key'))",
+		"showConfirm(t('confirm_delete_key'))",
+		"confirm_revoke_key:",
+		"confirm_delete_key:",
 		// 关键函数。
 		"function loadAPIKeys(",
 		"function createAPIKey(",
@@ -816,15 +858,12 @@ func TestDashboardAPIKeyManagementUI(t *testing.T) {
 		})
 	}
 
-	// revoke/delete 必须各自带 confirm（不只是页面别处的 confirm）。
+	// revoke/delete 必须各自带确认动作。
 	if !strings.Contains(dashboardBundle, "revoke") || !strings.Contains(dashboardBundle, "delete") {
 		t.Fatal("dashboardHTML missing revoke/delete API key actions")
 	}
-	// 至少两处 confirm 用于吊销/删除文案（中文）。
-	revokeConfirm := strings.Contains(dashboardBundle, "吊销") && strings.Contains(dashboardBundle, "confirm(")
-	deleteConfirm := strings.Contains(dashboardBundle, "删除") && strings.Contains(dashboardBundle, "confirm(")
-	if !revokeConfirm || !deleteConfirm {
-		t.Fatal("dashboardHTML missing confirm for API key revoke/delete")
+	if strings.Contains(dashboardBundle, "confirm('吊销该 API Key") || strings.Contains(dashboardBundle, "confirm('删除该 API Key") {
+		t.Fatal("dashboardHTML still uses browser confirm for API key revoke/delete")
 	}
 }
 
@@ -843,8 +882,10 @@ func TestDashboardOpenAPITab(t *testing.T) {
 		"curl",
 		"direct",
 		"gateway",
-		`class="lbl t">API</span>`,
-		"<h3>开放 API 说明</h3>",
+		`data-i18n="nav_api"`,
+		`data-i18n="card_openapi"`,
+		"开放 API 说明",
+		"Open API",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -1032,8 +1073,8 @@ func TestDashboardRegionZHCoversCommonExitCodes(t *testing.T) {
 	if !strings.Contains(dashboardBundle, "return REGION_ZH[c]||c.toUpperCase()") {
 		t.Fatal("regionDisplayName must fall back to uppercase ISO for unknown codes")
 	}
-	if !strings.Contains(dashboardBundle, "if(!c||c==='unknown')return '未知'") {
-		t.Fatal("regionDisplayName must map empty/unknown to 未知")
+	if !strings.Contains(dashboardBundle, "if(!c||c==='unknown')return t('session_unknown')") {
+		t.Fatal("regionDisplayName must map empty/unknown through the active language dictionary")
 	}
 }
 
@@ -1041,8 +1082,14 @@ func TestDashboardRegionZHCoversCommonExitCodes(t *testing.T) {
 // 避免地域列表过长把星系卡片撑高。
 func TestDashboardOverviewRegionConnectionSwap(t *testing.T) {
 	html := dashboardHTML
-	conn := strings.Index(html, `<h3>如何连接</h3>`)
-	region := strings.Index(html, `<h3>地域分布</h3>`)
+	conn := strings.Index(html, `data-i18n="card_connect"`)
+	if conn < 0 {
+		conn = strings.Index(html, `如何连接`)
+	}
+	region := strings.Index(html, `data-i18n="card_regions"`)
+	if region < 0 {
+		region = strings.Index(html, `地域分布`)
+	}
 	orbit := strings.Index(html, `id="orbit-stage"`)
 	if conn < 0 || region < 0 || orbit < 0 {
 		t.Fatalf("missing overview sections conn=%d region=%d orbit=%d", conn, region, orbit)
@@ -1057,6 +1104,29 @@ func TestDashboardOverviewRegionConnectionSwap(t *testing.T) {
 	}
 }
 
+// TestDashboardLangTogglePresent 右上角语言切换：中/英字典 + localStorage + 顶栏按钮。
+func TestDashboardLangTogglePresent(t *testing.T) {
+	checks := []string{
+		`id="lang-toggle"`,
+		`onclick="toggleLang()"`,
+		"function applyLang(lang)",
+		"function toggleLang()",
+		"function t(key)",
+		"localStorage.setItem('gg-lang'",
+		"localStorage.getItem('gg-lang')",
+		"nav_overview:'Overview'",
+		"nav_overview:'总览'",
+		"metric_upstreams:'Upstreams'",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) && !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("missing lang toggle invariant %q", check)
+			}
+		})
+	}
+}
+
 // TestDashboardSessionCardsMatchDesignFields 会话卡对齐设计：完整详情字段、出口节点优先 exit_ip、
 // 刷新保留展开状态（避免全部展开后定时刷新自动折叠）。
 func TestDashboardSessionCardsMatchDesignFields(t *testing.T) {
@@ -1066,7 +1136,9 @@ func TestDashboardSessionCardsMatchDesignFields(t *testing.T) {
 		"function sessionIsOpen(",
 		"let sessionOpenIDs={}",
 		"绑定节点 Proxy ID",
-		"DSL 地域请求",
+		"选路地域",
+		"出口地点",
+		"出口检查时间",
 		"解锁过滤",
 		"最近活跃",
 		"节点冷却",

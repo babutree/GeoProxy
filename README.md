@@ -223,7 +223,7 @@ Panels currently include:
 - Manual node add/edit/delete for manual nodes only; star, test, and copy full proxy URL.
 - Subscription management for adding, refreshing, pausing, enabling, and deleting subscription nodes, including optional custom request headers (JSON, e.g. `User-Agent`) for sources that reject the default client UA.
 - Active session monitor for username DSL session bindings.
-- Settings for proxy authentication, default region, country filters, session TTL, health interval, retry count, and `sing-box` path.
+- Settings for proxy authentication, default region, country filters, session TTL, health interval, retry count, and `sing-box` path. Changing the `sing-box` path is restart-required because the manager reads it at startup.
 - Logs.
 
 Subscription nodes are managed through subscription operations. Manual-node delete/edit actions do not apply to subscription-owned nodes.
@@ -265,6 +265,9 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `MAX_RETRY` | `3` | Retry count for failed upstream attempts. |
 | `SINGBOX_PATH` | `sing-box` | `sing-box` binary path. |
 | `SINGBOX_SHARD_COUNT` | `4` | Number of independent `sing-box` processes for encrypted tunnel nodes. |
+| `PUBLIC_HOST` | empty | Public hostname or IP used by read-only API gateway connections; imported only on first boot. |
+| `READONLY_API_KEYS` | empty | Comma-separated read-only API keys imported only on first boot; only SHA-256 hashes are persisted. Do not commit these keys. |
+| `READONLY_API_RATE_PER_MIN` | `60` | Per-key read-only API request limit, imported only on first boot. |
 | `DATA_DIR` | `os.UserConfigDir()/GeoProxy` when unset | Runtime directory for SQLite, `config.json`, subscriptions, and sing-box state. Docker Compose overrides it with `/app/data`; `HOST_DATA_DIR` controls the host bind source. |
 | `TZ` | `Asia/Shanghai` | Container timezone. |
 

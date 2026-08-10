@@ -36,7 +36,7 @@ func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
 		"blocked_countries":       cfg.BlockedCountries,
 		"allowed_countries":       cfg.AllowedCountries,
 		"readonly_fields":         []string{"http_port", "socks5_port", "webui_port"},
-		"restart_required_fields": []string{"http_port", "socks5_port", "webui_port"},
+		"restart_required_fields": []string{"http_port", "socks5_port", "webui_port", "singbox_path"},
 	})
 }
 
@@ -83,6 +83,11 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "port fields are read-only at runtime and require restart", http.StatusBadRequest)
 		return
 	}
+	requestedSingBoxPath := strings.TrimSpace(req.SingBoxPath)
+	if requestedSingBoxPath != strings.TrimSpace(oldCfg.SingBoxPath) {
+		jsonError(w, "singbox_path requires restart", http.StatusBadRequest)
+		return
+	}
 	newCfg := oldCfg
 	newCfg.ProxyAuthEnabled = req.ProxyAuthEnabled
 	newCfg.ProxyAuthUsername = username
@@ -96,7 +101,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	newCfg.DefaultRegion = config.NormalizeCountryCode(req.DefaultRegion)
 	newCfg.HealthIntervalMinutes = req.HealthIntervalMinutes
 	newCfg.MaxRetry = req.MaxRetry
-	newCfg.SingBoxPath = strings.TrimSpace(req.SingBoxPath)
+	newCfg.SingBoxPath = requestedSingBoxPath
 	newCfg.BlockedCountries = config.NormalizeCountryCodes(req.BlockedCountries)
 	newCfg.AllowedCountries = config.NormalizeCountryCodes(req.AllowedCountries)
 

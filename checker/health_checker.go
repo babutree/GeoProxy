@@ -18,9 +18,9 @@ const failDisableThreshold = 3
 // healthStore 健康检查对存储的最小依赖，便于单测注入假实现。
 type healthStore interface {
 	GetBatchForHealthCheck(batchSize int) ([]storage.Proxy, error)
-	UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error
-	RecordProxyUseByID(id int64, success bool) error
-	RecordProxyFailureByIDWithStatus(id int64, threshold int) (bool, error)
+	ApplyProbeObservation(identity storage.RouteIdentity, observation storage.ExitObservation) error
+	RecordProbeFailure(identity storage.RouteIdentity, observation storage.ExitObservation, threshold int) (bool, error)
+	DisableRouteForPolicy(identity storage.RouteIdentity) error
 }
 
 // healthValidator 健康检查对验证器的最小依赖。
@@ -36,9 +36,12 @@ type healthCheckSummary struct {
 
 // HealthChecker 健康检查器
 type HealthChecker struct {
-	storage   healthStore
-	validator healthValidator
-	cfg       *config.Config
+	storage healthStore
+
+	configMu         sync.RWMutex
+	validator        healthValidator
+	validatorFactory func(*config.Config) healthValidator
+	cfg              *config.Config
 
 	// 防止 RunOnce 重叠：已有检查在进行时，后发调用直接跳过。
 	running atomic.Bool
@@ -49,13 +52,17 @@ type HealthChecker struct {
 	bgStartCount int
 	bgStop       chan struct{}
 	bgDone       chan struct{}
+	bgWake       chan struct{}
 }
 
 func NewHealthChecker(s *storage.Storage, v *validator.Validator, cfg *config.Config) *HealthChecker {
 	return &HealthChecker{
 		storage:   s,
 		validator: v,
-		cfg:       cfg,
+		validatorFactory: func(live *config.Config) healthValidator {
+			return validator.NewWithConfig(live)
+		},
+		cfg: cfg,
 	}
 }
 
@@ -65,6 +72,40 @@ func newHealthCheckerForTest(s healthStore, v healthValidator, cfg *config.Confi
 		validator: v,
 		cfg:       cfg,
 	}
+}
+
+// UpdateConfig 原子替换健康检查使用的配置与验证器快照。
+// 相同指针表示配置未变化，不重复构造验证器。
+func (hc *HealthChecker) UpdateConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	hc.configMu.Lock()
+	if hc.cfg == cfg {
+		hc.configMu.Unlock()
+		return
+	}
+	hc.cfg = cfg
+	if hc.validatorFactory != nil {
+		hc.validator = hc.validatorFactory(cfg)
+	}
+	hc.configMu.Unlock()
+
+	hc.bgMu.Lock()
+	wake := hc.bgWake
+	hc.bgMu.Unlock()
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (hc *HealthChecker) snapshots() (*config.Config, healthValidator) {
+	hc.configMu.RLock()
+	defer hc.configMu.RUnlock()
+	return hc.cfg, hc.validator
 }
 
 func (hc *HealthChecker) isBackgroundStarted() bool {
@@ -89,9 +130,17 @@ func (hc *HealthChecker) RunOnce() {
 
 	start := time.Now()
 	log.Println("[health] 开始健康检查...")
+	if live := config.Get(); live != nil {
+		hc.UpdateConfig(live)
+	}
+	cfg, validate := hc.snapshots()
+	if cfg == nil || validate == nil {
+		log.Println("[health] 配置或验证器不可用，跳过本次")
+		return
+	}
 
 	// 批量获取需要检查的代理
-	proxies, err := hc.storage.GetBatchForHealthCheck(hc.cfg.HealthCheckBatchSize)
+	proxies, err := hc.storage.GetBatchForHealthCheck(cfg.HealthCheckBatchSize)
 	if err != nil {
 		log.Printf("[health] 获取检查批次失败: %v", err)
 		return
@@ -104,7 +153,7 @@ func (hc *HealthChecker) RunOnce() {
 
 	log.Printf("[health] 检查 %d 个代理", len(proxies))
 
-	summary := hc.checkBatch(proxies)
+	summary := hc.checkBatchWithValidator(proxies, validate)
 
 	elapsed := time.Since(start)
 	log.Printf("[health] 完成: 验证%d 有效%d 更新%d 禁用%d 耗时%v",
@@ -113,24 +162,54 @@ func (hc *HealthChecker) RunOnce() {
 
 // checkBatch 消费本批验证结果；禁用统计只采用存储写入返回的权威状态。
 func (hc *HealthChecker) checkBatch(proxies []storage.Proxy) healthCheckSummary {
+	_, validate := hc.snapshots()
+	return hc.checkBatchWithValidator(proxies, validate)
+}
+
+func (hc *HealthChecker) checkBatchWithValidator(proxies []storage.Proxy, validate healthValidator) healthCheckSummary {
 	var summary healthCheckSummary
-	for result := range hc.validator.ValidateStream(proxies) {
+	if validate == nil {
+		return summary
+	}
+	for result := range validate.ValidateStream(proxies) {
+		identity := storage.RouteIdentityFromProxy(result.Proxy)
+		observation := storage.ExitObservation{
+			ExitIP:          result.ExitIP,
+			ExitLocation:    result.ExitLocation,
+			LatencyMS:       int(result.Latency.Milliseconds()),
+			IPAPIIsScore:    result.Risk.IPAPIIsScore,
+			IPAPIFlags:      result.Risk.Flags,
+			IPAPIFlagsKnown: result.Risk.FlagsKnown,
+			CFBlocked:       result.Risk.CFBlocked,
+			AIReachability:  result.Risk.AIReachability,
+		}
 		if result.Valid {
 			summary.valid++
-			// 更新延迟和质量等级
-			latencyMs := int(result.Latency.Milliseconds())
-			if err := hc.storage.UpdateProxyExitInfo(result.Proxy.ID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.FlagsKnown, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
+			if err := hc.storage.ApplyProbeObservation(identity, observation); err != nil {
 				log.Printf("[health] 更新出口信息失败 id=%d: %v", result.Proxy.ID, err)
 			} else {
 				summary.updated++
 			}
-		} else {
-			disabled, err := hc.storage.RecordProxyFailureByIDWithStatus(result.Proxy.ID, failDisableThreshold)
-			if err != nil {
-				log.Printf("[health] 记录失败次数失败 id=%d: %v", result.Proxy.ID, err)
-			} else if disabled {
-				summary.disabled++
+			continue
+		}
+		if result.FailureReason == validator.FailureGeoRejected {
+			// 地域拒绝属于当前策略，不是上游或传输故障；不得启动系统禁用保留期。
+			if err := hc.storage.DisableRouteForPolicy(identity); err != nil {
+				log.Printf("[health] 策略禁用地域拒绝节点失败 id=%d: %v", result.Proxy.ID, err)
+				continue
 			}
+			if err := hc.storage.ApplyProbeObservation(identity, observation); err != nil {
+				log.Printf("[health] 写回地域拒绝出口信息失败 id=%d: %v", result.Proxy.ID, err)
+			} else {
+				summary.updated++
+			}
+			continue
+		}
+		disabled, err := hc.storage.RecordProbeFailure(identity, observation, failDisableThreshold)
+		if err != nil {
+			log.Printf("[health] 记录失败次数失败 id=%d: %v", result.Proxy.ID, err)
+		} else if disabled {
+			summary.disabled++
 		}
 	}
 	return summary
@@ -148,25 +227,41 @@ func (hc *HealthChecker) StartBackground() {
 	hc.bgStartCount++
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	wake := make(chan struct{}, 1)
 	hc.bgStop = stop
 	hc.bgDone = done
-	intervalMin := hc.cfg.HealthIntervalMinutes
+	hc.bgWake = wake
 	hc.bgMu.Unlock()
 
-	ticker := time.NewTicker(time.Duration(intervalMin) * time.Minute)
 	go func() {
 		defer close(done)
-		defer ticker.Stop()
 		for {
+			interval := hc.backgroundInterval()
+			timer := time.NewTimer(interval)
 			select {
-			case <-ticker.C:
+			case <-timer.C:
 				hc.RunOnce()
+			case <-wake:
+				if !timer.Stop() {
+					<-timer.C
+				}
 			case <-stop:
+				if !timer.Stop() {
+					<-timer.C
+				}
 				return
 			}
 		}
 	}()
-	log.Printf("[health] 健康检查器已启动，间隔 %d 分钟", intervalMin)
+	log.Printf("[health] 健康检查器已启动，间隔 %v", hc.backgroundInterval())
+}
+
+func (hc *HealthChecker) backgroundInterval() time.Duration {
+	cfg, _ := hc.snapshots()
+	if cfg == nil || cfg.HealthIntervalMinutes <= 0 {
+		return time.Minute
+	}
+	return time.Duration(cfg.HealthIntervalMinutes) * time.Minute
 }
 
 // StopBackground 停止后台定时器（测试与优雅关闭用）；未启动时直接返回。
@@ -181,6 +276,7 @@ func (hc *HealthChecker) StopBackground() {
 	hc.bgStarted = false
 	hc.bgStop = nil
 	hc.bgDone = nil
+	hc.bgWake = nil
 	hc.bgMu.Unlock()
 
 	close(stop)

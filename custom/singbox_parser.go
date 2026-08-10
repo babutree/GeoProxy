@@ -54,35 +54,32 @@ func parseSingBoxJSON(data []byte) ([]ParsedNode, error) {
 	total := len(cfg.Outbounds)
 	var nodes []ParsedNode
 	skippedNonProxy := 0
-	skippedNoServer := 0
-
 	for _, ob := range cfg.Outbounds {
 		typ := strings.ToLower(getStr(ob, "type"))
-
-		// BUG-61: 只保留白名单内的真实代理类型，跳过 selector/urltest/direct/block/dns 等。
 		if !singBoxProxyTypes[typ] {
 			skippedNonProxy++
 			continue
 		}
-
-		// BUG-61: 无 server 的项跳过（如某些 direct 变体或残缺配置）。
-		if getStr(ob, "server") == "" {
-			skippedNoServer++
-			continue
+		server := getStr(ob, "server")
+		port, err := parseProxyPort(ob["server_port"])
+		if err != nil {
+			return nil, fmt.Errorf("sing-box 代理端点无效: %w", err)
 		}
-
+		if err := validateProxyEndpoint(server, port); err != nil {
+			return nil, fmt.Errorf("sing-box 代理端点无效: %w", err)
+		}
 		node := singBoxOutboundToNode(ob, typ)
 		if node == nil {
-			continue
+			return nil, fmt.Errorf("sing-box 代理节点无法转换: %s", typ)
 		}
 		nodes = append(nodes, *node)
 	}
 
-	log.Printf("[custom] sing-box JSON 解析：outbounds 共 %d 项，提取代理 %d 个，跳过非代理 %d，跳过无 server %d",
-		total, len(nodes), skippedNonProxy, skippedNoServer)
+	log.Printf("[custom] sing-box JSON 解析：outbounds 共 %d 项，提取代理 %d 个，跳过非代理 %d",
+		total, len(nodes), skippedNonProxy)
 
 	if len(nodes) == 0 {
-		return nil, fmt.Errorf("sing-box outbounds 中未找到有效代理节点（共 %d 项，均为非代理类型或缺少 server）", total)
+		return nil, fmt.Errorf("sing-box outbounds 中未找到有效代理节点（共 %d 项，均为非代理类型）", total)
 	}
 
 	return nodes, nil
@@ -90,10 +87,16 @@ func parseSingBoxJSON(data []byte) ([]ParsedNode, error) {
 
 // singBoxOutboundToNode 将单个 sing-box outbound map 转换为 ParsedNode，
 // 并把 sing-box 字段映射为 Clash 风格 Raw 供 buildOutbound 消费。
-// tag 作为节点名。返回 nil 表示端口缺失等无法构建的情况。
+// tag 作为节点名。返回 nil 表示服务器或端口端点无效。
 func singBoxOutboundToNode(ob map[string]interface{}, typ string) *ParsedNode {
 	server := getStr(ob, "server")
-	port := getInt(ob, "server_port")
+	port, err := parseProxyPort(ob["server_port"])
+	if err != nil {
+		return nil
+	}
+	if err := validateProxyEndpoint(server, port); err != nil {
+		return nil
+	}
 	name := getStr(ob, "tag")
 	if name == "" {
 		name = server
@@ -142,7 +145,7 @@ func singBoxOutboundToNode(ob map[string]interface{}, typ string) *ParsedNode {
 		if plugin := getStr(ob, "plugin"); plugin != "" {
 			raw["plugin"] = plugin
 			if opts := getStr(ob, "plugin_opts"); opts != "" {
-				raw["plugin-opts-raw"] = opts // 保留原始串，buildOutbound 目前从 map 读，见下游说明
+				raw["plugin-opts-raw"] = opts // 保留原始串，由 buildOutbound 直接传入 sing-box
 			}
 		}
 

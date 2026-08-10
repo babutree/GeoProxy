@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/babutree/GeoProxy/storage"
 )
@@ -13,11 +14,13 @@ type sessionRow struct {
 	SessionID                string `json:"session_id"`
 	ProxyID                  int64  `json:"proxy_id"`
 	RouteLabel               string `json:"route_label"`
-	Node                     string `json:"node"` // 展示用出口节点：优先出口 IP，本机 mixed 地址不直接当出口
+	Node                     string `json:"node"` // 展示用真实出口 IP；未验证时留空，入口地址只在 bind_address 返回
 	BindAddress              string `json:"bind_address"`
-	Region                   string `json:"region"`
-	RegionReq                string `json:"region_req"`
+	SelectedRegion           string `json:"selected_region"`
 	ExitIP                   string `json:"exit_ip"`
+	ExitRegion               string `json:"exit_region"`
+	ExitLocation             string `json:"exit_location"`
+	ExitCheckedAt            string `json:"exit_checked_at"`
 	Protocol                 string `json:"protocol"`
 	Source                   string `json:"source"`
 	SubscriptionName         string `json:"subscription_name"`
@@ -93,15 +96,13 @@ func (s *Server) apiSessions(w http.ResponseWriter, _ *http.Request) {
 	}
 	rows := make([]sessionRow, 0, len(bindings))
 	for _, binding := range bindings {
-		region := strings.TrimSpace(binding.Region)
+		selectedRegion := strings.ToLower(strings.TrimSpace(binding.Region))
 		row := sessionRow{
 			SessionID:                binding.SessionID,
 			ProxyID:                  binding.ProxyID,
-			RouteLabel:               sessionRouteLabel(region, binding.SessionID),
-			Node:                     binding.NodeAddress,
+			RouteLabel:               sessionRouteLabel(selectedRegion, binding.SessionID),
 			BindAddress:              binding.NodeAddress,
-			Region:                   region,
-			RegionReq:                strings.ToLower(region),
+			SelectedRegion:           selectedRegion,
 			RemainingTTLSeconds:      int64(s.affinity.RemainingTTL(binding).Seconds()),
 			MaxSessionsPerProxy:      maxSessions,
 			ActiveSessionsOnProxy:    activeByProxy[binding.ProxyID],
@@ -110,11 +111,10 @@ func (s *Server) apiSessions(w http.ResponseWriter, _ *http.Request) {
 		if !binding.LastActive.IsZero() {
 			row.LastActive = binding.LastActive.Local().Format("2006-01-02 15:04:05")
 		}
-		// 用 ProxyID 补全出口/协议/来源/品质/延迟。隧道绑定地址常为 127.0.0.1:mixed，
-		// 展示出口节点时优先 exit_ip（真实出口），避免把本机 mixed 当成出口节点。
+		// 用 ProxyID 补全出口/协议/来源/品质/延迟。只有经验证的出口 IP 才能
+		// 出现在 node；绑定地址属于入口，单独保留在 bind_address。
 		if binding.ProxyID > 0 && s.storage != nil {
 			if p, err := s.storage.GetProxyByID(binding.ProxyID); err == nil && p != nil {
-				row.ExitIP = p.ExitIP
 				row.QualityGrade = p.QualityGrade
 				row.Latency = p.Latency
 				row.Protocol = p.Protocol
@@ -130,20 +130,35 @@ func (s *Server) apiSessions(w http.ResponseWriter, _ *http.Request) {
 				} else if p.Source == storage.SourceManual {
 					row.SubscriptionName = "手工"
 				}
-				// 出口节点展示：真实 exit_ip > 非本机 address > bind_address
-				if p.ExitIP != "" {
+				if p.ExitIP != "" && p.ExitLocation != "" {
+					row.ExitIP = p.ExitIP
 					row.Node = p.ExitIP
-				} else if p.Address != "" && !isLocalMixedDisplayAddress(p.Address) {
-					row.Node = p.Address
-				} else if isLocalMixedDisplayAddress(binding.NodeAddress) && p.Address != "" {
-					// 仍是本地 mixed：至少展示存储 address（仍可能是 127.0.0.1），并依赖 exit_ip 字段
-					row.Node = p.Address
+					row.ExitLocation = p.ExitLocation
+					row.ExitRegion = sessionExitRegion(p.ExitLocation)
+					if !p.ExitCheckedAt.IsZero() {
+						row.ExitCheckedAt = p.ExitCheckedAt.UTC().Format(time.RFC3339)
+					}
 				}
 			}
 		}
 		rows = append(rows, row)
 	}
 	jsonOK(w, rows)
+}
+
+// sessionExitRegion 从验证器写入的 "US Seattle" 形式地点提取可信 alpha-2 国家码。
+func sessionExitRegion(exitLocation string) string {
+	parts := strings.Fields(exitLocation)
+	if len(parts) == 0 || len(parts[0]) != 2 {
+		return ""
+	}
+	region := strings.ToLower(parts[0])
+	for _, ch := range region {
+		if ch < 'a' || ch > 'z' {
+			return ""
+		}
+	}
+	return region
 }
 
 // isLocalMixedDisplayAddress 判断是否为本机 tunnel/mixed 绑定地址（不可当“出口节点”展示）。

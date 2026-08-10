@@ -110,7 +110,7 @@ func TestConfigGetReturnsActiveGatewayFieldsOnly(t *testing.T) {
 	server.cfg.DefaultRegion = "jp"
 	server.cfg.HealthIntervalMinutes = 6
 	server.cfg.MaxRetry = 2
-	server.cfg.SingBoxPath = "sing-box.exe"
+	server.cfg.SingBoxPath = "sing-box"
 	server.cfg.AllowedCountries = []string{"JP", "US"}
 	server.cfg.BlockedCountries = []string{"CN"}
 	setTestGlobalConfig(t, server.cfg)
@@ -149,7 +149,7 @@ func TestConfigSavePersistsActiveEditableFields(t *testing.T) {
 	server.cfg.ProxyAuthPassword = "old-secret"
 	server.cfg.ProxyAuthPasswordHash = oldHash
 	setTestGlobalConfig(t, server.cfg)
-	payload := `{"proxy_auth_enabled":true,"proxy_auth_username":"edge","proxy_auth_password":"","session_ttl_minutes":25,"default_region":" us ","health_check_interval":8,"max_retry":0,"singbox_path":"D:/tools/sing-box.exe","allowed_countries":[" us ","JP","jp","bad"],"blocked_countries":[" cn "]}`
+	payload := `{"proxy_auth_enabled":true,"proxy_auth_username":"edge","proxy_auth_password":"","session_ttl_minutes":25,"default_region":" us ","health_check_interval":8,"max_retry":0,"singbox_path":"sing-box","allowed_countries":[" us ","JP","jp","bad"],"blocked_countries":[" cn "]}`
 
 	serveAuthenticated(t, server, "/api/config/save", payload, http.StatusOK)
 
@@ -164,7 +164,7 @@ func TestConfigSavePersistsActiveEditableFields(t *testing.T) {
 	if server.cfg.SessionTTLMinutes != 25 || server.cfg.DefaultRegion != "US" || server.cfg.HealthIntervalMinutes != 8 || server.cfg.MaxRetry != 0 {
 		t.Fatalf("runtime config = ttl:%d region:%q health:%d retry:%d", server.cfg.SessionTTLMinutes, server.cfg.DefaultRegion, server.cfg.HealthIntervalMinutes, server.cfg.MaxRetry)
 	}
-	if server.cfg.SingBoxPath != "D:/tools/sing-box.exe" {
+	if server.cfg.SingBoxPath != "sing-box" {
 		t.Fatalf("SingBoxPath = %q", server.cfg.SingBoxPath)
 	}
 	if !reflect.DeepEqual(server.cfg.AllowedCountries, []string{"US", "JP"}) || !reflect.DeepEqual(server.cfg.BlockedCountries, []string{"CN"}) {
@@ -188,6 +188,33 @@ func TestConfigSaveRejectsRuntimePortChanges(t *testing.T) {
 
 	if got := config.Get(); got.HTTPPort != ":7802" {
 		t.Fatalf("HTTPPort after rejected save = %q, want :7802", got.HTTPPort)
+	}
+}
+
+func TestConfigSaveRejectsSingBoxPathChanges(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.SingBoxPath = "sing-box"
+	server.cfg.ProxyAuthUsername = "old"
+	server.cfg.SessionTTLMinutes = 10
+	server.cfg.HealthIntervalMinutes = 5
+	setTestGlobalConfig(t, server.cfg)
+	payload := `{"proxy_auth_username":"new","session_ttl_minutes":25,"health_check_interval":8,"max_retry":1,"singbox_path":"D:/tools/sing-box.exe"}`
+	req := authenticatedJSONRequest(http.MethodPost, "/api/config/save", payload)
+	rec := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if rec.Body.String() != "{\"error\":\"singbox_path requires restart\"}\n" {
+		t.Fatalf("unexpected error body: %s", rec.Body.String())
+	}
+	if server.cfg.SingBoxPath != "sing-box" || server.cfg.ProxyAuthUsername != "old" || server.cfg.SessionTTLMinutes != 10 {
+		t.Fatalf("runtime config changed after rejected path: %#v", server.cfg)
+	}
+	if got := config.Get(); got.SingBoxPath != "sing-box" || got.ProxyAuthUsername != "old" || got.SessionTTLMinutes != 10 {
+		t.Fatalf("persisted config changed after rejected path: %#v", got)
 	}
 }
 
@@ -929,6 +956,37 @@ func TestIndexWithoutAuthShowsOnlyNeutralLogin(t *testing.T) {
 	assertNoBusinessTerms(t, body)
 }
 
+// TestLoginPageSupportsSharedLanguageToggle 登录页与后台共用 gg-lang，
+// 必须提供语言切换按钮、中英文字典与 applyLoginLang 持久化逻辑。
+func TestLoginPageSupportsSharedLanguageToggle(t *testing.T) {
+	for _, page := range []string{loginHTML, loginHTMLWithError} {
+		for _, want := range []string{
+			`id="lang-toggle"`,
+			`onclick="toggleLoginLang()"`,
+			`localStorage.setItem('gg-lang'`,
+			`localStorage.getItem('gg-lang')`,
+			`doc_title:'GeoProxy Gateway Login'`,
+			`heading:'Admin login'`,
+			`submit:'Sign in'`,
+			`doc_title:'GeoProxy Gateway 登录'`,
+			`heading:'管理员登录'`,
+			`data-i18n="heading"`,
+			`data-i18n="password"`,
+			`data-i18n="submit"`,
+		} {
+			if !strings.Contains(page, want) {
+				t.Fatalf("login page missing i18n contract %q", want)
+			}
+		}
+	}
+	if !strings.Contains(loginHTMLWithError, `class="error show"`) {
+		t.Fatal("error login page must keep visible .error.show class")
+	}
+	if strings.Contains(loginHTML, `class="error show"`) {
+		t.Fatal("neutral login page must not show error by default")
+	}
+}
+
 func TestSessionAPIRequiresAuthentication(t *testing.T) {
 	server := newTestServer(t)
 	server.affinity.Set("browser-1", "203.0.113.10:8080", "us")
@@ -961,8 +1019,7 @@ func TestSessionAPIReturnsActiveBindings(t *testing.T) {
 		RouteLabel          string `json:"route_label"`
 		Node                string `json:"node"`
 		BindAddress         string `json:"bind_address"`
-		Region              string `json:"region"`
-		RegionReq           string `json:"region_req"`
+		SelectedRegion      string `json:"selected_region"`
 		RemainingTTLSeconds int64  `json:"remaining_ttl_seconds"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
@@ -971,14 +1028,11 @@ func TestSessionAPIReturnsActiveBindings(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("len(rows) = %d, want 1: %#v", len(rows), rows)
 	}
-	if rows[0].SessionID != "browser-1" || rows[0].Node != "203.0.113.10:8080" || rows[0].Region != "us" {
+	if rows[0].SessionID != "browser-1" || rows[0].Node != "" || rows[0].SelectedRegion != "us" {
 		t.Fatalf("row = %#v", rows[0])
 	}
 	if rows[0].RouteLabel != "region-us-session-browser-1" {
 		t.Fatalf("route_label = %q, want region-us-session-browser-1", rows[0].RouteLabel)
-	}
-	if rows[0].RegionReq != "us" {
-		t.Fatalf("region_req = %q, want us", rows[0].RegionReq)
 	}
 	if rows[0].BindAddress != "203.0.113.10:8080" {
 		t.Fatalf("bind_address = %q", rows[0].BindAddress)
@@ -1022,8 +1076,9 @@ func TestSessionAPISortsByExpiryDescendingWithStableTieBreak(t *testing.T) {
 	}
 }
 
-// TestSessionAPIPrefersExitIPOverLocalMixedBind 隧道会话绑定地址常为 127.0.0.1:mixed，
-// 展示出口节点必须优先真实 exit_ip，不能把本机 mixed 当地址出口。
+// TestSessionAPISeparatesRequestedAndVerifiedExitRegion 确认会话请求地域与
+// 已验证出口地域分别返回；入口/请求 GB 不能伪装成当前实际 US 出口。
+// 隧道会话绑定地址常为 127.0.0.1:mixed，展示出口节点必须优先真实 exit_ip。
 func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
 	server := newTestServer(t)
 	if err := server.storage.AddManualProxy("127.0.0.1:31001", "socks5", "jp", "tunnel-note"); err != nil {
@@ -1033,10 +1088,10 @@ func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProxyByIdentity() error = %v", err)
 	}
-	if err := server.storage.UpdateProxyExitInfo(proxy.ID, "133.242.1.2", "JP", 312, 0, "", true, 0, ""); err != nil {
+	if err := server.storage.UpdateProxyExitInfo(proxy.ID, "81.90.21.44", "US Seattle", 312, 0, "", true, 0, ""); err != nil {
 		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
 	}
-	server.affinity.SetProxy("app01", proxy.ID, "127.0.0.1:31001", "jp")
+	server.affinity.SetProxy("app01", proxy.ID, "127.0.0.1:31001", "gb")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	req.AddCookie(&http.Cookie{Name: "session", Value: newSession()})
@@ -1045,15 +1100,27 @@ func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	var rows []sessionRow
+	var rows []struct {
+		SessionID      string `json:"session_id"`
+		Node           string `json:"node"`
+		BindAddress    string `json:"bind_address"`
+		ProxyID        int64  `json:"proxy_id"`
+		ExitIP         string `json:"exit_ip"`
+		ExitRegion     string `json:"exit_region"`
+		ExitLocation   string `json:"exit_location"`
+		ExitCheckedAt  string `json:"exit_checked_at"`
+		SelectedRegion string `json:"selected_region"`
+		Source         string `json:"source"`
+		Latency        int    `json:"latency"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("len=%d want 1", len(rows))
 	}
-	if rows[0].Node != "133.242.1.2" {
-		t.Fatalf("node display = %q, want exit_ip 133.242.1.2 (not local mixed)", rows[0].Node)
+	if rows[0].Node != "81.90.21.44" || rows[0].ExitIP != "81.90.21.44" {
+		t.Fatalf("exit display = node:%q exit_ip:%q, want verified US exit 81.90.21.44", rows[0].Node, rows[0].ExitIP)
 	}
 	if rows[0].BindAddress != "127.0.0.1:31001" {
 		t.Fatalf("bind_address = %q, want local mixed", rows[0].BindAddress)
@@ -1061,8 +1128,17 @@ func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
 	if rows[0].ProxyID != proxy.ID {
 		t.Fatalf("proxy_id = %d, want %d", rows[0].ProxyID, proxy.ID)
 	}
-	if rows[0].ExitIP != "133.242.1.2" || rows[0].Latency != 312 || rows[0].QualityGrade == "" && false {
-		// quality may be computed by UpdateProxyExitInfo path
+	if rows[0].ExitRegion != "us" || rows[0].ExitLocation != "US Seattle" {
+		t.Fatalf("verified exit = region:%q location:%q, want us/US Seattle", rows[0].ExitRegion, rows[0].ExitLocation)
+	}
+	if rows[0].SelectedRegion != "gb" {
+		t.Fatalf("selected_region = %q, want binding region gb", rows[0].SelectedRegion)
+	}
+	if rows[0].ExitCheckedAt == "" {
+		t.Fatal("exit_checked_at is empty; session cannot distinguish stale exit snapshot")
+	}
+	if rows[0].Latency != 312 {
+		t.Fatalf("latency = %d, want 312", rows[0].Latency)
 	}
 	if rows[0].Source != storage.SourceManual {
 		t.Fatalf("source = %q, want manual", rows[0].Source)
@@ -1382,7 +1458,7 @@ func newTestServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	sessions := affinity.New(10 * time.Minute)
-	return New(store, &config.Config{WebUIPort: ":0"}, sessions, nil, make(chan struct{}, 1))
+	return New(store, &config.Config{WebUIPort: ":0", SingBoxPath: "sing-box"}, sessions, nil, make(chan struct{}, 1))
 }
 
 func authenticatedJSONRequest(method, path, body string) *http.Request {
@@ -1611,8 +1687,9 @@ func TestProxiesAPIReportsParentSubscriptionStatus(t *testing.T) {
 			if status != "paused" {
 				t.Fatalf("subscription row subscription_status = %q, want paused; row=%#v", status, row)
 			}
-			if st, _ := row["status"].(string); st != "active" {
-				t.Fatalf("paused-parent proxy status = %q, want still active row color", st)
+			// 暂停订阅必须同步禁用其节点（status=disabled），不能只靠 scope 过滤。
+			if st, _ := row["status"].(string); st != "disabled" {
+				t.Fatalf("paused-parent proxy status = %q, want disabled", st)
 			}
 		case storage.SourceManual, "":
 			sawManual = true

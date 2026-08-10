@@ -267,21 +267,13 @@ func TestParseSingBoxJSON_OnlyNonProxy(t *testing.T) {
 	t.Logf("全非代理错误信息: %v", err)
 }
 
-func TestParseSingBoxJSON_SkipNoServer(t *testing.T) {
-	// 一个合法 vless + 一个缺 server 的 vless → 只保留 1 个。
+func TestParseSingBoxJSONRejectsMissingServer(t *testing.T) {
 	cfg := `{"outbounds":[
 		{"type":"vless","tag":"good","server":"a.com","server_port":443,"uuid":"u1"},
 		{"type":"vless","tag":"noserver","server_port":443,"uuid":"u2"}
 	]}`
-	nodes, err := parseSingBoxJSON([]byte(cfg))
-	if err != nil {
-		t.Fatalf("不应出错: %v", err)
-	}
-	if len(nodes) != 1 {
-		t.Fatalf("期望 1 个节点（跳过无 server），实际 %d", len(nodes))
-	}
-	if nodes[0].Name != "good" {
-		t.Errorf("保留的节点应为 good，实际 %s", nodes[0].Name)
+	if _, err := parseSingBoxJSON([]byte(cfg)); err == nil {
+		t.Fatal("recognized proxy without server must fail closed")
 	}
 }
 

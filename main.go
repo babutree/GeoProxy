@@ -14,6 +14,15 @@ import (
 	"github.com/babutree/GeoProxy/webui"
 )
 
+type startupCountryFilterStore interface {
+	DisableNotAllowedCountries([]string) (int64, error)
+	DisableBlockedCountries([]string) (int64, error)
+}
+
+type healthConfigUpdater interface {
+	UpdateConfig(*config.Config)
+}
+
 func main() {
 	// 初始化日志收集器
 	logger.Init()
@@ -38,16 +47,19 @@ func main() {
 	defer store.Close()
 
 	// 初始化核心模块
-	validate := validator.New(cfg.ValidateConcurrency, cfg.ValidateTimeout, cfg.ValidateURL)
+	validate := validator.NewWithConfig(cfg)
 	healthChecker := checker.NewHealthChecker(store, validate, cfg)
 
-	// 地理过滤只禁用节点，不删除已有数据库行。
-	if len(cfg.AllowedCountries) > 0 {
-		if disabled, err := store.DisableNotAllowedCountries(cfg.AllowedCountries); err == nil && disabled > 0 {
+	// 地理过滤只禁用节点，不删除已有数据库行。策略写入失败时必须停止启动，
+	// 否则未被禁用的节点会在策略之外继续参与选路。
+	disabled, err := applyStartupCountryFilters(store, cfg)
+	if err != nil {
+		log.Fatalf("[main] 应用国家过滤策略失败: %v", err)
+	}
+	if disabled > 0 {
+		if len(cfg.AllowedCountries) > 0 {
 			log.Printf("[main] 🔒 已禁用 %d 个非白名单节点", disabled)
-		}
-	} else if len(cfg.BlockedCountries) > 0 {
-		if disabled, err := store.DisableBlockedCountries(cfg.BlockedCountries); err == nil && disabled > 0 {
+		} else {
 			log.Printf("[main] 🔒 已禁用 %d 个屏蔽国家节点", disabled)
 		}
 	}
@@ -65,6 +77,7 @@ func main() {
 
 	// 配置变更通知 channel
 	configChanged := make(chan struct{}, 1)
+	go consumeConfigChanges(configChanged, healthChecker)
 
 	// 启动 WebUI（保留订阅管理器和配置变更通知）
 	ui := webui.New(store, cfg, sessionStore, customMgr, configChanged)
@@ -86,6 +99,24 @@ func main() {
 	// 启动 SOCKS5 代理入口（阻塞）
 	if err := socks5Server.Start(); err != nil {
 		log.Fatalf("[main] SOCKS5 代理服务失败: %v", err)
+	}
+}
+
+func applyStartupCountryFilters(store startupCountryFilterStore, cfg *config.Config) (int64, error) {
+	if len(cfg.AllowedCountries) > 0 {
+		return store.DisableNotAllowedCountries(cfg.AllowedCountries)
+	}
+	if len(cfg.BlockedCountries) > 0 {
+		return store.DisableBlockedCountries(cfg.BlockedCountries)
+	}
+	return 0, nil
+}
+
+func consumeConfigChanges(changes <-chan struct{}, updater healthConfigUpdater) {
+	for range changes {
+		if cfg := config.Get(); cfg != nil {
+			updater.UpdateConfig(cfg)
+		}
 	}
 }
 

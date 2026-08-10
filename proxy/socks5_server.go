@@ -168,7 +168,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		idleTimeout := s.socks5RelayIdleTimeout()
 		relayResult := relaySOCKS5(clientConn, upstreamConn, idleTimeout, func() {
 			recordSuccess.Do(func() {
-				if err := s.storage.RecordProxyUseByID(p.ID, true); err != nil {
+				if err := s.storage.RecordForwardSuccess(storage.RouteIdentityFromProxy(*p)); err != nil {
 					log.Printf("[socks5] 记录节点成功使用失败 id=%d: %v", p.ID, err)
 				}
 			})
@@ -538,6 +538,7 @@ func (s *SOCKS5Server) selectSOCKS5Proxy(route auth.ParsedUsername, tried []int6
 // socks5Handshake 处理 SOCKS5 握手
 func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (auth.ParsedUsername, error) {
 	buf := make([]byte, 257)
+	cfg := s.runtimeConfig()
 
 	// 读取客户端问候: [VER(1), NMETHODS(1), METHODS(1-255)]
 	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
@@ -555,7 +556,7 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (auth.ParsedUsername, erro
 	}
 
 	// 检查是否需要认证
-	needAuth := s.runtimeConfig().ProxyAuthEnabled
+	needAuth := cfg != nil && cfg.ProxyAuthEnabled
 	methods := buf[2 : 2+nmethods]
 
 	// 选择认证方式
@@ -589,7 +590,7 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (auth.ParsedUsername, erro
 
 	// 如果需要认证，进行用户名/密码认证
 	if selectedMethod == 0x02 {
-		return s.socks5Auth(conn)
+		return s.socks5AuthWithConfig(conn, cfg)
 	}
 
 	return auth.ParsedUsername{}, nil
@@ -597,6 +598,13 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (auth.ParsedUsername, erro
 
 // socks5Auth 处理 SOCKS5 用户名/密码认证
 func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
+	return s.socks5AuthWithConfig(conn, s.runtimeConfig())
+}
+
+func (s *SOCKS5Server) socks5AuthWithConfig(conn net.Conn, cfg *config.Config) (auth.ParsedUsername, error) {
+	if cfg == nil {
+		return auth.ParsedUsername{}, fmt.Errorf("runtime config unavailable")
+	}
 	buf := make([]byte, 513)
 
 	// 读取认证请求: [VER(1), ULEN(1), UNAME(1-255), PLEN(1), PASSWD(1-255)]
@@ -632,7 +640,7 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
 	password := string(buf[2+ulen+1 : 2+ulen+1+plen])
 
 	// 验证用户名和密码
-	if !auth.VerifyPassword(parsed.Base, password, s.runtimeConfig().ProxyAuthUsername, s.runtimeConfig().ProxyAuthPassword, s.runtimeConfig().ProxyAuthPasswordHash) {
+	if !auth.VerifyPassword(parsed.Base, password, cfg.ProxyAuthUsername, cfg.ProxyAuthPassword, cfg.ProxyAuthPasswordHash) {
 		// 认证失败: [VER(1), STATUS(1)]
 		conn.Write([]byte{0x01, 0x01})
 		return auth.ParsedUsername{}, fmt.Errorf("authentication failed")
@@ -682,6 +690,9 @@ func (s *SOCKS5Server) readSOCKS5Request(conn net.Conn) (string, error) {
 		return "", err
 	}
 	port := binary.BigEndian.Uint16(portBytes)
+	if port == 0 {
+		return "", fmt.Errorf("invalid target port: 0")
+	}
 
 	return net.JoinHostPort(host, strconv.Itoa(int(port))), nil
 }
@@ -707,7 +718,11 @@ func readSOCKS5Address(conn io.Reader, atyp byte) (string, error) {
 		if _, err := io.ReadFull(conn, addr); err != nil {
 			return "", err
 		}
-		return string(addr), nil
+		host := string(addr)
+		if err := validateTargetHost(host); err != nil {
+			return "", err
+		}
+		return host, nil
 	case 0x04: // IPv6
 		addr := make([]byte, 16)
 		if _, err := io.ReadFull(conn, addr); err != nil {
@@ -737,6 +752,9 @@ func (s *SOCKS5Server) sendSOCKS5Reply(conn net.Conn, rep byte) error {
 
 // dialViaProxy 通过上游代理连接目标
 func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, error) {
+	if err := validateConnectTarget(target); err != nil {
+		return nil, err
+	}
 	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 
 	switch p.Protocol {

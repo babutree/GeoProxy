@@ -43,6 +43,8 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 		{name: "fail_count", sql: `ALTER TABLE proxies ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0`},
 		{name: "last_used", sql: `ALTER TABLE proxies ADD COLUMN last_used DATETIME`},
 		{name: "last_check", sql: `ALTER TABLE proxies ADD COLUMN last_check DATETIME`},
+		{name: "exit_checked_at", sql: `ALTER TABLE proxies ADD COLUMN exit_checked_at DATETIME`},
+		{name: "disabled_at", sql: `ALTER TABLE proxies ADD COLUMN disabled_at DATETIME`},
 		{name: "created_at", sql: `ALTER TABLE proxies ADD COLUMN created_at DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'`},
 		{name: "status", sql: `ALTER TABLE proxies ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`},
 		{name: "user_paused", sql: `ALTER TABLE proxies ADD COLUMN user_paused INTEGER NOT NULL DEFAULT 0`},
@@ -167,6 +169,8 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 			fail_count      INTEGER NOT NULL DEFAULT 0,
 			last_used       DATETIME,
 			last_check      DATETIME,
+			exit_checked_at DATETIME,
+			disabled_at     DATETIME,
 			created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			status          TEXT NOT NULL DEFAULT 'active',
 			user_paused     INTEGER NOT NULL DEFAULT 0,
@@ -189,11 +193,11 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 		INSERT INTO proxies_new (
 			id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password, node_key
+			last_check, exit_checked_at, disabled_at, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password, node_key
 		)
 		SELECT id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password, node_key
+			last_check, exit_checked_at, disabled_at, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password, node_key
 		FROM proxies`); err != nil {
 		return fmt.Errorf("copy proxies_new: %w", err)
 	}
@@ -232,15 +236,20 @@ func (s *Storage) migrateSubscriptionIdentity() error {
 	return tx.Commit()
 }
 
-// backfillDisabledRetentionClocks 仅为有持久化失败计数的 disabled 订阅节点补齐长期回收起点。
-// NULL last_check 同时表达“待验证”，因此无法证明探测失败的 pending 节点必须保留 NULL；
-// 重复启动也不得续期已有时间或改变手工、active 节点。
+// backfillDisabledRetentionClocks 仅为父订阅仍可用、且有失败证据的 disabled 订阅节点补齐回收起点。
+// last_check 保持“最后探测尝试”的历史语义，不参与回填；pending、手工、暂停和 orphan 节点保持 NULL。
+// 重复启动仅处理 disabled_at IS NULL 的旧数据，不得续期。
 func (s *Storage) backfillDisabledRetentionClocks() error {
 	if _, err := s.db.Exec(
 		`UPDATE proxies
-		 SET last_check = CURRENT_TIMESTAMP
-		 WHERE source = ? AND status = 'disabled' AND last_check IS NULL
-		   AND fail_count > 0`,
+		 SET disabled_at = CURRENT_TIMESTAMP
+		 WHERE source = ? AND status = 'disabled' AND user_paused = 0
+		   AND fail_count > 0 AND disabled_at IS NULL
+		   AND EXISTS (
+		      SELECT 1 FROM subscriptions
+		      WHERE subscriptions.id = proxies.subscription_id
+		        AND subscriptions.status = 'active'
+		   )`,
 		SourceSubscription,
 	); err != nil {
 		return fmt.Errorf("backfill disabled retention clocks: %w", err)

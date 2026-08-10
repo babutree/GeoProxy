@@ -42,10 +42,10 @@ func TestProbeDisabledUsesAtomicRecoveryOperation(t *testing.T) {
 		return true
 	})
 
-	if calls["RecoverSubscriptionProxyWithExitInfo"] != 1 {
-		t.Fatalf("atomic recovery calls = %d, want 1", calls["RecoverSubscriptionProxyWithExitInfo"])
+	if calls["RecoverProxyFromProbe"] != 1 {
+		t.Fatalf("atomic recovery calls = %d, want 1", calls["RecoverProxyFromProbe"])
 	}
-	if calls["EnableSubscriptionProxy"] != 0 {
-		t.Fatalf("probeDisabled still calls EnableSubscriptionProxy %d time(s); recovery must be atomic", calls["EnableSubscriptionProxy"])
+	if calls["EnableProxyByID"] != 0 {
+		t.Fatalf("probeDisabled still calls EnableProxyByID %d time(s); recovery must be atomic", calls["EnableProxyByID"])
 	}
 }

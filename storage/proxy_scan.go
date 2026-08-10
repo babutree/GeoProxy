@@ -4,7 +4,7 @@ import "database/sql"
 
 // proxyColumns 代理表查询的标准列列表
 const proxyColumns = `id, address, protocol, exit_ip, exit_location, latency, quality_grade,
-	use_count, success_count, fail_count, last_used, last_check, created_at, status, user_paused, source, subscription_id,
+	use_count, success_count, fail_count, last_used, last_check, exit_checked_at, disabled_at, created_at, status, user_paused, source, subscription_id,
 	region, region_source, note, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability,
 	proxy_username, proxy_password, node_key`
 
@@ -15,14 +15,14 @@ type proxyScanner interface {
 // scanProxy 扫描代理行数据
 func scanProxy(rows proxyScanner) (*Proxy, error) {
 	p := &Proxy{}
-	var lastUsed, lastCheck sql.NullTime
+	var lastUsed, lastCheck, exitCheckedAt, disabledAt sql.NullTime
 	var source, region, regionSource, note sql.NullString
 	var subID sql.NullInt64
 	var userPaused, ipapiFlagsSeen, starred, dualProtocol int
 	var nodeKey sql.NullString
 	if err := rows.Scan(&p.ID, &p.Address, &p.Protocol, &p.ExitIP, &p.ExitLocation,
 		&p.Latency, &p.QualityGrade, &p.UseCount, &p.SuccessCount, &p.FailCount,
-		&lastUsed, &lastCheck, &p.CreatedAt, &p.Status, &userPaused, &source, &subID,
+		&lastUsed, &lastCheck, &exitCheckedAt, &disabledAt, &p.CreatedAt, &p.Status, &userPaused, &source, &subID,
 		&region, &regionSource, &note, &p.IPAPIIsScore, &p.IPAPIFlags, &ipapiFlagsSeen,
 		&starred, &p.CFBlocked, &dualProtocol, &p.AIReachability,
 		&p.Username, &p.Password, &nodeKey); err != nil {
@@ -40,6 +40,12 @@ func scanProxy(rows proxyScanner) (*Proxy, error) {
 	}
 	if lastCheck.Valid {
 		p.LastCheck = lastCheck.Time
+	}
+	if exitCheckedAt.Valid {
+		p.ExitCheckedAt = exitCheckedAt.Time
+	}
+	if disabledAt.Valid {
+		p.DisabledAt = disabledAt.Time
 	}
 	if source.Valid {
 		p.Source = source.String

@@ -34,6 +34,9 @@ func TestValidateAllWithClampedConcurrencyReturnsForInvalidProxy(t *testing.T) {
 		if len(results) != 1 || results[0].Valid {
 			t.Fatalf("ValidateAll() = %#v, want one invalid result", results)
 		}
+		if results[0].FailureReason != FailureConnectivity {
+			t.Fatalf("unsupported protocol reason = %q, want %q", results[0].FailureReason, FailureConnectivity)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("ValidateAll() did not return with clamped concurrency")
 	}
@@ -220,11 +223,11 @@ func TestAssessRiskTracksPrimaryFlagsKnowledge(t *testing.T) {
 			wantKnown:     false,
 		},
 		{
-			name:          "primary clean response is known",
+			name:          "corroborated primary clean response is known",
 			primaryStatus: http.StatusOK,
 			primaryBody:   `{"status":"success","query":"203.0.113.45","countryCode":"US","city":"Ashburn","proxy":false,"hosting":false,"mobile":false}`,
-			backupStatus:  http.StatusBadGateway,
-			backupBody:    `{}`,
+			backupStatus:  http.StatusOK,
+			backupBody:    `{"ip":"203.0.113.45","location":{"country_code":"US","city":"Ashburn"}}`,
 			wantKnown:     true,
 		},
 	}

@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/babutree/GeoProxy/config"
@@ -53,8 +55,8 @@ func TestWriteSubscriptionFilePropagatesWriteErrorAndCleansUp(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("error = %v, want %v", err, wantErr)
 	}
-	if file.chmodMode != 0644 {
-		t.Fatalf("chmod mode = %04o, want 0644", file.chmodMode)
+	if file.chmodMode != 0600 {
+		t.Fatalf("chmod mode = %04o, want 0600", file.chmodMode)
 	}
 	if !file.closeCalled {
 		t.Fatal("file was not closed after write failure")
@@ -265,29 +267,110 @@ func TestAPISubscriptionDeleteUsesManagerRuntimeSafePath(t *testing.T) {
 	}
 }
 
+func TestAPISubscriptionUpdateRefreshesRuntimeFromManagedFile(t *testing.T) {
+	server := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "subscription.yaml")
+	content := "trojan://old-password@old.example.com:443?sni=old.example.com#old"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write subscription file: %v", err)
+	}
+	subID, err := server.storage.AddSubscription("old-name", "", path, "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+
+	fakeSingBox := newSubscriptionDeleteFakeSingBox()
+	fakeValidator := &subscriptionRefreshFakeValidator{streamStarted: make(chan struct{})}
+	mgr := custom.NewManager(server.storage, validator.New(1, 1, "http://127.0.0.1"), &config.Config{
+		SingBoxPath:       "missing-sing-box",
+		SingBoxBasePort:   10000,
+		SingBoxShardCount: 1,
+	})
+	setManagerSingBoxForSubscriptionTest(t, mgr, fakeSingBox)
+	setManagerValidatorForSubscriptionTest(t, mgr, fakeValidator)
+	server.customMgr = mgr
+
+	req := authenticatedJSONRequest(http.MethodPost, "/api/subscription/update", fmt.Sprintf(
+		"{\"id\":%d,\"name\":\"updated-name\",\"url\":\"https://example.test/new.yaml\",\"refresh_min\":15,\"headers\":\"\"}",
+		subID,
+	))
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	select {
+	case <-fakeSingBox.reloadDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for asynchronous subscription refresh")
+	}
+
+	sub, err := server.storage.GetSubscription(subID)
+	if err != nil {
+		t.Fatalf("GetSubscription() error = %v", err)
+	}
+	if sub.Name != "updated-name" || sub.URL != "https://example.test/new.yaml" || sub.RefreshMin != 15 {
+		t.Fatalf("subscription metadata = %+v, want updated name/url/refresh interval", sub)
+	}
+	fakeSingBox.mu.Lock()
+	nodes := append([]custom.ParsedNode(nil), fakeSingBox.nodes...)
+	reloadCalls := fakeSingBox.reloadCalls
+	fakeSingBox.mu.Unlock()
+	if reloadCalls != 1 || len(nodes) != 1 || nodes[0].Name != "old" {
+		t.Fatalf("runtime nodes/reloads = %d/%+v, want 1/old", reloadCalls, nodes)
+	}
+	select {
+	case <-fakeValidator.streamStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for validator stream")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		proxy, lookupErr := server.storage.GetProxyByAddress("127.0.0.1:41001")
+		if lookupErr == nil && proxy.FailCount > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("validator result was not persisted; err=%v proxy=%+v", lookupErr, proxy)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fakeValidator.streamCalls() != 1 {
+		t.Fatalf("validator stream calls = %d, want 1", fakeValidator.streamCalls())
+	}
+}
+
 type subscriptionDeleteFakeSingBox struct {
+	mu          sync.Mutex
 	reloadCalls int
 	nodes       []custom.ParsedNode
 	portMap     map[string]int
+	reloadDone  chan struct{}
 }
 
 func newSubscriptionDeleteFakeSingBox() *subscriptionDeleteFakeSingBox {
-	return &subscriptionDeleteFakeSingBox{portMap: map[string]int{}}
+	return &subscriptionDeleteFakeSingBox{portMap: map[string]int{}, reloadDone: make(chan struct{}, 8)}
 }
 
 func (s *subscriptionDeleteFakeSingBox) Reload(nodes []custom.ParsedNode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.reloadCalls++
 	s.nodes = append([]custom.ParsedNode(nil), nodes...)
 	s.portMap = map[string]int{}
 	for i, node := range nodes {
 		s.portMap[node.NodeKey()] = 41001 + i
 	}
+	s.reloadDone <- struct{}{}
 	return nil
 }
 
 func (s *subscriptionDeleteFakeSingBox) Stop() {}
 
 func (s *subscriptionDeleteFakeSingBox) GetPortMap() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make(map[string]int, len(s.portMap))
 	for key, port := range s.portMap {
 		out[key] = port
@@ -296,21 +379,62 @@ func (s *subscriptionDeleteFakeSingBox) GetPortMap() map[string]int {
 }
 
 func (s *subscriptionDeleteFakeSingBox) GetNodes() []custom.ParsedNode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return append([]custom.ParsedNode(nil), s.nodes...)
 }
 
 func (s *subscriptionDeleteFakeSingBox) GetRuntimeStatus() custom.SingBoxRuntimeStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return custom.SingBoxRuntimeStatus{Status: custom.SingBoxStatusRunning, Running: len(s.nodes) > 0, Nodes: len(s.nodes), ReadyPorts: len(s.nodes), TotalPorts: len(s.nodes)}
 }
 
 func (s *subscriptionDeleteFakeSingBox) GetLocalAddress(nodeKey string) string { return "" }
 
-func setManagerSingBoxForSubscriptionTest(t *testing.T, mgr *custom.Manager, fake *subscriptionDeleteFakeSingBox) {
+func setManagerSingBoxForSubscriptionTest(t *testing.T, mgr *custom.Manager, fake any) {
 	t.Helper()
 	field := reflect.ValueOf(mgr).Elem().FieldByName("singbox")
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fake))
 }
 
+func setManagerValidatorForSubscriptionTest(t *testing.T, mgr *custom.Manager, fake any) {
+	t.Helper()
+	field := reflect.ValueOf(mgr).Elem().FieldByName("validator")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fake))
+}
+
+type subscriptionRefreshFakeValidator struct {
+	mu            sync.Mutex
+	streams       int
+	streamStarted chan struct{}
+	streamOnce    sync.Once
+}
+
+func (v *subscriptionRefreshFakeValidator) ValidateOne(storage.Proxy) (bool, time.Duration, string, string, validator.RiskInfo) {
+	return false, 0, "", "", validator.RiskInfo{}
+}
+
+func (v *subscriptionRefreshFakeValidator) ValidateStream(proxies []storage.Proxy) <-chan validator.Result {
+	v.mu.Lock()
+	v.streams++
+	v.mu.Unlock()
+	v.streamOnce.Do(func() {
+		close(v.streamStarted)
+	})
+	out := make(chan validator.Result, len(proxies))
+	for _, proxy := range proxies {
+		out <- validator.Result{Proxy: proxy, FailureReason: validator.FailureConnectivity}
+	}
+	close(out)
+	return out
+}
+
+func (v *subscriptionRefreshFakeValidator) streamCalls() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.streams
+}
 func subscriptionTestTunnelNode(name, server, password string) custom.ParsedNode {
 	return custom.ParsedNode{
 		Name:   name,

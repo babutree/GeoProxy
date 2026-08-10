@@ -14,13 +14,20 @@ import (
 // publicIPCache 缓存首次查询到的公网 IP 与所在国家码，避免每次请求都外呼。
 // 查询失败时不缓存，允许后续重试（例如网络恢复后）。
 type publicIPCache struct {
-	mu      sync.Mutex
-	value   string
-	country string
-	done    bool
+	mu        sync.Mutex
+	value     string
+	country   string
+	done      bool
+	fetchedAt time.Time
+	fetching  chan struct{}
 }
 
 var pubIP publicIPCache
+
+const publicIPCacheTTL = 5 * time.Minute
+
+// publicIPFetch 是可替换的获取切入点，生产环境指向真实探测，测试可注入确定性结果。
+var publicIPFetch = fetchPublicIPAndCountry
 
 // publicIPProviders 是多个纯文本返回公网 IP 的服务，按顺序尝试，任一成功即返回。
 // 国内网络可能屏蔽部分服务，故提供多个备选而非单点依赖。
@@ -96,19 +103,52 @@ func tryFetchIP(client *http.Client, url string) string {
 	return candidate
 }
 
-// apiPublicIP 返回服务器公网 IP（首次查询后缓存）。
+// cachedPublicIP 获取带期限的公网 IP 快照；网络请求在锁外执行，避免阻塞其它连接/API。
+func cachedPublicIP() (string, string) {
+	pubIP.mu.Lock()
+	if pubIP.done && pubIP.value != "" && !pubIP.fetchedAt.IsZero() && time.Since(pubIP.fetchedAt) < publicIPCacheTTL {
+		ip, country := pubIP.value, pubIP.country
+		pubIP.mu.Unlock()
+		return ip, country
+	}
+	if pubIP.fetching != nil {
+		fetching := pubIP.fetching
+		pubIP.mu.Unlock()
+		<-fetching
+		pubIP.mu.Lock()
+		ip, country := pubIP.value, pubIP.country
+		pubIP.mu.Unlock()
+		return ip, country
+	}
+	fetching := make(chan struct{})
+	pubIP.fetching = fetching
+	pubIP.mu.Unlock()
+
+	ip, country := publicIPFetch()
+	pubIP.mu.Lock()
+	if ip == "" {
+		// 过期快照不再冒充当前公网地址；失败后下一次请求可重试。
+		pubIP.value = ""
+		pubIP.country = ""
+		pubIP.done = false
+		pubIP.fetchedAt = time.Time{}
+	} else {
+		pubIP.value = ip
+		pubIP.country = country
+		pubIP.done = true
+		pubIP.fetchedAt = time.Now()
+	}
+	pubIP.fetching = nil
+	close(fetching)
+	ip, country = pubIP.value, pubIP.country
+	pubIP.mu.Unlock()
+	return ip, country
+}
+
+// apiPublicIP 返回服务器公网 IP（缓存有期限）。
 // 供 WebUI 连接指南展示真实可连地址，而非写死的 127.0.0.1。
 func (s *Server) apiPublicIP(w http.ResponseWriter, r *http.Request) {
-	pubIP.mu.Lock()
-	if !pubIP.done {
-		pubIP.value, pubIP.country = fetchPublicIPAndCountry()
-		if pubIP.value != "" {
-			pubIP.done = true // 仅在成功时缓存；失败允许后续重试
-		}
-	}
-	ip := pubIP.value
-	country := pubIP.country
-	pubIP.mu.Unlock()
+	ip, country := cachedPublicIP()
 
 	jsonOK(w, map[string]string{"public_ip": ip, "country": country})
 }

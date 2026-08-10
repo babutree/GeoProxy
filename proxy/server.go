@@ -39,8 +39,8 @@ type Server struct {
 
 type proxyStore interface {
 	selector.Store
-	RecordProxyUseByID(id int64, success bool) error
-	RecordProxyFailureByID(id int64, threshold int) error
+	RecordForwardSuccess(identity storage.RouteIdentity) error
+	RecordForwardFailure(identity storage.RouteIdentity, threshold int) (bool, error)
 }
 
 // failDisableThreshold 与健康检查一致：连续失败累计到该阈值即禁用节点。
@@ -102,7 +102,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route := auth.ParsedUsername{}
 	// 认证检查（如果启用）
 	if cfg.ProxyAuthEnabled {
-		parsed, ok := s.checkAuth(r)
+		parsed, ok := s.checkAuthWithConfig(r, cfg)
 		if !ok {
 			w.Header().Set("Proxy-Authenticate", `Basic realm="GeoProxy"`)
 			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
@@ -120,6 +120,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // checkAuth 验证代理 Basic Auth
 func (s *Server) checkAuth(r *http.Request) (auth.ParsedUsername, bool) {
+	return s.checkAuthWithConfig(r, s.runtimeConfig())
+}
+
+func (s *Server) checkAuthWithConfig(r *http.Request, cfg *config.Config) (auth.ParsedUsername, bool) {
+	if cfg == nil {
+		return auth.ParsedUsername{}, false
+	}
 	authHeader := r.Header.Get("Proxy-Authorization")
 	if authHeader == "" {
 		return auth.ParsedUsername{}, false
@@ -148,7 +155,7 @@ func (s *Server) checkAuth(r *http.Request) (auth.ParsedUsername, bool) {
 	password := credentials[1]
 
 	// 验证用户名和密码
-	return parsed, auth.VerifyPassword(parsed.Base, password, s.runtimeConfig().ProxyAuthUsername, s.runtimeConfig().ProxyAuthPassword, s.runtimeConfig().ProxyAuthPasswordHash)
+	return parsed, auth.VerifyPassword(parsed.Base, password, cfg.ProxyAuthUsername, cfg.ProxyAuthPassword, cfg.ProxyAuthPasswordHash)
 }
 
 func (s *Server) selectProxy(route auth.ParsedUsername, tried []int64) (*storage.Proxy, error) {
@@ -165,7 +172,7 @@ func withDefaultRegion(route auth.ParsedUsername, defaultRegion string) auth.Par
 }
 
 func recordProxyFailure(store proxyStore, p *storage.Proxy) {
-	if err := store.RecordProxyFailureByID(p.ID, failDisableThreshold); err != nil {
+	if _, err := store.RecordForwardFailure(storage.RouteIdentityFromProxy(*p), failDisableThreshold); err != nil {
 		log.Printf("[proxy] 记录节点失败次数失败 id=%d: %v", p.ID, err)
 	}
 }
@@ -231,7 +238,9 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		return
 	}
 	forwardURL := r.URL.String()
+	clearReadDeadline := setBodyPreReadDeadline(w, time.Duration(s.runtimeConfig().ValidateTimeout)*time.Second)
 	buffered, stream, replayable, err := readReusableBody(r)
+	clearReadDeadline()
 	if err != nil {
 		http.Error(w, "read request body failed", http.StatusBadRequest)
 		return
@@ -276,9 +285,12 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 			http.Error(w, "invalid forward request", http.StatusBadRequest)
 			return
 		}
-		// 超限流式 body 长度未知，显式标记为分块传输，避免被当作 0 长度。
+		// 超限流式 body 保留可信的原始长度；未知长度才使用分块传输。
 		if !replayable && stream != nil {
-			req.ContentLength = -1
+			req.ContentLength = r.ContentLength
+			if req.ContentLength <= 0 {
+				req.ContentLength = -1
+			}
 		}
 		req.Header = r.Header.Clone()
 		cleanForwardHeaders(req.Header)
@@ -316,7 +328,9 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		}
 
 		// 写回响应
-		for k, vv := range resp.Header {
+		responseHeader := resp.Header.Clone()
+		cleanResponseHeaders(responseHeader)
+		for k, vv := range responseHeader {
 			for _, v := range vv {
 				w.Header().Add(k, v)
 			}
@@ -344,7 +358,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 			log.Printf("[proxy] 下游请求在响应完成时已取消 request=%s", r.RequestURI)
 			return
 		}
-		if err := s.storage.RecordProxyUseByID(p.ID, true); err != nil {
+		if err := s.storage.RecordForwardSuccess(storage.RouteIdentityFromProxy(*p)); err != nil {
 			log.Printf("[proxy] 记录节点成功使用失败 id=%d: %v", p.ID, err)
 		}
 		if resp.StatusCode == 429 {
@@ -358,6 +372,24 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 	http.Error(w, "all proxies failed", http.StatusBadGateway)
 }
 
+func setBodyPreReadDeadline(w http.ResponseWriter, timeout time.Duration) func() {
+	if timeout <= 0 {
+		return func() {}
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		if !errors.Is(err, http.ErrNotSupported) {
+			log.Printf("[proxy] 设置请求体预读 deadline 失败: %v", err)
+		}
+		return func() {}
+	}
+	return func() {
+		if err := controller.SetReadDeadline(time.Time{}); err != nil {
+			log.Printf("[proxy] 清除请求体预读 deadline 失败: %v", err)
+		}
+	}
+}
+
 // httpDirect 为内网/本地 HTTP 目标直连转发，不经上游节点、不重试（本地目标无需故障转移）。
 func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []byte, stream io.Reader, replayable bool) {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), forwardBody(buffered, stream, replayable))
@@ -366,17 +398,23 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 		return
 	}
 	if !replayable && stream != nil {
-		req.ContentLength = -1
+		req.ContentLength = r.ContentLength
+		if req.ContentLength <= 0 {
+			req.ContentLength = -1
+		}
 	}
 	req.Header = r.Header.Clone()
 	cleanForwardHeaders(req.Header)
 
+	transport := &http.Transport{}
 	client := &http.Client{
-		Timeout: time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second,
+		Transport: transport,
+		Timeout:   time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[proxy] 直连请求失败 request=%s: %v", r.RequestURI, err)
@@ -385,7 +423,9 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 	}
 	defer resp.Body.Close()
 
-	for k, vv := range resp.Header {
+	responseHeader := resp.Header.Clone()
+	cleanResponseHeaders(responseHeader)
+	for k, vv := range responseHeader {
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
@@ -413,6 +453,11 @@ func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []b
 
 // handleTunnel 处理 HTTPS CONNECT 隧道（带自动重试）
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth.ParsedUsername) {
+	if err := validateConnectTarget(r.Host); err != nil {
+		log.Printf("[tunnel] 非法 CONNECT 目标: %v", err)
+		http.Error(w, "invalid CONNECT target", http.StatusBadRequest)
+		return
+	}
 	// 内网/本地目标直连，不经上游节点（等同浏览器代理例外 / NO_PROXY）。
 	if isBypassTarget(r.Host) {
 		s.tunnelDirect(w, r)
@@ -442,6 +487,33 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 	}
 
 	http.Error(w, "all proxies failed", http.StatusBadGateway)
+}
+
+func validateConnectTarget(target string) error {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return fmt.Errorf("split target: %w", err)
+	}
+	if err := validateTargetHost(host); err != nil {
+		return err
+	}
+	parsedPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || parsedPort == 0 {
+		return fmt.Errorf("invalid target port %q", port)
+	}
+	return nil
+}
+
+func validateTargetHost(host string) error {
+	if host == "" || strings.TrimSpace(host) != host {
+		return fmt.Errorf("invalid target host %q", host)
+	}
+	for _, char := range host {
+		if char <= 0x20 || char == 0x7f {
+			return fmt.Errorf("invalid control character in target host")
+		}
+	}
+	return nil
 }
 
 // tunnelDirect 为内网/本地 CONNECT 目标建立直连隧道，不经上游节点。
@@ -504,18 +576,29 @@ func forwardBody(buffered []byte, stream io.Reader, replayable bool) io.Reader {
 }
 
 func cleanForwardHeaders(header http.Header) {
+	cleanHopByHopHeaders(header)
+	header.Del("Proxy-Authorization")
+}
+
+func cleanResponseHeaders(header http.Header) {
+	cleanHopByHopHeaders(header)
+	header.Del("Proxy-Authenticate")
+	header.Del("Proxy-Authentication-Info")
+}
+
+func cleanHopByHopHeaders(header http.Header) {
 	for _, value := range header.Values("Connection") {
 		for _, token := range strings.Split(value, ",") {
 			header.Del(strings.TrimSpace(token))
 		}
 	}
 	for _, name := range []string{
-		"Proxy-Authorization",
 		"Proxy-Connection",
 		"Connection",
 		"Keep-Alive",
 		"TE",
 		"Trailer",
+		"Transfer-Encoding",
 		"Upgrade",
 	} {
 		header.Del(name)
@@ -584,6 +667,9 @@ func socks5UserPassAuth(conn net.Conn, username, password string) error {
 }
 
 func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
+	if err := validateConnectTarget(host); err != nil {
+		return nil, err
+	}
 	timeout := time.Duration(s.runtimeConfig().ValidateTimeout) * time.Second
 	switch p.Protocol {
 	case "http":
@@ -721,19 +807,30 @@ func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
 		return &http.Client{
 			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 			Timeout:   timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		}, nil
 	case "socks5":
 		var socksAuth *proxy.Auth
 		if p.Username != "" || p.Password != "" {
 			socksAuth = &proxy.Auth{User: p.Username, Password: p.Password}
 		}
-		dialer, err := proxy.SOCKS5("tcp", p.Address, socksAuth, proxy.Direct)
+		forward := &net.Dialer{Timeout: timeout}
+		dialer, err := proxy.SOCKS5("tcp", p.Address, socksAuth, forward)
 		if err != nil {
 			return nil, err
 		}
+		contextDialer, ok := dialer.(proxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("socks5 dialer does not support context cancellation")
+		}
 		return &http.Client{
-			Transport: &http.Transport{Dial: dialer.Dial},
+			Transport: &http.Transport{DialContext: contextDialer.DialContext},
 			Timeout:   timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)
@@ -826,7 +923,7 @@ func (s *Server) relayHTTPConnect(
 			return
 		}
 		recordSuccess.Do(func() {
-			if err := s.storage.RecordProxyUseByID(selected.ID, true); err != nil {
+			if err := s.storage.RecordForwardSuccess(storage.RouteIdentityFromProxy(*selected)); err != nil {
 				log.Printf("[tunnel] 记录节点成功使用失败 id=%d: %v", selected.ID, err)
 			}
 		})

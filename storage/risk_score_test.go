@@ -280,9 +280,9 @@ func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rows.Columns(): %v", err)
 	}
-	// 当前模型：… + proxy_username + proxy_password + node_key = 30 列。硬编码断言，防止任一侧漏改。
-	if len(cols) != 30 {
-		t.Fatalf("proxyColumns yields %d columns, want 30 (… + proxy_username + proxy_password + node_key)", len(cols))
+	// 当前模型：三时钟 + proxy_username + proxy_password + node_key = 32 列。硬编码断言，防止任一侧漏改。
+	if len(cols) != 32 {
+		t.Fatalf("proxyColumns yields %d columns, want 32 (three clocks + credentials + node_key)", len(cols))
 	}
 	// 末列必须是稳定身份 node_key；凭据字段紧邻其前。
 	if cols[len(cols)-1] != "node_key" {

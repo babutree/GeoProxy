@@ -119,21 +119,33 @@ func makeExcludeMap(excludes []int64) map[int64]bool {
 }
 
 func (s *Storage) GetProxyByAddress(address string) (*Proxy, error) {
-	if err := s.requireUnambiguousAddress(address); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("proxy %s not found", address)
-		}
+	rows, err := s.db.Query(
+		`SELECT `+proxyColumns+` FROM proxies WHERE address = ? ORDER BY id ASC LIMIT 2`,
+		address,
+	)
+	if err != nil {
 		return nil, err
 	}
-	row := s.db.QueryRow(`SELECT `+proxyColumns+` FROM proxies WHERE address = ?`, address)
-	proxy, err := scanProxy(row)
-	if err == nil {
-		return proxy, nil
+	defer rows.Close()
+
+	matches := make([]*Proxy, 0, 2)
+	for rows.Next() {
+		proxy, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		matches = append(matches, proxy)
 	}
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("proxy %s not found", address)
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	return nil, err
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("proxy %s not found: %w", address, sql.ErrNoRows)
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("%w: %q", ErrAmbiguousProxyAddress, address)
+	}
+	return matches[0], nil
 }
 
 func (s *Storage) GetProxyByIdentity(address, source string, subscriptionID int64) (*Proxy, error) {

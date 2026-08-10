@@ -294,25 +294,20 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 	// 异步验证并更新
 	go func() {
 		cfg := config.Get()
-		v := validator.New(1, cfg.ValidateTimeout, cfg.ValidateURL)
+		probeCfg := *cfg
+		probeCfg.ValidateConcurrency = 1
+		v := validator.NewWithConfig(&probeCfg)
 
 		log.Printf("[webui] 开始刷新节点: %s", req.Address)
-		valid, latency, exitIP, exitLocation, risk := v.ValidateOne(*targetProxy)
-
-		if valid {
-			latencyMs := int(latency.Milliseconds())
-			// 单节点“测试”成功：若此前因验证失败被 disabled，恢复为 active 重新参与选路。
-			// EnableProxyByID 仅对 status='disabled' 生效，且尊重父订阅暂停，不影响 user_paused。
-			if targetProxy.Status == "disabled" {
-				if err := s.storage.EnableProxyByID(targetProxy.ID); err != nil {
-					log.Printf("[webui] 节点测试成功后重新启用失败: %s: %v", targetProxy.Address, err)
-				}
-			}
-			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs, risk.IPAPIIsScore, risk.Flags, risk.FlagsKnown, risk.CFBlocked, risk.AIReachability)
-			log.Printf("[webui] 节点刷新完成: %s latency=%dms grade=%s", targetProxy.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
+		result := v.ValidateOneResult(*targetProxy)
+		if err := s.applyProbeResult(result); err != nil {
+			log.Printf("[webui] 节点刷新结果写回失败: %s: %v", targetProxy.Address, err)
+			return
+		}
+		if result.Valid {
+			log.Printf("[webui] 节点刷新完成: %s latency=%dms grade=%s", targetProxy.Address, result.Latency.Milliseconds(), storage.CalculateQualityGrade(int(result.Latency.Milliseconds())))
 		} else {
-			s.storage.DisableProxyByID(targetProxy.ID)
-			log.Printf("[webui] 节点验证失败，已禁用: %s", targetProxy.Address)
+			log.Printf("[webui] 节点验证失败: %s reason=%s", targetProxy.Address, result.FailureReason)
 		}
 	}()
 
@@ -337,22 +332,53 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cfg := config.Get()
-		validate := validator.New(cfg.ValidateConcurrency, cfg.ValidateTimeout, cfg.ValidateURL)
+		validate := validator.NewWithConfig(cfg)
 
 		log.Printf("[webui] 正在刷新 %d 个节点的延迟...", len(proxies))
 		updated := 0
 		for r := range validate.ValidateStream(proxies) {
+			if err := s.applyProbeResult(r); err != nil {
+				log.Printf("[webui] 批量刷新结果写回失败: %s: %v", r.Proxy.Address, err)
+				continue
+			}
 			if r.Valid {
-				latencyMs := int(r.Latency.Milliseconds())
-				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags, r.Risk.FlagsKnown, r.Risk.CFBlocked, r.Risk.AIReachability)
 				updated++
-			} else {
-				s.storage.DisableProxyByID(r.Proxy.ID)
 			}
 		}
 		log.Printf("[webui] 延迟刷新完成: updated=%d", updated)
 	}()
 	jsonOK(w, map[string]string{"status": "refresh started"})
+}
+
+// applyProbeResult 用完整路由身份原子写回 WebUI 发起的验证结果。
+// 结果滞后于节点重绑时不能按旧 ID 覆盖新凭据；地域策略拒绝保留可信出口但不累积系统故障。
+func (s *Server) applyProbeResult(result validator.Result) error {
+	identity := storage.RouteIdentityFromProxy(result.Proxy)
+	observation := storage.ExitObservation{
+		ExitIP: result.ExitIP, ExitLocation: result.ExitLocation, LatencyMS: int(result.Latency.Milliseconds()),
+		IPAPIIsScore: result.Risk.IPAPIIsScore, IPAPIFlags: result.Risk.Flags,
+		IPAPIFlagsKnown: result.Risk.FlagsKnown, CFBlocked: result.Risk.CFBlocked,
+		AIReachability: result.Risk.AIReachability,
+	}
+	if !result.Valid {
+		if result.FailureReason == validator.FailureGeoRejected {
+			if err := s.storage.DisableRouteForPolicy(identity); err != nil {
+				return err
+			}
+			return s.storage.ApplyProbeObservation(identity, observation)
+		}
+		if result.Proxy.Status == "disabled" {
+			return s.storage.RecordDisabledProbeFailure(identity, observation)
+		}
+		_, err := s.storage.RecordProbeFailure(identity, observation, 1)
+		return err
+	}
+	if err := s.storage.RecoverProxyFromProbe(identity, observation); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return s.storage.ApplyProbeObservation(identity, observation)
 }
 
 func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {

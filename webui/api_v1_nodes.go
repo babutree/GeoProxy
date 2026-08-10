@@ -82,6 +82,19 @@ func parseNodeAPIFilter(r *http.Request) (storage.NodeAPIFilter, string, error) 
 		Protocol: strings.ToLower(strings.TrimSpace(q.Get("protocol"))),
 		Source:   strings.ToLower(strings.TrimSpace(q.Get("source"))),
 	}
+	if filter.Region != "" && !isNodeAPIAlpha2Region(filter.Region) {
+		return filter, "", fmt.Errorf("invalid region")
+	}
+	switch filter.Protocol {
+	case "", "http", "socks5":
+	default:
+		return filter, "", fmt.Errorf("invalid protocol")
+	}
+	switch filter.Source {
+	case "", storage.SourceManual, storage.SourceSubscription:
+	default:
+		return filter, "", fmt.Errorf("invalid source")
+	}
 	status := strings.ToLower(strings.TrimSpace(q.Get("status")))
 	if status != "" && status != "all" {
 		return filter, "", fmt.Errorf("invalid status")
@@ -105,9 +118,17 @@ func parseNodeAPIFilter(r *http.Request) (storage.NodeAPIFilter, string, error) 
 		parts := strings.Split(raw, ",")
 		filter.AI = make([]string, 0, len(parts))
 		for _, p := range parts {
-			if t := strings.TrimSpace(p); t != "" {
-				filter.AI = append(filter.AI, t)
+			if t := strings.ToLower(strings.TrimSpace(p)); t != "" {
+				switch t {
+				case "openai", "claude", "grok", "gemini":
+					filter.AI = append(filter.AI, t)
+				default:
+					return filter, "", fmt.Errorf("invalid ai")
+				}
 			}
+		}
+		if len(filter.AI) == 0 {
+			return filter, "", fmt.Errorf("invalid ai")
 		}
 	}
 	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
@@ -130,6 +151,18 @@ func parseNodeAPIFilter(r *http.Request) (storage.NodeAPIFilter, string, error) 
 		return filter, connect, nil
 	}
 	return filter, "", fmt.Errorf("invalid connect")
+}
+
+func isNodeAPIAlpha2Region(region string) bool {
+	if len(region) != 2 {
+		return false
+	}
+	for _, ch := range region {
+		if ch < 'a' || ch > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) listNodesAPIViewWithConnectFilter(filter storage.NodeAPIFilter, connectMode, publicHost string, hostUnresolved bool, socksPort, httpPort int, usernameBase string) (int, []map[string]any, error) {

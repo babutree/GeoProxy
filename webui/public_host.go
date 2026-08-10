@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/babutree/GeoProxy/config"
 )
@@ -35,6 +36,10 @@ func resolvePublicHost(cfg *config.Config, r *http.Request) (host string, unreso
 // cachedPublicIPOnly 只读取进程内公网 IP 缓存，不发起探测。
 func cachedPublicIPOnly() string {
 	pubIP.mu.Lock()
+	if !pubIP.done || pubIP.value == "" || (!pubIP.fetchedAt.IsZero() && time.Since(pubIP.fetchedAt) >= publicIPCacheTTL) {
+		pubIP.mu.Unlock()
+		return ""
+	}
 	v := pubIP.value
 	pubIP.mu.Unlock()
 	return v

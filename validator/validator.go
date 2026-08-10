@@ -36,10 +36,21 @@ func concurrencyBuffer(total, concurrency int) int {
 }
 
 func New(concurrency, timeoutSec int, validateURL string) *Validator {
+	return newValidator(concurrency, timeoutSec, validateURL, config.Get())
+}
+
+// NewWithConfig 从同一不可变配置快照构造验证器，避免并发保存配置时混用新旧字段。
+func NewWithConfig(cfg *config.Config) *Validator {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	return newValidator(cfg.ValidateConcurrency, cfg.ValidateTimeout, cfg.ValidateURL, cfg)
+}
+
+func newValidator(concurrency, timeoutSec int, validateURL string, cfg *config.Config) *Validator {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	cfg := config.Get()
 	maxMs := 0
 	if cfg != nil {
 		maxMs = cfg.MaxResponseMs
@@ -66,13 +77,25 @@ func parseValidateURLs(value string) []string {
 	return targets
 }
 
+type FailureReason string
+
+const (
+	FailureNone                FailureReason = ""
+	FailureConnectivity        FailureReason = "connectivity"
+	FailureLatency             FailureReason = "latency"
+	FailureExitMetadata        FailureReason = "exit_metadata"
+	FailureGeoRejected         FailureReason = "geo_rejected"
+	FailureHTTPConnectRejected FailureReason = "http_connect_rejected"
+)
+
 type Result struct {
-	Proxy        storage.Proxy
-	Valid        bool
-	Latency      time.Duration
-	ExitIP       string
-	ExitLocation string
-	Risk         RiskInfo // 两源风险信号：ipapi.is 分数 + ip-api 命中标记，分开展示不聚合
+	Proxy         storage.Proxy
+	Valid         bool
+	Latency       time.Duration
+	ExitIP        string
+	ExitLocation  string
+	Risk          RiskInfo // 两源风险信号：ipapi.is 分数 + ip-api 命中标记，分开展示不聚合
+	FailureReason FailureReason
 }
 
 // ipAPIInfo 是出口信息与可用的风险布尔信号。
@@ -94,8 +117,8 @@ const (
 )
 
 // getExitIPInfo 通过代理查询两个独立出口信息源。
-// 两源都成功时必须对出口 IP 和国家码达成一致；单源失败或超时可由另一源接替，
-// 但两源都未在总时限内给出有效结果，或结果冲突时一律失败。
+// 两源都成功时必须对出口 IP 和国家码达成一致；HTTPS 备源可在明文源失败时单独定案，
+// 明文源只能交叉验证并补充风险标记。HTTPS 源失败或两源冲突时一律失败。
 func getExitIPInfo(client *http.Client) ipAPIInfo {
 	if client == nil {
 		return ipAPIInfo{}
@@ -145,13 +168,15 @@ func getExitIPInfo(client *http.Client) ipAPIInfo {
 }
 
 func mergeCompletedExitIPInfos(results []ipAPIInfo) ipAPIInfo {
-	completed := make([]ipAPIInfo, 0, len(results))
-	for _, result := range results {
-		if result.OK {
-			completed = append(completed, result)
-		}
+	// results[0] 来自明文 HTTP，只能补充风险标记并与 HTTPS 结果交叉验证；
+	// 不能在 HTTPS 源失败时单独决定出口 IP/地域，否则链路劫持可污染选路标签。
+	if len(results) < 2 || !results[1].OK {
+		return ipAPIInfo{}
 	}
-	return mergeExitIPInfos(completed)
+	if !results[0].OK {
+		return results[1]
+	}
+	return mergeExitIPInfos([]ipAPIInfo{results[0], results[1]})
 }
 
 func queryPrimaryExitInfo(ctx context.Context, client *http.Client) ipAPIInfo {
@@ -793,9 +818,11 @@ func checkHTTPSConnect(proxyAddr, username, password string, timeout time.Durati
 		Transport: &http.Transport{
 			Proxy:               http.ProxyURL(proxyURL),
 			TLSHandshakeTimeout: timeout,
+			DisableKeepAlives:   true,
 		},
 		Timeout: timeout,
 	}
+	defer client.CloseIdleConnections()
 
 	// 随机起始索引
 	start := int(time.Now().UnixNano() % int64(len(httpsTestTargets)))
@@ -840,8 +867,7 @@ func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
 			go func(px storage.Proxy) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				valid, latency, exitIP, exitLocation, risk := v.ValidateOne(px)
-				ch <- Result{Proxy: px, Valid: valid, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: risk}
+				ch <- v.ValidateOneResult(px)
 			}(p)
 		}
 		wg.Wait()
@@ -851,11 +877,14 @@ func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
 	return ch
 }
 
-// ValidateOne 验证单个代理是否可用，返回是否有效、延迟、出口IP、地理位置和 IP 风险信号。
-// 风险信号：验证通过路径经同一 proxy client 探测多源出口信息，并分别探测 ip-api.com（命中标记）
-// 与 ipapi.is（滥用分），
-// 两源分开不聚合；未走到风险探测的失败路径统一返回 UnknownRisk()。
+// ValidateOne 保留旧调用约定；需要失败原因的调用方应使用 ValidateOneResult。
 func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, string, RiskInfo) {
+	result := v.ValidateOneResult(p)
+	return result.Valid, result.Latency, result.ExitIP, result.ExitLocation, result.Risk
+}
+
+// ValidateOneResult 验证单个代理并保留失败阶段，调用方据此区分策略拒绝与系统故障。
+func (v *Validator) ValidateOneResult(p storage.Proxy) Result {
 	var client *http.Client
 	var err error
 
@@ -866,48 +895,37 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		client, err = newSOCKS5Client(p.Address, p.Username, p.Password, v.timeout)
 	default:
 		log.Printf("[validator] 未知协议 %s，节点 %s", p.Protocol, p.Address)
-		return false, 0, "", "", UnknownRisk()
+		return Result{Proxy: p, Risk: UnknownRisk(), FailureReason: FailureConnectivity}
 	}
-
 	if err != nil {
-		return false, 0, "", "", UnknownRisk()
+		return Result{Proxy: p, Risk: UnknownRisk(), FailureReason: FailureConnectivity}
 	}
+	defer client.CloseIdleConnections()
 
 	latency, ok := v.validateConnectivity(client)
 	if !ok {
-		return false, latency, "", "", UnknownRisk()
+		return Result{Proxy: p, Latency: latency, Risk: UnknownRisk(), FailureReason: FailureConnectivity}
 	}
-
-	// 响应时间过滤
 	if v.maxResponseMs > 0 && latency > time.Duration(v.maxResponseMs)*time.Millisecond {
-		return false, latency, "", "", UnknownRisk()
+		return Result{Proxy: p, Latency: latency, Risk: UnknownRisk(), FailureReason: FailureLatency}
 	}
 
-	// 获取出口 IP 和地理位置（仅在验证通过时）
 	ipInfo := getExitIPInfo(client)
 	exitIP, exitLocation := ipInfo.IP, ipInfo.Location
-
-	// 必须能获取到出口信息
 	if exitIP == "" || exitLocation == "" {
-		return false, latency, exitIP, exitLocation, UnknownRisk()
+		return Result{Proxy: p, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: UnknownRisk(), FailureReason: FailureExitMetadata}
 	}
-
-	// 地理过滤：白名单优先，否则走黑名单
 	if len(exitLocation) >= 2 && !v.passesGeoFilter(exitLocation[:2]) {
-		return false, latency, exitIP, exitLocation, UnknownRisk()
+		return Result{Proxy: p, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: UnknownRisk(), FailureReason: FailureGeoRejected}
+	}
+	if p.Protocol == "http" && !checkHTTPSConnect(p.Address, p.Username, p.Password, v.timeout) {
+		return Result{Proxy: p, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: UnknownRisk(), FailureReason: FailureHTTPConnectRejected}
 	}
 
-	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
-	if p.Protocol == "http" {
-		if !checkHTTPSConnect(p.Address, p.Username, p.Password, v.timeout) {
-			return false, latency, exitIP, exitLocation, UnknownRisk()
-		}
+	return Result{
+		Proxy: p, Valid: true, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation,
+		Risk: assessRisk(client, ipInfo), FailureReason: FailureNone,
 	}
-
-	// 风险信号探测：经同一 proxy client 分别取两源；出口 IP 已由多源出口查询取得。
-	risk := assessRisk(client, ipInfo)
-
-	return true, latency, exitIP, exitLocation, risk
 }
 
 // passesGeoFilter 依据白/黑名单判断某国家代码是否通过地理过滤。
@@ -966,7 +984,8 @@ func newHTTPClient(address, username, password string, timeout time.Duration) (*
 	}
 	return &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
+			Proxy:             http.ProxyURL(proxyURL),
+			DisableKeepAlives: true,
 		},
 		Timeout: timeout,
 	}, nil
@@ -977,13 +996,19 @@ func newSOCKS5Client(address, username, password string, timeout time.Duration) 
 	if username != "" || password != "" {
 		auth = &proxy.Auth{User: username, Password: password}
 	}
-	dialer, err := proxy.SOCKS5("tcp", address, auth, proxy.Direct)
+	forward := &net.Dialer{Timeout: timeout}
+	dialer, err := proxy.SOCKS5("tcp", address, auth, forward)
 	if err != nil {
 		return nil, err
 	}
+	contextDialer, ok := dialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("socks5 dialer does not support context cancellation")
+	}
 	return &http.Client{
 		Transport: &http.Transport{
-			Dial: dialer.Dial,
+			DialContext:       contextDialer.DialContext,
+			DisableKeepAlives: true,
 		},
 		Timeout: timeout,
 	}, nil

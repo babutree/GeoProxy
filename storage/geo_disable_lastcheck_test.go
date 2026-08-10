@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestDisableBlockedCountriesSetsRetentionClockWithoutRenewingDisabled(t *testing.T) {
+func TestDisableBlockedCountriesDoesNotStartSystemRetentionClock(t *testing.T) {
 	store := newTestStorage(t)
 	insertProxy(t, store, "blocked-active:8080", "http", "cn", SourceManual, 100, "active", 0)
 	insertProxy(t, store, "blocked-degraded:8080", "http", "", SourceManual, 100, "degraded", 0)
@@ -23,7 +23,7 @@ func TestDisableBlockedCountriesSetsRetentionClockWithoutRenewingDisabled(t *tes
 		"UPDATE proxies SET last_check = ? WHERE address = ?",
 		preservedAt.Format("2006-01-02 15:04:05"), "blocked-existing:8080",
 	); err != nil {
-		t.Fatalf("seed existing disabled clock: %v", err)
+		t.Fatalf("seed existing last_check: %v", err)
 	}
 
 	affected, err := store.DisableBlockedCountries([]string{"CN"})
@@ -33,8 +33,8 @@ func TestDisableBlockedCountriesSetsRetentionClockWithoutRenewingDisabled(t *tes
 	if affected != 2 {
 		t.Fatalf("DisableBlockedCountries() affected = %d, want 2 active/degraded rows", affected)
 	}
-	assertDisabledWithClock(t, store, "blocked-active:8080")
-	assertDisabledWithClock(t, store, "blocked-degraded:8080")
+	assertPolicyDisabledWithoutSystemClock(t, store, "blocked-active:8080")
+	assertPolicyDisabledWithoutSystemClock(t, store, "blocked-degraded:8080")
 	assertProxyStatusAndClock(t, store, "blocked-existing:8080", "disabled", preservedAt)
 	assertProxyStatusAndClock(t, store, "blocked-unmatched:8080", "active", time.Time{})
 
@@ -43,7 +43,7 @@ func TestDisableBlockedCountriesSetsRetentionClockWithoutRenewingDisabled(t *tes
 		"UPDATE proxies SET last_check = ? WHERE address = ?",
 		preservedAt.Format("2006-01-02 15:04:05"), "blocked-active:8080",
 	); err != nil {
-		t.Fatalf("seed repeated-call clock: %v", err)
+		t.Fatalf("seed repeated-call last_check: %v", err)
 	}
 	affected, err = store.DisableBlockedCountries([]string{"CN"})
 	if err != nil {
@@ -55,7 +55,7 @@ func TestDisableBlockedCountriesSetsRetentionClockWithoutRenewingDisabled(t *tes
 	assertProxyStatusAndClock(t, store, "blocked-active:8080", "disabled", preservedAt)
 }
 
-func TestDisableNotAllowedCountriesSetsRetentionClockWithoutRenewingDisabled(t *testing.T) {
+func TestDisableNotAllowedCountriesDoesNotStartSystemRetentionClock(t *testing.T) {
 	store := newTestStorage(t)
 	insertProxy(t, store, "not-allowed-active:8080", "http", "cn", SourceManual, 100, "active", 0)
 	insertProxy(t, store, "not-allowed-degraded:8080", "http", "", SourceManual, 100, "degraded", 0)
@@ -74,7 +74,7 @@ func TestDisableNotAllowedCountriesSetsRetentionClockWithoutRenewingDisabled(t *
 		"UPDATE proxies SET last_check = ? WHERE address = ?",
 		preservedAt.Format("2006-01-02 15:04:05"), "not-allowed-existing:8080",
 	); err != nil {
-		t.Fatalf("seed existing disabled clock: %v", err)
+		t.Fatalf("seed existing last_check: %v", err)
 	}
 
 	affected, err := store.DisableNotAllowedCountries([]string{"JP"})
@@ -84,8 +84,8 @@ func TestDisableNotAllowedCountriesSetsRetentionClockWithoutRenewingDisabled(t *
 	if affected != 2 {
 		t.Fatalf("DisableNotAllowedCountries() affected = %d, want 2 active/degraded rows", affected)
 	}
-	assertDisabledWithClock(t, store, "not-allowed-active:8080")
-	assertDisabledWithClock(t, store, "not-allowed-degraded:8080")
+	assertPolicyDisabledWithoutSystemClock(t, store, "not-allowed-active:8080")
+	assertPolicyDisabledWithoutSystemClock(t, store, "not-allowed-degraded:8080")
 	assertProxyStatusAndClock(t, store, "not-allowed-existing:8080", "disabled", preservedAt)
 	assertProxyStatusAndClock(t, store, "allowed-active:8080", "active", time.Time{})
 	assertProxyStatusAndClock(t, store, "unknown-active:8080", "active", time.Time{})
@@ -94,7 +94,7 @@ func TestDisableNotAllowedCountriesSetsRetentionClockWithoutRenewingDisabled(t *
 		"UPDATE proxies SET last_check = ? WHERE address = ?",
 		preservedAt.Format("2006-01-02 15:04:05"), "not-allowed-active:8080",
 	); err != nil {
-		t.Fatalf("seed repeated-call clock: %v", err)
+		t.Fatalf("seed repeated-call last_check: %v", err)
 	}
 	affected, err = store.DisableNotAllowedCountries([]string{"JP"})
 	if err != nil {
@@ -106,15 +106,15 @@ func TestDisableNotAllowedCountriesSetsRetentionClockWithoutRenewingDisabled(t *
 	assertProxyStatusAndClock(t, store, "not-allowed-active:8080", "disabled", preservedAt)
 }
 
-func assertDisabledWithClock(t *testing.T, store *Storage, address string) {
+func assertPolicyDisabledWithoutSystemClock(t *testing.T, store *Storage, address string) {
 	t.Helper()
 	proxy, err := store.GetProxyByAddress(address)
 	if err != nil {
 		t.Fatalf("GetProxyByAddress(%q) error = %v", address, err)
 	}
-	if proxy.Status != "disabled" || proxy.LastCheck.IsZero() {
-		t.Fatalf("proxy %q = status:%q last_check:%v, want disabled with retention clock",
-			address, proxy.Status, proxy.LastCheck)
+	if proxy.Status != "disabled" || !proxy.LastCheck.IsZero() || !proxy.DisabledAt.IsZero() {
+		t.Fatalf("proxy %q = status:%q last_check:%v disabled_at:%v, want policy-disabled without probe or system retention clock",
+			address, proxy.Status, proxy.LastCheck, proxy.DisabledAt)
 	}
 }
 

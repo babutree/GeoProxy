@@ -279,6 +279,9 @@ func Load() *Config {
 	cfg.DBPath = filepath.Join(dataDirPath, "proxy.db")
 	configPath := filepath.Join(dataDirPath, "config.json")
 	data, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		panic(fmt.Sprintf("load config: read %s: %v", configPath, err))
+	}
 	hasPersistedConfig := err == nil
 	if hasPersistedConfig {
 		// 已落盘配置是权威来源，不能被部署环境中的旧只读 API 变量覆盖。

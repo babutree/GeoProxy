@@ -12,8 +12,8 @@ import (
 )
 
 // TestBUGFIX020LongTermDisabledFreedFromRuntime：
-// 长期禁用（status=disabled 且 last_check 超过阈值）应从 sing-box 运行态/portMap 移除以释放端口；
-// 近期禁用与 last_check 为零的禁用节点仍保留，供 probeDisabled 重验证。
+// 长期禁用（status=disabled 且 disabled_at 超过阈值）应从 sing-box 运行态/portMap 移除以释放端口；
+// 近期禁用与 disabled_at 为零的禁用节点仍保留，供 probeDisabled 重验证。
 func TestBUGFIX020LongTermDisabledFreedFromRuntime(t *testing.T) {
 	store := newTestStorage(t)
 	sb := newSpyShard()
@@ -36,7 +36,7 @@ func TestBUGFIX020LongTermDisabledFreedFromRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
-	seedSubProxy := func(addr, status string, lastCheck time.Time) {
+	seedSubProxy := func(addr, status string, disabledAt time.Time) {
 		t.Helper()
 		if err := store.AddProxyWithSource(addr, "socks5", storage.SourceSubscription, subID); err != nil {
 			t.Fatalf("AddProxyWithSource(%s): %v", addr, err)
@@ -46,19 +46,19 @@ func TestBUGFIX020LongTermDisabledFreedFromRuntime(t *testing.T) {
 				t.Fatalf("DisableSubscriptionProxy(%s): %v", addr, err)
 			}
 		}
-		if !lastCheck.IsZero() {
+		if !disabledAt.IsZero() {
 			if _, err := store.GetDB().Exec(
-				`UPDATE proxies SET last_check = ? WHERE address = ? AND subscription_id = ?`,
-				lastCheck.UTC().Format("2006-01-02 15:04:05"), addr, subID,
+				`UPDATE proxies SET disabled_at = ? WHERE address = ? AND subscription_id = ?`,
+				disabledAt.UTC().Format("2006-01-02 15:04:05"), addr, subID,
 			); err != nil {
-				t.Fatalf("set last_check(%s): %v", addr, err)
+				t.Fatalf("set disabled_at(%s): %v", addr, err)
 			}
 		} else {
 			if _, err := store.GetDB().Exec(
-				`UPDATE proxies SET last_check = NULL WHERE address = ? AND subscription_id = ?`,
+				`UPDATE proxies SET disabled_at = NULL WHERE address = ? AND subscription_id = ?`,
 				addr, subID,
 			); err != nil {
-				t.Fatalf("clear last_check(%s): %v", addr, err)
+				t.Fatalf("clear disabled_at(%s): %v", addr, err)
 			}
 		}
 	}
@@ -126,10 +126,10 @@ func TestBUGFIX020ProbeDisabledSkipsMissingPortMapAndDoesNotPanic(t *testing.T) 
 		t.Fatalf("Disable in-runtime: %v", err)
 	}
 	if _, err := store.GetDB().Exec(
-		`UPDATE proxies SET last_check = ? WHERE address = ?`,
+		`UPDATE proxies SET disabled_at = ? WHERE address = ?`,
 		time.Now().Add(-time.Hour).UTC().Format("2006-01-02 15:04:05"), inAddr,
 	); err != nil {
-		t.Fatalf("set last_check in-runtime: %v", err)
+		t.Fatalf("set disabled_at in-runtime: %v", err)
 	}
 
 	// 已无端口的长期禁用（幽灵地址）
@@ -141,10 +141,10 @@ func TestBUGFIX020ProbeDisabledSkipsMissingPortMapAndDoesNotPanic(t *testing.T) 
 		t.Fatalf("Disable ghost: %v", err)
 	}
 	if _, err := store.GetDB().Exec(
-		`UPDATE proxies SET last_check = ? WHERE address = ?`,
+		`UPDATE proxies SET disabled_at = ? WHERE address = ?`,
 		time.Now().Add(-longTermDisabledRetention-time.Hour).UTC().Format("2006-01-02 15:04:05"), ghostAddr,
 	); err != nil {
-		t.Fatalf("set last_check ghost: %v", err)
+		t.Fatalf("set disabled_at ghost: %v", err)
 	}
 
 	m := &Manager{
@@ -188,16 +188,16 @@ func TestBUGFIX020ProbeDisabledPrunesLongTermFromRuntime(t *testing.T) {
 		}
 	}
 	if _, err := store.GetDB().Exec(
-		`UPDATE proxies SET last_check = ? WHERE address = ?`,
+		`UPDATE proxies SET disabled_at = ? WHERE address = ?`,
 		time.Now().Add(-longTermDisabledRetention-time.Hour).UTC().Format("2006-01-02 15:04:05"), longAddr,
 	); err != nil {
-		t.Fatalf("set long last_check: %v", err)
+		t.Fatalf("set long disabled_at: %v", err)
 	}
 	if _, err := store.GetDB().Exec(
-		`UPDATE proxies SET last_check = ? WHERE address = ?`,
+		`UPDATE proxies SET disabled_at = ? WHERE address = ?`,
 		time.Now().Add(-time.Hour).UTC().Format("2006-01-02 15:04:05"), keepAddr,
 	); err != nil {
-		t.Fatalf("set keep last_check: %v", err)
+		t.Fatalf("set keep disabled_at: %v", err)
 	}
 
 	m := &Manager{
@@ -405,7 +405,7 @@ func (v *blockingSingleProbeValidator) release() {
 	}
 }
 
-// TestBUGFIX020IsLongTermDisabledHelper 锁定阈值语义。
+// TestBUGFIX020IsLongTermDisabledHelper 锁定长期禁用仅依赖 disabled_at 的阈值语义。
 func TestBUGFIX020IsLongTermDisabledHelper(t *testing.T) {
 	now := time.Now()
 	// 1 天策略：25h 前=长期禁用，12h 前=短期禁用；边界等于阈值仍算短期。
@@ -417,11 +417,12 @@ func TestBUGFIX020IsLongTermDisabledHelper(t *testing.T) {
 		p    storage.Proxy
 		want bool
 	}{
-		{"active", storage.Proxy{Status: "active", LastCheck: now.Add(-30 * 24 * time.Hour)}, false},
+		{"active", storage.Proxy{Status: "active", DisabledAt: now.Add(-30 * 24 * time.Hour)}, false},
 		{"disabled_zero", storage.Proxy{Status: "disabled"}, false},
-		{"disabled_12h_short", storage.Proxy{Status: "disabled", LastCheck: now.Add(-12 * time.Hour)}, false},
-		{"disabled_25h_long", storage.Proxy{Status: "disabled", LastCheck: now.Add(-25 * time.Hour)}, true},
-		{"disabled_exact", storage.Proxy{Status: "disabled", LastCheck: now.Add(-longTermDisabledRetention)}, false},
+		{"disabled_old_probe_but_no_disable_evidence", storage.Proxy{Status: "disabled", LastCheck: now.Add(-25 * time.Hour)}, false},
+		{"disabled_12h_short", storage.Proxy{Status: "disabled", DisabledAt: now.Add(-12 * time.Hour)}, false},
+		{"disabled_25h_long", storage.Proxy{Status: "disabled", DisabledAt: now.Add(-25 * time.Hour)}, true},
+		{"disabled_exact", storage.Proxy{Status: "disabled", DisabledAt: now.Add(-longTermDisabledRetention)}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -464,15 +465,18 @@ func TestBUGFIXGeoBlockedProbeDoesNotRenewDisabledRetentionClock(t *testing.T) {
 		t.Fatalf("DisableSubscriptionProxy: %v", err)
 	}
 
-	checkedAt := time.Now().UTC().Add(-23 * time.Hour).Truncate(time.Second)
+	disabledAt := time.Now().UTC().Add(-23 * time.Hour).Truncate(time.Second)
 	if _, err := store.GetDB().Exec(
-		"UPDATE proxies SET last_check = ? WHERE address = ? AND source = ? AND subscription_id = ?",
-		checkedAt.Format("2006-01-02 15:04:05"), address, storage.SourceSubscription, subID,
+		"UPDATE proxies SET disabled_at = ? WHERE address = ? AND source = ? AND subscription_id = ?",
+		disabledAt.Format("2006-01-02 15:04:05"), address, storage.SourceSubscription, subID,
 	); err != nil {
 		t.Fatalf("set disabled retention clock: %v", err)
 	}
 
-	fake := newBlockingProxyValidator(map[string]bool{address: true})
+	fake := staticProbeResultValidator{result: validator.Result{
+		Valid: false, Latency: 45 * time.Millisecond, ExitIP: testValidationExitIP, ExitLocation: testValidationExitLocation,
+		Risk: validator.UnknownRisk(), FailureReason: validator.FailureGeoRejected,
+	}}
 	m := &Manager{storage: store, validator: fake, singbox: sb}
 	m.probeDisabled()
 
@@ -487,11 +491,11 @@ func TestBUGFIXGeoBlockedProbeDoesNotRenewDisabledRetentionClock(t *testing.T) {
 		t.Fatalf("geo-blocked probe metadata = ip:%q location:%q latency:%d, want %q/%q/45",
 			proxy.ExitIP, proxy.ExitLocation, proxy.Latency, testValidationExitIP, testValidationExitLocation)
 	}
-	if !proxy.LastCheck.Equal(checkedAt) {
-		t.Fatalf("geo-blocked probe renewed disabled retention clock: got %s, want %s", proxy.LastCheck, checkedAt)
+	if !proxy.DisabledAt.IsZero() {
+		t.Fatalf("geo-blocked probe retained a system disable clock: %s", proxy.DisabledAt)
 	}
-	if !isLongTermDisabledProxy(*proxy, checkedAt.Add(25*time.Hour)) {
-		t.Fatal("geo-blocked disabled proxy did not become reclaimable after the retention period")
+	if isLongTermDisabledProxy(*proxy, disabledAt.Add(25*time.Hour)) {
+		t.Fatal("geo-blocked policy proxy became reclaimable as a system failure")
 	}
 }
 
@@ -516,7 +520,7 @@ func TestBUGFIXInvalidDisabledProbeInitializesClockWithoutRenewal(t *testing.T) 
 		t.Fatalf("AddProxyWithSource: %v", err)
 	}
 	if _, err := store.GetDB().Exec(
-		"UPDATE proxies SET status = 'disabled', last_check = NULL WHERE address = ? AND source = ? AND subscription_id = ?",
+		"UPDATE proxies SET status = 'disabled', disabled_at = NULL WHERE address = ? AND source = ? AND subscription_id = ?",
 		address, storage.SourceSubscription, subID,
 	); err != nil {
 		t.Fatalf("seed pending disabled proxy: %v", err)
@@ -529,13 +533,13 @@ func TestBUGFIXInvalidDisabledProbeInitializesClockWithoutRenewal(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetProxyByIdentity(after first invalid): %v", err)
 	}
-	if proxy.LastCheck.IsZero() {
-		t.Fatal("invalid disabled probe left pending last_check NULL")
+	if proxy.DisabledAt.IsZero() {
+		t.Fatal("invalid disabled probe left pending disabled_at NULL")
 	}
 
-	preservedAt := time.Date(2026, time.July, 3, 4, 5, 6, 0, time.UTC)
+	preservedAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 	if _, err := store.GetDB().Exec(
-		"UPDATE proxies SET last_check = ? WHERE address = ? AND source = ? AND subscription_id = ?",
+		"UPDATE proxies SET disabled_at = ? WHERE address = ? AND source = ? AND subscription_id = ?",
 		preservedAt.Format("2006-01-02 15:04:05"), address, storage.SourceSubscription, subID,
 	); err != nil {
 		t.Fatalf("seed established disabled clock: %v", err)
@@ -545,8 +549,8 @@ func TestBUGFIXInvalidDisabledProbeInitializesClockWithoutRenewal(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetProxyByIdentity(after repeated invalid): %v", err)
 	}
-	if !proxy.LastCheck.Equal(preservedAt) {
-		t.Fatalf("repeated invalid probe renewed retention clock: got %v, want %v", proxy.LastCheck, preservedAt)
+	if !proxy.DisabledAt.Equal(preservedAt) {
+		t.Fatalf("repeated invalid probe renewed retention clock: got %v, want %v", proxy.DisabledAt, preservedAt)
 	}
 }
 
@@ -569,7 +573,7 @@ func TestBUGFIXGeoBlockedRefreshValidationDoesNotRenewDisabledClock(t *testing.T
 	preservedAt := time.Date(2026, time.July, 4, 5, 6, 7, 0, time.UTC)
 	if _, err := store.GetDB().Exec(
 		`UPDATE proxies
-		 SET status = 'disabled', last_check = ?, exit_ip = '198.51.100.1',
+		 SET status = 'disabled', disabled_at = ?, exit_ip = '198.51.100.1',
 		     exit_location = 'JP Tokyo', latency = 100
 		 WHERE address = ? AND source = ? AND subscription_id = ?`,
 		preservedAt.Format("2006-01-02 15:04:05"), address, storage.SourceSubscription, subID,
@@ -580,8 +584,10 @@ func TestBUGFIXGeoBlockedRefreshValidationDoesNotRenewDisabledClock(t *testing.T
 	if err != nil {
 		t.Fatalf("GetProxyByIdentity(before): %v", err)
 	}
-	fake := newBlockingProxyValidator(map[string]bool{address: true})
-	fake.Release()
+	fake := staticProbeResultValidator{result: validator.Result{
+		Valid: false, Latency: 45 * time.Millisecond, ExitIP: testValidationExitIP, ExitLocation: testValidationExitLocation,
+		Risk: validator.UnknownRisk(), FailureReason: validator.FailureGeoRejected,
+	}}
 	m := &Manager{storage: store, validator: fake}
 
 	if got := m.validateCustomProxies([]storage.Proxy{*proxy}, subID); got != 0 {
@@ -594,8 +600,8 @@ func TestBUGFIXGeoBlockedRefreshValidationDoesNotRenewDisabledClock(t *testing.T
 	if after.Status != "disabled" {
 		t.Fatalf("geo-blocked status=%q, want disabled", after.Status)
 	}
-	if !after.LastCheck.Equal(preservedAt) {
-		t.Fatalf("geo-blocked refresh renewed retention clock: got %v, want %v", after.LastCheck, preservedAt)
+	if !after.DisabledAt.IsZero() {
+		t.Fatalf("geo-blocked refresh retained system disable clock: %v", after.DisabledAt)
 	}
 	if after.ExitIP != testValidationExitIP || after.ExitLocation != testValidationExitLocation || after.Latency != 45 {
 		t.Fatalf("geo-blocked refresh metadata=%q/%q/%d, want %q/%q/45",

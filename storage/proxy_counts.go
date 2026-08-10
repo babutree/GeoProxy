@@ -60,6 +60,9 @@ func (s *Storage) GetQualityDistribution() (map[string]int, error) {
 		}
 		dist[grade] = count
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return dist, nil
 }
 

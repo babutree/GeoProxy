@@ -2,6 +2,7 @@ package custom
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"strconv"
 	"testing"
@@ -37,6 +38,52 @@ func genTunnelNodes(n int) []ParsedNode {
 	return nodes
 }
 
+// realSingBoxBasePort 为真实集成测试选择未被其他进程占用的分片端口段。
+// 测试不得假设 21000/22000/30000 等固定段在开发机或 CI 上始终空闲。
+func realSingBoxBasePort(t *testing.T, nodes []ParsedNode, shardCount int) int {
+	t.Helper()
+	if shardCount < 1 {
+		t.Fatal("真实 sing-box 测试的分片数必须大于 0")
+	}
+
+	portsPerShard := make([]int, shardCount)
+	maxPortsPerShard := 0
+	for _, node := range nodes {
+		portsPerShard[shardIndexForKey(node.NodeKey(), shardCount)]++
+	}
+	for _, count := range portsPerShard {
+		if count > portRangeSpan-1 {
+			t.Fatalf("分片需要 %d 个端口，超过端口段容量 %d", count, portRangeSpan-1)
+		}
+		if count > maxPortsPerShard {
+			maxPortsPerShard = count
+		}
+	}
+	maxBasePort := 65535 - (shardCount-1)*portRangeSpan - maxPortsPerShard
+
+	for basePort := 10000; basePort <= maxBasePort; basePort += 500 {
+		if realSingBoxPortSegmentsAvailable(basePort, portsPerShard) {
+			return basePort
+		}
+	}
+	t.Fatalf("找不到 %d 个真实 sing-box 分片所需的空闲端口段", shardCount)
+	return 0
+}
+
+func realSingBoxPortSegmentsAvailable(basePort int, portsPerShard []int) bool {
+	for shardIndex, count := range portsPerShard {
+		segmentBase := basePort + shardIndex*portRangeSpan
+		for offset := 1; offset <= count; offset++ {
+			listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", segmentBase+offset))
+			if err != nil {
+				return false
+			}
+			_ = listener.Close()
+		}
+	}
+	return true
+}
+
 // shardProcessPID 读取某分片底层 SingBoxProcess 的 OS 进程 PID（0=未运行）。
 // 同包测试可访问私有字段；持锁读取避免与监控 goroutine 竞争。
 func shardProcessPID(shard singBoxShard) int {
@@ -56,11 +103,9 @@ func shardProcessPID(shard singBoxShard) int {
 // 整条机制在真实二进制下可用，再由 6000 节点测试放大规模。
 func TestRealSingBoxSmoke(t *testing.T) {
 	bin := realSingBoxBin(t)
-
-	sb := NewShardedSingBox(bin, t.TempDir(), 21000, 4)
-	t.Cleanup(sb.Stop)
-
 	nodes := genTunnelNodes(20)
+	sb := NewShardedSingBox(bin, t.TempDir(), realSingBoxBasePort(t, nodes, 4), 4)
+	t.Cleanup(sb.Stop)
 	if err := sb.Reload(nodes); err != nil {
 		t.Fatalf("Reload(20 真实节点) 出错: %v", err)
 	}
@@ -100,11 +145,12 @@ func TestRealSingBoxSmoothReloadOnlyRestartsChangedShard(t *testing.T) {
 	bin := realSingBoxBin(t)
 
 	const n = 4
-	sb := NewShardedSingBox(bin, t.TempDir(), 22000, n)
-	t.Cleanup(sb.Stop)
-
 	// 初始集：4 个映射到不同分片的节点，确保每个分片都有进程起来。
 	base := nodesOnDistinctShards(t, n, n)
+	newNode := tunnelNode("added", "added.example.com", "pw-added")
+	planned := append(append([]ParsedNode(nil), base...), newNode)
+	sb := NewShardedSingBox(bin, t.TempDir(), realSingBoxBasePort(t, planned, n), n)
+	t.Cleanup(sb.Stop)
 	if err := sb.Reload(base); err != nil {
 		t.Fatalf("初始 Reload 出错: %v", err)
 	}
@@ -117,7 +163,6 @@ func TestRealSingBoxSmoothReloadOnlyRestartsChangedShard(t *testing.T) {
 	}
 
 	// 新增一个节点，确定其目标分片。
-	newNode := tunnelNode("added", "added.example.com", "pw-added")
 	changedIdx := shardIndexForKey(newNode.NodeKey(), n)
 	if err := sb.Reload(append(append([]ParsedNode(nil), base...), newNode)); err != nil {
 		t.Fatalf("新增节点 Reload 出错: %v", err)
@@ -157,10 +202,9 @@ func TestRealSingBox6000NodesNoCrash(t *testing.T) {
 	const total = 6000
 	const n = 4
 	// 端口段需足够容纳每分片 ~1500 节点：portRangeSpan=5000 足够。
-	sb := NewShardedSingBox(bin, t.TempDir(), 30000, n)
-	t.Cleanup(sb.Stop)
-
 	nodes := genTunnelNodes(total)
+	sb := NewShardedSingBox(bin, t.TempDir(), realSingBoxBasePort(t, nodes, n), n)
+	t.Cleanup(sb.Stop)
 	if err := sb.Reload(nodes); err != nil {
 		t.Fatalf("Reload(%d 真实节点) 出错: %v", total, err)
 	}

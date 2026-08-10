@@ -24,6 +24,39 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up sing-box
+        env:
+          SINGBOX_VERSION: 1.13.5
+        run: |
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64) arch=arm64 ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          archive="$RUNNER_TEMP/sing-box.tar.gz"
+          curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${arch}.tar.gz" -o "$archive"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$RUNNER_TEMP/sing-box-${SINGBOX_VERSION}-linux-${arch}/sing-box" "$RUNNER_TEMP/bin/sing-box"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run Go vet
+        run: go vet ./...
       
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3.2.0
@@ -35,7 +68,7 @@ jobs:
         id: dockerhub-check
         shell: bash
         run: |
-          if [ "${{ secrets.DOCKERHUB_USERNAME }}" != '' ]; then
+          if [ "${{ secrets.DOCKERHUB_USERNAME }}" != '' ] && [ "${{ secrets.DOCKERHUB_TOKEN }}" != '' ]; then
             echo "available=true" >> $GITHUB_OUTPUT
           else
             echo "available=false" >> $GITHUB_OUTPUT

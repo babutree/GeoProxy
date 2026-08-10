@@ -3,6 +3,7 @@ package custom
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -96,5 +97,31 @@ func TestNewSingBoxProcessRejectsFileDataDir(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dataFile, "singbox")); !os.IsNotExist(statErr) {
 		t.Fatalf("普通文件路径下出现旁路目录，stat error = %v", statErr)
+	}
+}
+
+// sing-box 配置包含 vless/trojan/shadowsocks 凭据；运行目录和 config.json 必须仅当前账号可读。
+func TestSingBoxConfigFilesAreOwnerPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows os.FileMode does not expose NTFS owner-only ACLs")
+	}
+	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	if err := s.Reload([]ParsedNode{tunnelNode("private-config", "private.example.com", "secret")}); err == nil {
+		t.Fatal("Reload() error = nil, want missing binary after config generation")
+	}
+
+	dirInfo, err := os.Stat(s.configDir)
+	if err != nil {
+		t.Fatalf("Stat(configDir) error = %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0700 {
+		t.Fatalf("config directory mode = %04o, want 0700", got)
+	}
+	fileInfo, err := os.Stat(s.configFile)
+	if err != nil {
+		t.Fatalf("Stat(configFile) error = %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0600 {
+		t.Fatalf("config file mode = %04o, want 0600", got)
 	}
 }

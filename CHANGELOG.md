@@ -9,6 +9,7 @@
 
 ### 变更
 
+- **WebUI 中英文**：后台主要静态/动态文案、弹窗、toast、确认框与登录页支持中/英切换；语言偏好写入 `localStorage` 键 `gg-lang`，登录页与后台共用
 - **WebUI 布局**：按设计稿对齐外壳（总控/运维分组、主题仅顶栏、设置独立页、总览左分布右栏）
 - **主题令牌**：生产 CSS 改为 `data-theme="space"|"day"`（对齐设计稿）；兼容旧 localStorage `light`/`dark`
 - **总览节点分布**：动画分布图替换世界地图；按地域与延迟档聚合，连线表示 session 绑定；可暂停
@@ -39,10 +40,17 @@
 
 ### 修复
 
+- **Docker Compose 只读 API 首启配置**：透传 `PUBLIC_HOST`、`READONLY_API_KEYS` 与 `READONLY_API_RATE_PER_MIN`，并在 README 明确其仅首启导入的持久化合同。
+
 - **地域分布中文名补全**：`REGION_ZH` 补齐波罗的海（LV/EE/LT）及巴尔干/中亚/中东/拉美/非洲等节点池高频码；未知码仍回退大写 ISO
 - **暂停订阅与看板可用数对齐**：`/api/proxies` 返回 `subscription_status`；节点列表/地域分布/轨道分布的「可用」判定排除父订阅 `paused` 与孤儿订阅节点，与顶部「上游节点」统计及选路 scope 一致
 - **暂停订阅节点行展示**：父订阅暂停时状态显示「订阅已暂停」（非「待验证/手工」），地域/出口/协议等字段仍展示；禁用误导性的节点「启用」按钮，提示去订阅页恢复
 - **节点复制协议选择**：mixed 双入口节点复制改为应用内弹窗（复制 SOCKS5 / 复制 HTTP / 取消），不再使用浏览器 confirm 的「确定/取消」冒充两种协议
+- **名称/备注列**：仅显示用户备注，无备注留空；禁止回退 `address`/`127.0.0.1:mixed`
+- **API Key 末次使用**：Go 零值时间（从未使用）显示为 `--`，不再被 `toLocaleString` 渲染成 `1/1/1`
+- **暂停/恢复订阅节点状态**：暂停订阅时同步将该订阅下代理标为 `disabled`；恢复订阅后异步 `RefreshSubscription` 重验，验证通过再 Enable；同批 address/node_key 配置冲突改为保留首项并跳过冲突项，避免整单刷新失败
+- **网关节点复制限制**：不可用 / 未验证 / 订阅已暂停 / 已停用的网关节点禁用「复制」按钮，并在 `copyProxyCred` 二次拦截
+- **WebUI 中/英切换**：顶栏语言按钮；`data-i18n` 静态文案 + `t()` 动态文案；偏好写入 `localStorage(gg-lang)`
 - **NodeKey 会话监控**：带 session 的 NodeKey 或兼容 host:port 锁定在命中节点后写入真实 affinity 绑定，使 Session 监控与节点占用统计可见；锁定失败不创建伪绑定
 - **Session 监控排序**：按 TTL 到期时刻倒序返回会话；到期时刻相同则按 session ID 固定排序，自动刷新不再随机换位
 - **日志自动滚动**：开启时双 rAF 贴底，并在切入日志页后重新贴底（修复 `display:none` 时 scrollHeight 无效）；关闭时仍保留可见锚点；`/api/logs` 返回最近 500 行
@@ -117,6 +125,8 @@
 
 ### 修复
 
+- **Docker Compose 只读 API 首启配置**：透传 `PUBLIC_HOST`、`READONLY_API_KEYS` 与 `READONLY_API_RATE_PER_MIN`，并在 README 明确其仅首启导入的持久化合同。
+
 - 订阅拉取失败会携带 HTTP 状态码与截断、脱敏的响应片段；5xx 与 429 最多短暂重试一次，仍禁止通过上游节点回源。
 - 长期禁用的订阅隧道节点会从 sing-box 运行态移除并释放 mixed 端口；过期探测结果不会写回已被复用的端口。
 - 会话首绑/换绑：容量与冷却检查与写入串行化，并发首绑不再突破 `max_sessions_per_proxy`，冷却也原子生效；同 session 并发 Resolve 不会拆成多节点
@@ -164,6 +174,8 @@
 ## [v0.4.1] - 2026-04-04
 
 ### 修复
+
+- **Docker Compose 只读 API 首启配置**：透传 `PUBLIC_HOST`、`READONLY_API_KEYS` 与 `READONLY_API_RATE_PER_MIN`，并在 README 明确其仅首启导入的持久化合同。
 
 - 修复发布/部署配置漂移：Docker Compose 默认数据落点统一为宿主机 `./data`，地域黑名单默认值与 README/PRD 保持一致
 - 升级 sing-box 从 1.11.8 到 **1.13.5**，修复 anytls 等新协议不支持导致订阅节点启动失败的问题
@@ -224,6 +236,8 @@
 
 ### 修复
 
+- **Docker Compose 只读 API 首启配置**：透传 `PUBLIC_HOST`、`READONLY_API_KEYS` 与 `READONLY_API_RATE_PER_MIN`，并在 README 明确其仅首启导入的持久化合同。
+
 - 修复 `AddProxy` 未显式设置 `source='free'` 的问题
 - 修复 WebUI「刷新代理」「刷新延迟」对订阅代理执行硬删除的问题（改为禁用）
 - 修复 `validateCustomProxies` 将所有代理硬编码为 socks5 协议导致 HTTP 直连代理验证失败
@@ -257,6 +271,8 @@
 - WebUI 地理过滤设置界面支持动态修改白名单/黑名单
 
 ### 修复
+
+- **Docker Compose 只读 API 首启配置**：透传 `PUBLIC_HOST`、`READONLY_API_KEYS` 与 `READONLY_API_RATE_PER_MIN`，并在 README 明确其仅首启导入的持久化合同。
 
 - 修复地理过滤在验证器和存储层的逻辑一致性问题
 - 修复启动时地理过滤清理逻辑，正确处理白名单优先场景

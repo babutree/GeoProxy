@@ -650,6 +650,12 @@ func TestApiV1NodesRejectsInvalidQueryParams(t *testing.T) {
 		{name: "bad_cf", path: "/api/v1/nodes?cf=unknown"},
 		{name: "bad_status", path: "/api/v1/nodes?status=active"},
 		{name: "bad_connect", path: "/api/v1/nodes?connect=tunnel"},
+		{name: "bad_region", path: "/api/v1/nodes?region=USA"},
+		{name: "bad_protocol", path: "/api/v1/nodes?protocol=https"},
+		{name: "bad_source", path: "/api/v1/nodes?source=other"},
+		{name: "bad_ai", path: "/api/v1/nodes?ai=typo"},
+		{name: "mixed_ai_with_unknown_member", path: "/api/v1/nodes?ai=openai,typo"},
+		{name: "empty_ai_members", path: "/api/v1/nodes?ai=,"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := nodesAPIRequest(http.MethodGet, tc.path, key)

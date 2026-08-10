@@ -98,7 +98,7 @@ WebUI 上传的本地订阅内容写入数据目录下的 `subscriptions/`，数
 ### `proxies`
 
 `id`、`address`、`protocol`、`region`、`region_source`、`note`、
-`exit_ip`、`exit_location`、`latency`、`quality_grade`、`use_count`、
+`exit_ip`、`exit_location`、`exit_checked_at`、`disabled_at`、`latency`、`quality_grade`、`use_count`、
 `success_count`、`fail_count`、`last_used`、`last_check`、`created_at`、
 `status`、`user_paused`、`source`、`subscription_id`、`ipapiis_score`、
 `ipapi_flags`、`ipapi_flags_seen`、`starred`、`cf_blocked`、

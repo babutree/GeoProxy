@@ -1,6 +1,9 @@
 package storage
 
-import "database/sql"
+import (
+	"database/sql"
+	"fmt"
+)
 
 func (s *Storage) AddManualProxy(address, protocol, region, note string) error {
 	return s.addManualProxyExec(s.db, address, protocol, region, note, "", "", "")
@@ -14,7 +17,93 @@ func (s *Storage) AddManualProxyWithCredentials(address, protocol, region, note,
 
 // AddManualProxyWithNodeKey 手工入库并可写入稳定 node_key（隧道手工节点用 ParsedNode.NodeKey）。
 func (s *Storage) AddManualProxyWithNodeKey(address, protocol, region, note, nodeKey string) error {
-	return s.addManualProxyExec(s.db, address, protocol, region, note, "", "", nodeKey)
+	if nodeKey == "" {
+		return s.addManualProxyExec(s.db, address, protocol, region, note, "", "", "")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var count int
+	var proxyID int64
+	var storedAddress string
+	var storedProtocol string
+	normalizedProtocol := normalizeProtocol(protocol)
+	if err := tx.QueryRow(
+		`SELECT COUNT(*), COALESCE(MIN(id), 0), COALESCE(MIN(address), ''), COALESCE(MIN(protocol), '')
+		   FROM proxies
+		  WHERE source = 'manual' AND subscription_id = 0 AND node_key = ?`,
+		nodeKey,
+	).Scan(&count, &proxyID, &storedAddress, &storedProtocol); err != nil {
+		return err
+	}
+	if count > 1 {
+		return fmt.Errorf("manual proxy node_key %q is ambiguous (at least 2 rows)", nodeKey)
+	}
+	if count == 0 {
+		if err := s.addManualProxyExec(tx, address, protocol, region, note, "", "", nodeKey); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	region = normalizeManualRegion(region)
+	regionSource := "auto"
+	if region != "" {
+		regionSource = "manual"
+	}
+	if storedAddress == address && storedProtocol == normalizedProtocol {
+		res, err := tx.Exec(
+			`UPDATE proxies SET region = ?, region_source = ?, note = ? WHERE id = ? AND node_key = ?`,
+			region, regionSource, note, proxyID, nodeKey,
+		)
+		if err != nil {
+			return err
+		}
+		if err := requireRowsAffected(res.RowsAffected()); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	// 地址或协议改变意味着旧探测证据对应的是另一条路由，必须回到待验证状态。
+	res, err := tx.Exec(
+		`UPDATE proxies
+		    SET address = ?,
+		        protocol = ?,
+		        region = ?,
+		        region_source = ?,
+		        note = ?,
+		        exit_ip = '',
+		        exit_location = '',
+		        latency = 0,
+		        quality_grade = 'C',
+		        fail_count = 0,
+		        last_check = NULL,
+		        exit_checked_at = NULL,
+		        disabled_at = NULL,
+		        ipapiis_score = -1,
+		        ipapi_flags = '',
+		        ipapi_flags_seen = 0,
+		        cf_blocked = -1,
+		        ai_reachability = '',
+		        status = 'disabled',
+		        proxy_username = '',
+		        proxy_password = '',
+		        node_key = ?
+		  WHERE id = ? AND node_key = ?`,
+		address, normalizedProtocol, region, regionSource, note, nodeKey, proxyID, nodeKey,
+	)
+	if err != nil {
+		return err
+	}
+	if err := requireRowsAffected(res.RowsAffected()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type proxyExec interface {
@@ -66,21 +155,15 @@ func (s *Storage) AddManualProxies(proxies []Proxy, region, note string) error {
 }
 
 func (s *Storage) UpdateProxyRegion(address, region string, manual bool) error {
-	if err := s.requireUnambiguousAddress(address); err != nil {
-		return err
-	}
 	regionSource := "auto"
 	if manual {
 		regionSource = "manual"
 	}
 	res, err := s.db.Exec(
-		`UPDATE proxies SET region = ?, region_source = ? WHERE address = ?`,
+		`UPDATE proxies SET region = ?, region_source = ? WHERE `+uniqueAddressProxyIDWhere,
 		normalizeManualRegion(region), regionSource, address,
 	)
-	if err != nil {
-		return err
-	}
-	return requireRowsAffected(res.RowsAffected())
+	return s.finishAddressOnlyMutation(address, res, err)
 }
 
 func (s *Storage) UpdateProxyRegionByID(id int64, region string, manual bool) error {
@@ -99,14 +182,8 @@ func (s *Storage) UpdateProxyRegionByID(id int64, region string, manual bool) er
 }
 
 func (s *Storage) UpdateProxyNote(address, note string) error {
-	if err := s.requireUnambiguousAddress(address); err != nil {
-		return err
-	}
-	res, err := s.db.Exec(`UPDATE proxies SET note = ? WHERE address = ?`, note, address)
-	if err != nil {
-		return err
-	}
-	return requireRowsAffected(res.RowsAffected())
+	res, err := s.db.Exec(`UPDATE proxies SET note = ? WHERE `+uniqueAddressProxyIDWhere, note, address)
+	return s.finishAddressOnlyMutation(address, res, err)
 }
 
 func (s *Storage) UpdateProxyNoteByID(id int64, note string) error {

@@ -3,7 +3,6 @@ package custom
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/babutree/GeoProxy/storage"
 	"github.com/babutree/GeoProxy/validator"
@@ -58,33 +57,24 @@ func TestReplaceSubscriptionProxiesDeduplicatesEquivalentEntries(t *testing.T) {
 	}
 }
 
-func TestReplaceSubscriptionProxiesRejectsConflictingNodeKey(t *testing.T) {
+func TestReplaceSubscriptionProxiesKeepsFirstOnConflictingNodeKey(t *testing.T) {
 	store := newTestStorage(t)
 	subID := managerIdentityTestSubscription(t, store)
-	oldID := seedManagerSubscriptionProxy(t, store, subID, "old.example:8080", "stable-key", true)
-	if _, err := store.GetDB().Exec(
-		`UPDATE subscriptions SET proxy_count = ?, last_fetch = ? WHERE id = ?`,
-		9, "2026-07-19 08:09:10", subID,
-	); err != nil {
-		t.Fatalf("seed subscription metadata: %v", err)
-	}
-	beforeSub, err := store.GetSubscription(subID)
-	if err != nil {
-		t.Fatalf("GetSubscription() before conflict error = %v", err)
-	}
+	_ = seedManagerSubscriptionProxy(t, store, subID, "old.example:8080", "stable-key", true)
 	m := &Manager{storage: store}
 
-	_, err = m.replaceSubscriptionProxies(subID, []subscriptionProxyEntry{
+	proxies, err := m.replaceSubscriptionProxies(subID, []subscriptionProxyEntry{
 		{addr: "new-a.example:8080", proto: "http", username: "alice", password: "one", nodeKey: "stable-key"},
 		{addr: "new-b.example:8080", proto: "socks5", username: "bob", password: "two", nodeKey: "stable-key"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "node_key") {
-		t.Fatalf("replaceSubscriptionProxies() error = %v, want explicit node_key conflict", err)
+	if err != nil {
+		t.Fatalf("replaceSubscriptionProxies() error = %v, want keep-first skip conflict", err)
 	}
-
-	row := proxyByIDInTest(t, store, oldID)
-	if row.Address != "old.example:8080" || row.NodeKey != "stable-key" || !row.UserPaused || row.Status != "active" {
-		t.Fatalf("old proxy after rejected conflict = %+v, want unchanged row", row)
+	if len(proxies) != 1 {
+		t.Fatalf("returned proxies = %d, want 1 (first occurrence kept)", len(proxies))
+	}
+	if proxies[0].Address != "new-a.example:8080" || proxies[0].NodeKey != "stable-key" {
+		t.Fatalf("kept proxy = %+v, want first occurrence new-a/stable-key", proxies[0])
 	}
 	var rowCount int
 	if err := store.GetDB().QueryRow(
@@ -94,75 +84,45 @@ func TestReplaceSubscriptionProxiesRejectsConflictingNodeKey(t *testing.T) {
 		t.Fatalf("count subscription proxies: %v", err)
 	}
 	if rowCount != 1 {
-		t.Fatalf("database proxy rows after rejected conflict = %d, want 1", rowCount)
-	}
-	sub, err := store.GetSubscription(subID)
-	if err != nil {
-		t.Fatalf("GetSubscription() error = %v", err)
-	}
-	if sub.ProxyCount != beforeSub.ProxyCount || !sub.LastFetch.Equal(beforeSub.LastFetch) {
-		t.Fatalf("subscription metadata after rejected conflict = count:%d last_fetch:%v, want unchanged", sub.ProxyCount, sub.LastFetch)
+		t.Fatalf("database proxy rows after keep-first = %d, want 1", rowCount)
 	}
 }
 
-func TestReplaceSubscriptionProxiesRejectsConflictingAddress(t *testing.T) {
+func TestReplaceSubscriptionProxiesKeepsFirstOnConflictingAddress(t *testing.T) {
 	store := newTestStorage(t)
 	subID := managerIdentityTestSubscription(t, store)
-	oldID := seedManagerSubscriptionProxy(t, store, subID, "same.example:8080", "old-key", false)
-	if _, err := store.GetDB().Exec(
-		`UPDATE subscriptions SET proxy_count = ?, last_fetch = ? WHERE id = ?`,
-		4, "2026-07-19 09:10:11", subID,
-	); err != nil {
-		t.Fatalf("seed subscription metadata: %v", err)
-	}
-	beforeSub, err := store.GetSubscription(subID)
-	if err != nil {
-		t.Fatalf("GetSubscription() before conflict error = %v", err)
-	}
+	_ = seedManagerSubscriptionProxy(t, store, subID, "same.example:8080", "old-key", false)
 	m := &Manager{storage: store}
 
-	_, err = m.replaceSubscriptionProxies(subID, []subscriptionProxyEntry{
+	proxies, err := m.replaceSubscriptionProxies(subID, []subscriptionProxyEntry{
 		{addr: "same.example:8080", proto: "http", nodeKey: "new-key"},
 		{addr: "same.example:8080", proto: "socks5", dual: true, username: "alice", password: "secret", nodeKey: "other-key"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "address") {
-		t.Fatalf("replaceSubscriptionProxies() error = %v, want explicit address conflict", err)
-	}
-
-	row := proxyByIDInTest(t, store, oldID)
-	if row.Address != "same.example:8080" || row.NodeKey != "old-key" || row.Protocol != "http" || row.UserPaused {
-		t.Fatalf("old proxy after rejected address conflict = %+v, want unchanged row", row)
-	}
-	sub, err := store.GetSubscription(subID)
 	if err != nil {
-		t.Fatalf("GetSubscription() error = %v", err)
+		t.Fatalf("replaceSubscriptionProxies() error = %v, want keep-first skip conflict", err)
 	}
-	if sub.ProxyCount != beforeSub.ProxyCount || !sub.LastFetch.Equal(beforeSub.LastFetch) {
-		t.Fatalf("subscription metadata after rejected conflict = count:%d last_fetch:%v, want unchanged", sub.ProxyCount, sub.LastFetch)
+	if len(proxies) != 1 {
+		t.Fatalf("returned proxies = %d, want 1", len(proxies))
+	}
+	if proxies[0].Protocol != "http" || proxies[0].NodeKey != "new-key" {
+		t.Fatalf("kept proxy = %+v, want first occurrence http/new-key", proxies[0])
 	}
 }
 
-func TestReplaceSubscriptionProxiesConflictDoesNotWriteBeforeValidation(t *testing.T) {
+func TestReplaceSubscriptionProxiesConflictKeepsFirstWrite(t *testing.T) {
 	store := newTestStorage(t)
 	subID := managerIdentityTestSubscription(t, store)
-	if _, err := store.GetDB().Exec(
-		`UPDATE subscriptions SET last_fetch = ? WHERE id = ?`,
-		time.Date(2026, 7, 19, 10, 11, 12, 0, time.UTC), subID,
-	); err != nil {
-		t.Fatalf("seed subscription timestamp: %v", err)
-	}
-	beforeSub, err := store.GetSubscription(subID)
-	if err != nil {
-		t.Fatalf("GetSubscription() before conflict error = %v", err)
-	}
 	m := &Manager{storage: store}
 
-	_, err = m.replaceSubscriptionProxies(subID, []subscriptionProxyEntry{
+	proxies, err := m.replaceSubscriptionProxies(subID, []subscriptionProxyEntry{
 		{addr: "preflight.example:8080", proto: "http", nodeKey: "preflight-key"},
 		{addr: "preflight.example:8080", proto: "http", nodeKey: "different-key"},
 	})
-	if err == nil {
-		t.Fatal("replaceSubscriptionProxies() error = nil, want preflight conflict")
+	if err != nil {
+		t.Fatalf("replaceSubscriptionProxies() error = %v, want keep-first", err)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("returned proxies = %d, want 1", len(proxies))
 	}
 
 	var count int
@@ -170,21 +130,21 @@ func TestReplaceSubscriptionProxiesConflictDoesNotWriteBeforeValidation(t *testi
 		`SELECT COUNT(*) FROM proxies WHERE source = ? AND subscription_id = ?`,
 		storage.SourceSubscription, subID,
 	).Scan(&count); err != nil {
-		t.Fatalf("count rows after preflight rejection: %v", err)
+		t.Fatalf("count rows after keep-first: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("proxy rows after preflight rejection = %d, want 0", count)
+	if count != 1 {
+		t.Fatalf("proxy rows after keep-first = %d, want 1", count)
 	}
 	sub, err := store.GetSubscription(subID)
 	if err != nil {
 		t.Fatalf("GetSubscription() error = %v", err)
 	}
-	if sub.ProxyCount != beforeSub.ProxyCount || !sub.LastFetch.Equal(beforeSub.LastFetch) {
-		t.Fatalf("subscription metadata after preflight rejection = count:%d last_fetch:%v, want original", sub.ProxyCount, sub.LastFetch)
+	if sub.ProxyCount != 1 {
+		t.Fatalf("subscription proxy_count = %d, want 1 after keep-first write", sub.ProxyCount)
 	}
 }
 
-func TestRefreshSubscriptionRejectsDirectConflictBeforeRuntimeChange(t *testing.T) {
+func TestRefreshSubscriptionKeepsFirstOnDirectAddressConflict(t *testing.T) {
 	store := newTestStorage(t)
 	file := writeSubscriptionFile(t, strings.Join([]string{
 		"proxies:",
@@ -200,46 +160,36 @@ func TestRefreshSubscriptionRejectsDirectConflictBeforeRuntimeChange(t *testing.
 		"    port: 8080",
 		"    username: bob",
 		"    password: two",
-		"  - name: incoming-tunnel",
-		"    type: trojan",
-		"    server: new.example",
-		"    port: 443",
-		"    password: tunnel-secret",
 	}, "\n"))
 	subID, err := store.AddSubscription("duplicate address", "", file, "clash", 60, "")
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
-	oldNode := tunnelNode("old", "old.example.com", "password")
-	shard := newSpyShard()
-	if err := shard.Reload([]ParsedNode{oldNode}); err != nil {
-		t.Fatalf("seed Reload() error = %v", err)
-	}
-	beforeCalls := shard.calls()
 	m := &Manager{
 		storage:   store,
 		validator: validator.New(1, 1, "http://127.0.0.1/validate"),
-		singbox:   shard,
+		singbox:   newSpyShard(),
 	}
 
-	err = m.RefreshSubscription(subID)
-	if err == nil || !strings.Contains(err.Error(), "address") {
-		t.Fatalf("RefreshSubscription() error = %v, want address conflict", err)
-	}
-	if shard.calls() != beforeCalls {
-		t.Fatalf("Reload calls after preflight conflict = %d, want unchanged %d", shard.calls(), beforeCalls)
-	}
-	if got := shard.GetNodes(); len(got) != 1 || got[0].NodeKey() != oldNode.NodeKey() {
-		t.Fatalf("runtime nodes after preflight conflict = %+v, want original node", got)
+	// keep-first：同 address 冲突不再整单失败，保留 http 首项并完成刷新。
+	if err := m.RefreshSubscription(subID); err != nil {
+		t.Fatalf("RefreshSubscription() error = %v, want nil with keep-first", err)
 	}
 	var count int
 	if err := store.GetDB().QueryRow(
 		"SELECT COUNT(*) FROM proxies WHERE source = ? AND subscription_id = ?",
 		storage.SourceSubscription, subID,
 	).Scan(&count); err != nil {
-		t.Fatalf("count subscription rows after conflict: %v", err)
+		t.Fatalf("count subscription rows after keep-first: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("subscription rows after preflight conflict = %d, want 0", count)
+	if count != 1 {
+		t.Fatalf("subscription rows after keep-first = %d, want 1", count)
+	}
+	proxy, err := store.GetProxyByIdentity("same.example:8080", storage.SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity() error = %v", err)
+	}
+	if proxy.Protocol != "http" {
+		t.Fatalf("kept protocol = %q, want http (first occurrence)", proxy.Protocol)
 	}
 }

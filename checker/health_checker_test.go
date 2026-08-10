@@ -43,13 +43,16 @@ func (v *slowValidator) ValidateStream(proxies []storage.Proxy) <-chan validator
 }
 
 type countingStore struct {
-	batchCalls      atomic.Int32
-	failureCalls    atomic.Int32
-	batch           []storage.Proxy
-	failureDisabled bool
-	failureErr      error
-	mu              sync.Mutex
-	updates         int
+	batchCalls           atomic.Int32
+	failureCalls         atomic.Int32
+	probeFailureCalls    atomic.Int32
+	policyCalls          atomic.Int32
+	batch                []storage.Proxy
+	failureDisabled      bool
+	failureErr           error
+	mu                   sync.Mutex
+	updates              int
+	lastProbeObservation storage.ExitObservation
 }
 
 func (s *countingStore) GetBatchForHealthCheck(int) ([]storage.Proxy, error) {
@@ -71,6 +74,25 @@ func (s *countingStore) RecordProxyFailureByID(int64, int) error { return nil }
 func (s *countingStore) RecordProxyFailureByIDWithStatus(int64, int) (bool, error) {
 	s.failureCalls.Add(1)
 	return s.failureDisabled, s.failureErr
+}
+
+func (s *countingStore) ApplyProbeObservation(storage.RouteIdentity, storage.ExitObservation) error {
+	s.mu.Lock()
+	s.updates++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *countingStore) RecordProbeFailure(_ storage.RouteIdentity, observation storage.ExitObservation, _ int) (bool, error) {
+	s.probeFailureCalls.Add(1)
+	s.mu.Lock()
+	s.lastProbeObservation = observation
+	s.mu.Unlock()
+	return s.failureDisabled, s.failureErr
+}
+func (s *countingStore) DisableRouteForPolicy(storage.RouteIdentity) error {
+	s.policyCalls.Add(1)
+	return nil
 }
 
 type resultValidator struct {
@@ -113,7 +135,7 @@ func TestCheckBatchUsesAuthoritativeDisabledStatus(t *testing.T) {
 			if summary.disabled != tc.wantDisabled {
 				t.Fatalf("disabled=%d, want %d", summary.disabled, tc.wantDisabled)
 			}
-			if got := store.failureCalls.Load(); got != 1 {
+			if got := store.probeFailureCalls.Load(); got != 1 {
 				t.Fatalf("failure writes=%d, want 1", got)
 			}
 		})
@@ -203,4 +225,60 @@ func TestStartBackgroundIsIdempotent(t *testing.T) {
 		t.Fatalf("backgroundStartCount=%d, want 1", hc.backgroundStartCount())
 	}
 	hc.StopBackground()
+}
+
+func TestHealthCheckerPersistsTrustedExitFromInvalidResult(t *testing.T) {
+	proxy := storage.Proxy{ID: 1, Address: "exit-after-reject.example:10001", Protocol: "http", Source: storage.SourceManual}
+	store := &countingStore{batch: []storage.Proxy{proxy}}
+	hc := newHealthCheckerForTest(
+		store,
+		resultValidator{results: []validator.Result{{
+			Proxy: proxy, Valid: false, Latency: 64 * time.Millisecond,
+			ExitIP: "203.0.113.91", ExitLocation: "GB London",
+		}}},
+		&config.Config{},
+	)
+
+	hc.checkBatch(store.batch)
+	if got := store.probeFailureCalls.Load(); got != 1 {
+		t.Fatalf("RecordProbeFailure calls=%d, want 1", got)
+	}
+	store.mu.Lock()
+	observation := store.lastProbeObservation
+	store.mu.Unlock()
+	if observation.ExitIP != "203.0.113.91" || observation.ExitLocation != "GB London" || observation.LatencyMS != 64 {
+		t.Fatalf("probe failure observation = %#v, want trusted exit", observation)
+	}
+}
+
+// TestHealthCheckerGeoRejectionUsesPolicyDisable 锁定三时钟语义：地域策略拒绝
+// 不是上游故障，不能增加失败计数或开始系统禁用保留期；可信出口仍须写回。
+func TestHealthCheckerGeoRejectionUsesPolicyDisable(t *testing.T) {
+	proxy := storage.Proxy{ID: 1, Address: "geo-rejected.example:10001", Protocol: "http", Source: storage.SourceManual}
+	store := &countingStore{batch: []storage.Proxy{proxy}}
+	hc := newHealthCheckerForTest(
+		store,
+		resultValidator{results: []validator.Result{{
+			Proxy: proxy, Valid: false, FailureReason: validator.FailureGeoRejected,
+			Latency: 64 * time.Millisecond, ExitIP: "203.0.113.92", ExitLocation: "US Ashburn",
+		}}},
+		&config.Config{},
+	)
+
+	summary := hc.checkBatch(store.batch)
+	if got := store.probeFailureCalls.Load(); got != 0 {
+		t.Fatalf("RecordProbeFailure calls=%d, want 0 for geo policy rejection", got)
+	}
+	if got := store.policyCalls.Load(); got != 1 {
+		t.Fatalf("DisableRouteForPolicy calls=%d, want 1", got)
+	}
+	if summary.disabled != 0 {
+		t.Fatalf("system disabled=%d, want 0 for geo policy rejection", summary.disabled)
+	}
+	store.mu.Lock()
+	updates := store.updates
+	store.mu.Unlock()
+	if updates != 1 {
+		t.Fatalf("ApplyProbeObservation updates=%d, want 1 for trusted exit", updates)
+	}
 }

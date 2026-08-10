@@ -1,10 +1,12 @@
 package webui
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/babutree/GeoProxy/config"
 	"github.com/babutree/GeoProxy/custom"
@@ -22,7 +24,7 @@ type subscriptionFile interface {
 
 func writeSubscriptionFile(file subscriptionFile, content string) error {
 	var operationErr error
-	if err := file.Chmod(0644); err != nil {
+	if err := file.Chmod(0600); err != nil {
 		operationErr = err
 	} else if _, err := file.WriteString(content); err != nil {
 		operationErr = err
@@ -206,7 +208,43 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"status": "added", "id": id})
 }
 
-// apiSubscriptionDelete 删除订阅
+// removeManagedSubscriptionFile 仅删除 WebUI 受管 subscriptions 目录创建的文件。
+// 数据库中的 file_path 不能作为删除任意本地路径的授权。
+func removeManagedSubscriptionFile(filePath string) error {
+	if filePath == "" {
+		return nil
+	}
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return err
+	}
+	managedDir, err := filepath.Abs(filepath.Join(dataDir, "subscriptions"))
+	if err != nil {
+		return err
+	}
+	candidate, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(managedDir, candidate)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return nil
+	}
+	info, err := os.Lstat(candidate)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return nil
+	}
+	return os.Remove(candidate)
+}
+
+// apiSubscriptionDelete 先删除运行态和数据库订阅；数据库成功后才清理 WebUI 受管凭据文件。
+// 数据库删除失败时不得触碰文件，以免留下“订阅仍在、文件已丢”的半删状态。
 func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -224,21 +262,25 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.customMgr != nil {
-		if err := s.customMgr.DeleteSubscription(req.ID); err != nil {
-			log.Printf("[webui] 通过 Manager 删除订阅 #%d 失败: %v", req.ID, err)
-			jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
-			return
-		}
-		log.Printf("[webui] 删除订阅 #%d", req.ID)
-		jsonOK(w, map[string]string{"status": "deleted"})
+	sub, err := s.storage.GetSubscription(req.ID)
+	if err != nil {
+		log.Printf("[webui] 读取待删除订阅 #%d 失败: %v", req.ID, err)
+		jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
 		return
 	}
-
-	// custom manager 缺失的测试或最小服务器使用此回退；仅删除数据库记录无法更新 sing-box 运行态。
-	if err := s.storage.DeleteSubscription(req.ID); err != nil {
+	if s.customMgr != nil {
+		err = s.customMgr.DeleteSubscription(req.ID)
+	} else {
+		err = s.storage.DeleteSubscription(req.ID)
+	}
+	if err != nil {
 		log.Printf("[webui] 删除订阅 #%d 失败: %v", req.ID, err)
 		jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
+		return
+	}
+	if err := removeManagedSubscriptionFile(sub.FilePath); err != nil {
+		log.Printf("[webui] 订阅 #%d 已删除，但清理受管文件失败: %v", req.ID, err)
+		jsonError(w, "subscription deleted but file cleanup failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -312,6 +354,15 @@ func (s *Server) apiSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[webui] 切换订阅 #%d 状态失败: %v", req.ID, err)
 		jsonError(w, "failed to toggle subscription", http.StatusInternalServerError)
 		return
+	}
+	// 恢复订阅后必须重验：暂停时节点已被批量 disabled，仅改 subscriptions.status
+	// 不会自动复活节点；异步 Refresh 会重新入池并验证通过后 Enable。
+	if status == "active" && s.customMgr != nil {
+		go func(id int64) {
+			if err := s.customMgr.RefreshSubscription(id); err != nil {
+				log.Printf("[webui] 恢复订阅 #%d 后重验失败: %v", id, err)
+			}
+		}(req.ID)
 	}
 
 	jsonOK(w, map[string]string{"status": status})

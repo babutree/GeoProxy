@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"database/sql"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -1213,4 +1214,61 @@ func startSilentTCPServer(t *testing.T) string {
 		}
 	}()
 	return listener.Addr().String()
+}
+
+func fakeRouteMatches(identity storage.RouteIdentity, proxy storage.Proxy) bool {
+	return identity.ID == proxy.ID &&
+		identity.Address == proxy.Address &&
+		identity.Protocol == proxy.Protocol &&
+		identity.NodeKey == proxy.NodeKey &&
+		identity.Username == proxy.Username &&
+		identity.Password == proxy.Password &&
+		identity.Source == proxy.Source &&
+		identity.SubscriptionID == proxy.SubscriptionID &&
+		identity.DualProtocol == proxy.DualProtocol
+}
+
+func (s *fakeProxyStore) RecordForwardSuccess(identity storage.RouteIdentity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	proxy, ok := s.proxies[identity.ID]
+	if !ok || !fakeRouteMatches(identity, proxy) {
+		return sql.ErrNoRows
+	}
+	proxy.UseCount++
+	proxy.SuccessCount++
+	proxy.FailCount = 0
+	s.proxies[proxy.ID] = proxy
+	return nil
+}
+
+func (s *fakeProxyStore) RecordForwardFailure(identity storage.RouteIdentity, threshold int) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	proxy, ok := s.proxies[identity.ID]
+	if !ok || !fakeRouteMatches(identity, proxy) {
+		return false, sql.ErrNoRows
+	}
+	proxy.UseCount++
+	proxy.FailCount++
+	if proxy.FailCount >= threshold {
+		proxy.Status = "disabled"
+	}
+	s.proxies[proxy.ID] = proxy
+	return proxy.Status == "disabled", nil
+}
+
+func TestRecordProxyFailureRejectsReboundRoute(t *testing.T) {
+	store := newProxyTestStore()
+	stale := storage.Proxy{ID: 1, Address: "old.example:10001", Protocol: "socks5", Source: storage.SourceManual, Status: "active"}
+	store.proxies[stale.ID] = stale
+	rebound := stale
+	rebound.Address = "new.example:10002"
+	store.proxies[rebound.ID] = rebound
+
+	recordProxyFailure(store, &stale)
+	got := store.proxies[rebound.ID]
+	if got.FailCount != 0 || got.UseCount != 0 {
+		t.Fatalf("stale forward failure polluted rebound route: %#v", got)
+	}
 }

@@ -32,6 +32,9 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 	if rows.Next() {
 		return scanProxy(rows)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return nil, fmt.Errorf("no available proxy")
 }
 
@@ -57,6 +60,9 @@ func (s *Storage) GetAllForAdmin() ([]Proxy, error) {
 			return nil, err
 		}
 		proxies = append(proxies, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return proxies, nil
 }
@@ -88,6 +94,9 @@ func (s *Storage) GetAllFiltered(sourceFilter string) ([]Proxy, error) {
 			return nil, err
 		}
 		proxies = append(proxies, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return proxies, nil
 }
@@ -238,6 +247,9 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int) ([]Proxy, error) {
 		}
 		proxies = append(proxies, *p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return proxies, nil
 }
 
@@ -265,6 +277,9 @@ func (s *Storage) GetByProtocol(protocol string) ([]Proxy, error) {
 		}
 		proxies = append(proxies, *p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return proxies, nil
 }
 
@@ -273,7 +288,8 @@ func (s *Storage) GetDisabledCustomProxies() ([]Proxy, error) {
 	rows, err := s.db.Query(
 		`SELECT ` + proxyColumns + `
 		 FROM proxies
-		 WHERE source = 'subscription' AND status = 'disabled'`,
+		 WHERE source = 'subscription' AND status = 'disabled'
+		   AND ` + selectableSubscriptionScopeSQL,
 	)
 	if err != nil {
 		return nil, err
@@ -287,6 +303,9 @@ func (s *Storage) GetDisabledCustomProxies() ([]Proxy, error) {
 			return nil, err
 		}
 		proxies = append(proxies, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return proxies, nil
 }

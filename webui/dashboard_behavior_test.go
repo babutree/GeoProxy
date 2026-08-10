@@ -36,7 +36,7 @@ type dashboardNodeKeyWireVector struct {
 
 func TestDashboardProductionBundleBehavior(t *testing.T) {
 	bundle := dashboardBehaviorBundle(t)
-	for _, scenario := range []string{"protocol", "filters", "filter_toggle", "ai_badges", "pagination", "copy", "log_window"} {
+	for _, scenario := range []string{"protocol", "filters", "filter_toggle", "ai_badges", "pagination", "language", "copy", "log_window", "session", "logs_empty"} {
 		t.Run(scenario, func(t *testing.T) {
 			result := requireDashboardBehaviorScenario(t, bundle, scenario)
 			if result.Scenario != scenario {
@@ -118,10 +118,22 @@ func dashboardBehaviorBundle(t *testing.T) string {
 	case "collapse_ai_unknown":
 		t.Log("启用受控 AI 三态变异；未探测被错误归类为畅通")
 		return injectDashboardBehaviorOverride(t, dashboardJS, "function aiValueState(){return 'unlocked'}\n")
+	case "break_log_anchor":
+		t.Log("启用受控日志锚点变异；关闭自动滚动后不再恢复可见行")
+		return breakLogAnchorMutation(t, dashboardJS)
 	default:
 		t.Fatalf("unsupported %s value %q", dashboardBehaviorMutationEnv, mutation)
 		return ""
 	}
+}
+
+func breakLogAnchorMutation(t *testing.T, bundle string) string {
+	t.Helper()
+	const restore = "box.scrollTop=Math.max(0,box.scrollTop+currentOffset-anchorOffset);return"
+	if !strings.Contains(bundle, restore) {
+		t.Fatalf("dashboard log anchor restoration %q not found", restore)
+	}
+	return strings.Replace(bundle, restore, "return", 1)
 }
 
 func injectDashboardBehaviorOverride(t *testing.T, bundle, override string) string {

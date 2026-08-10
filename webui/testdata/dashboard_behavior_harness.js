@@ -27,6 +27,7 @@ function fakeClassList() {
       if (enabled) values.add(name); else values.delete(name);
       return enabled;
     },
+    values,
   };
 }
 
@@ -42,6 +43,7 @@ function fakeElement(id) {
     checked: false,
     options: [],
     childNodes: [],
+    childElementCount: 0,
     dataset: {},
     style: { setProperty() {} },
     classList: fakeClassList(),
@@ -61,24 +63,44 @@ const ensureElement = (id) => {
 };
 const documentElement = fakeElement('documentElement');
 const body = fakeElement('body');
+function elementsWithAttribute(name) {
+  return Array.from(elements.values()).filter((element) => element.getAttribute(name) !== null);
+}
+function queryAll(selector) {
+  const attribute = /^\[([^\]]+)\]$/.exec(selector);
+  if (attribute) return elementsWithAttribute(attribute[1]);
+  if (selector === '.filter-toggle[data-sel]') {
+    return Array.from(elements.values()).filter((element) => element.classList.contains('filter-toggle') && element.getAttribute('data-sel') !== null);
+  }
+  if (selector === '#session-rows .session-card' || selector === '.proxy-select' || selector === '.proxy-select:checked') return [];
+  return [];
+}
 const document = {
   body,
   documentElement,
   hidden: false,
   getElementById(id) { return elements.get(id) || null; },
-  querySelectorAll() { return []; },
+  querySelectorAll(selector) { return queryAll(selector); },
+  querySelector(selector) {
+    if (selector === '.navitem.active') {
+      return Array.from(elements.values()).find((element) => element.classList.contains('navitem') && element.classList.contains('active')) || null;
+    }
+    return null;
+  },
   createElement: fakeElement,
   createElementNS(_namespace, name) { return fakeElement(name); },
 };
 
 const clipboardWrites = [];
 let confirmResult = true;
+let fetchHandler = () => { throw new Error('behavior harness must not perform network requests'); };
+const storage = new Map();
 const lastClipboardWrite = () => clipboardWrites[clipboardWrites.length - 1];
 const sandbox = {
   console,
   document,
   location: { hostname: 'localhost', href: '' },
-  localStorage: { getItem() { return null; }, setItem() {} },
+  localStorage: { getItem(key) { return storage.has(key) ? storage.get(key) : null; }, setItem(key, value) { storage.set(key, String(value)); } },
   navigator: {
     clipboard: {
       writeText(value) {
@@ -95,7 +117,7 @@ const sandbox = {
   setInterval() { return 1; },
   clearInterval() {},
   getComputedStyle() { return { getPropertyValue() { return ''; } }; },
-  fetch() { throw new Error('behavior harness must not perform network requests'); },
+  fetch(...args) { return fetchHandler(...args); },
   btoa(value) { return Buffer.from(value, 'binary').toString('base64'); },
   atob(value) { return Buffer.from(value, 'base64').toString('binary'); },
   Buffer,
@@ -117,9 +139,18 @@ globalThis.__dashboardBehavior = {
   copyProxyCred,
   encodeNodeKeyPin,
   logWindowShift,
+  loadLogs,
   proxyPagePrev,
   proxyPageNext,
   proxyPageSizeChange,
+  applyLang,
+  toggleLang,
+  lang() { return uiLang; },
+  t,
+  setCustomStatus(value) { customStatus = value; customStatusLoaded = true; renderCustomStatus(customStatus); },
+  setSessions(value) { sessionCache = value; sessionsLoaded = true; renderSessions(sessionCache); },
+  setSubscriptions(value) { allSubs = value; subscriptionsLoaded = true; renderSubscriptions(); },
+  setAPIKeys(value) { apiKeyCache = value; apiKeysLoaded = true; renderAPIKeys(apiKeyCache); },
   setProxies(value) { allProxies = value; },
   setConfig(value) { configCache = value; },
   setPublicIP(value) { publicIP = value; },
@@ -204,6 +235,13 @@ function resetDOM() {
   ensureElement('proxy-page-size').value = String(dashboard.pageSize());
 }
 
+function i18nElement(id, key, value) {
+  const element = ensureElement(id);
+  element.setAttribute('data-i18n', key);
+  element.textContent = value;
+  return element;
+}
+
 function setFilter(id, value) {
   ensureElement(id).value = String(value);
 }
@@ -218,6 +256,8 @@ function proxy(id, overrides) {
     status: 'active',
     fail_count: 0,
     source: 'subscription',
+    // 与 /api/proxies 合同一致：订阅节点须带 active 父订阅状态才算可选。
+    subscription_status: 'active',
     quality_grade: 'A',
     ipapiis_score: 0.05,
     ipapi_flags: '',
@@ -458,13 +498,160 @@ function runPaginationScenario() {
   return { scenario: 'pagination', assertions: 13 };
 }
 
-function runLogWindowScenario() {
+function runLanguageScenario() {
+  resetDOM();
+  storage.clear();
+  const nav = i18nElement('i18n-nav-overview', 'nav_overview', '总览');
+  const button = i18nElement('i18n-copy', 'btn_copy', '复制');
+  const title = ensureElement('pageTitle');
+  const langCode = ensureElement('lang-code');
+  const activeNav = ensureElement('i18n-active-nav');
+  activeNav.classList.add('navitem', 'active');
+  activeNav.dataset.tab = 'overview';
+  dashboard.setProxies([proxy(1, { user_paused: true })]);
+  dashboard.renderProxies(false);
+  ['singbox-status', 'session-rows', 'sess-count', 'ov-session-rows', 'ov-sess-count', 'sub-list', 'apikey-rows'].forEach(ensureElement);
+  dashboard.setCustomStatus({ singbox_status: 'running', singbox_nodes: 2, singbox_ready_ports: 2, singbox_total_ports: 2, subscription_count: 1, disabled_count: 0, subscription_total: 1 });
+  dashboard.setSessions([{
+    session_id: 'session-1', region: 'jp', source: 'manual', protocol: 'http',
+    quality_grade: 'A', latency: 100, remaining_ttl_seconds: 120,
+  }]);
+  dashboard.setSubscriptions([{ id: 1, name: 'main', status: 'active', active_count: 1, disabled_count: 0, proxy_count: 1 }]);
+  dashboard.setAPIKeys([{ id: 'key-1', name: 'readonly', created_at: '2026-01-02T03:04:05Z', disabled: true }]);
+
+  dashboard.applyLang('en');
+  equal(dashboard.lang(), 'en', 'explicit English language selection');
+  equal(storage.get('gg-lang'), 'en', 'English selection persists');
+  equal(documentElement.lang, 'en', 'document language is English');
+  equal(documentElement.getAttribute('data-lang'), 'en', 'document data language is English');
+  equal(nav.textContent, 'Overview', 'static navigation label is translated');
+  equal(button.textContent, 'Copy', 'static action label is translated');
+  equal(title.textContent, 'Overview', 'active page title is translated');
+  equal(langCode.textContent, '中文', 'toggle indicates Chinese target after English selection');
+  equal(ensureElement('proxy-rows').innerHTML.includes('Enable'), true, 'cached proxy rows are immediately re-rendered in English');
+  equal(ensureElement('singbox-status').innerHTML.includes('Running'), true, 'cached sing-box status is immediately re-rendered in English');
+  equal(ensureElement('session-rows').innerHTML.includes('Session ID'), true, 'cached sessions are immediately re-rendered in English');
+  equal(ensureElement('sub-list').innerHTML.includes('Edit'), true, 'cached subscriptions are immediately re-rendered in English');
+  equal(ensureElement('apikey-rows').innerHTML.includes('Revoked'), true, 'cached API keys are immediately re-rendered in English');
+
+  dashboard.toggleLang();
+  equal(dashboard.lang(), 'zh', 'toggle returns to Chinese');
+  equal(storage.get('gg-lang'), 'zh', 'Chinese selection persists');
+  equal(documentElement.lang, 'zh-CN', 'document language returns to Chinese');
+  equal(nav.textContent, '总览', 'static navigation label returns to Chinese');
+  equal(button.textContent, '复制', 'static action label returns to Chinese');
+  equal(title.textContent, '总览', 'active page title returns to Chinese');
+  equal(langCode.textContent, 'EN', 'toggle indicates English target after Chinese selection');
+  equal(ensureElement('proxy-rows').innerHTML.includes('启用'), true, 'cached proxy rows are immediately re-rendered in Chinese');
+  equal(ensureElement('singbox-status').innerHTML.includes('运行中'), true, 'cached sing-box status is immediately re-rendered in Chinese');
+  equal(ensureElement('session-rows').innerHTML.includes('会话 ID'), true, 'cached sessions are immediately re-rendered in Chinese');
+  equal(ensureElement('sub-list').innerHTML.includes('修改'), true, 'cached subscriptions are immediately re-rendered in Chinese');
+  equal(ensureElement('apikey-rows').innerHTML.includes('已吊销'), true, 'cached API keys are immediately re-rendered in Chinese');
+  return { scenario: 'language', assertions: 24 };
+}
+
+function createLogBox(lines, scrollTop, boxTop = 100, lineHeight = 20) {
+  const box = fakeElement('logs-box');
+  let children = [];
+  let markup = '';
+  box.scrollTop = scrollTop;
+  box.getBoundingClientRect = () => ({ top: boxTop, bottom: boxTop + 80 });
+  Object.defineProperty(box, 'children', { get() { return children; } });
+  Object.defineProperty(box, 'innerHTML', {
+    get() { return markup; },
+    set(value) {
+      markup = String(value);
+      children = Array.from(markup.matchAll(/<div class="log-line">([^<]*)<\/div>/g), (match, index) => ({
+        textContent: match[1],
+        getBoundingClientRect() {
+          const top = boxTop + index * lineHeight - box.scrollTop;
+          return { top, bottom: top + lineHeight };
+        },
+      }));
+    },
+  });
+  box.innerHTML = lines.map((line) => `<div class="log-line">${line}</div>`).join('');
+  return box;
+}
+
+async function runLogWindowScenario() {
   equal(dashboard.logWindowShift(['a', 'b'], ['a', 'b']), 0, 'unchanged window has no shift');
   equal(dashboard.logWindowShift(['a', 'b'], ['a', 'b', 'c']), 0, 'append-only window keeps indices');
   equal(dashboard.logWindowShift(['dup', 'dup', 'tail'], ['dup', 'tail', 'new']), 1, 'largest overlap disambiguates duplicate text');
   equal(dashboard.logWindowShift(['a', 'b', 'c'], ['c', 'd', 'e']), 2, 'rotated window maps the surviving suffix');
   equal(dashboard.logWindowShift(['a'], ['z']), null, 'unrelated windows have no anchor mapping');
-  return { scenario: 'log_window', assertions: 5 };
+  const page = ensureElement('page-logs');
+  page.classList.add('active');
+  const auto = ensureElement('logs-autoscroll');
+  auto.checked = false;
+  const box = createLogBox(['prefix', 'dup', 'dup', 'tail'], 45);
+  elements.set('logs-box', box);
+  let requestedPath = '';
+  fetchHandler = async (path) => {
+    requestedPath = path;
+    return {
+      status: 200,
+      ok: true,
+      statusText: 'OK',
+      async text() { return JSON.stringify({ lines: ['dup', 'tail', 'new'] }); },
+    };
+  };
+  await dashboard.loadLogs();
+  equal(requestedPath, '/api/logs', 'scenario executes production loadLogs request path');
+  equal(box.children[0].textContent, 'dup', 'head-trimmed duplicate anchor maps to surviving row');
+  equal(box.children[0].getBoundingClientRect().top, 95, 'visible anchor keeps its viewport coordinate');
+  equal(box.scrollTop, 5, 'unchecked auto-scroll restores anchor instead of jumping');
+  return { scenario: 'log_window', assertions: 9 };
+}
+
+async function runSessionScenario() {
+  resetDOM();
+  ['session-rows', 'sess-count', 'ov-session-rows', 'ov-sess-count'].forEach(ensureElement);
+  dashboard.applyLang('en');
+  dashboard.setSessions([{
+    session_id: 'gb-request-us-exit',
+    selected_region: 'gb',
+    exit_ip: '81.90.21.44',
+    exit_region: 'us',
+    exit_location: 'US Seattle',
+    exit_checked_at: '2026-08-10T02:36:00Z',
+    bind_address: '127.0.0.1:31001',
+    protocol: 'socks5',
+    source: 'manual',
+    remaining_ttl_seconds: 120,
+  }]);
+  const card = ensureElement('session-rows').innerHTML;
+  equal(card.includes('81.90.21.44'), true, 'session card shows verified exit IP');
+  equal(card.includes('US'), true, 'session card shows verified exit region');
+  equal(card.includes('US Seattle'), true, 'session card shows verified exit location');
+  equal(card.includes('2026-08-10T02:36:00Z'), true, 'session card shows exit snapshot time');
+  equal(card.includes('region-gb'), true, 'session card keeps selected routing region separately');
+  equal(card.includes('>GB<'), false, 'selected routing region is not rendered as exit region');
+  equal(card.includes('127.0.0.1:31001'), true, 'session card keeps local bind separate from exit');
+  return { scenario: 'session', assertions: 7 };
+}
+
+async function runEmptyLogsI18NScenario() {
+  resetDOM();
+  const page = ensureElement('page-logs');
+  page.classList.add('active');
+  const auto = ensureElement('logs-autoscroll');
+  auto.checked = false;
+  const box = createLogBox([], 0);
+  elements.set('logs-box', box);
+  fetchHandler = async () => ({
+    status: 200,
+    ok: true,
+    statusText: 'OK',
+    async text() { return JSON.stringify({ lines: [] }); },
+  });
+  dashboard.applyLang('zh');
+  await dashboard.loadLogs();
+  equal(box.children[0].textContent, '暂无日志', 'empty logs use Chinese translation');
+  dashboard.applyLang('en');
+  await dashboard.loadLogs();
+  equal(box.children[0].textContent, 'No logs', 'empty logs use English translation');
+  return { scenario: 'logs_empty', assertions: 2 };
 }
 
 async function runCopyScenario() {
@@ -571,9 +758,12 @@ const scenarios = {
   filter_toggle: runFilterToggleScenario,
   ai_badges: runAIBadgeScenario,
   pagination: runPaginationScenario,
+  language: runLanguageScenario,
   copy: runCopyScenario,
   nodekey_wire: runNodeKeyWireScenario,
   log_window: runLogWindowScenario,
+  session: runSessionScenario,
+  logs_empty: runEmptyLogsI18NScenario,
 };
 
 Promise.resolve(scenarios[scenario] ? scenarios[scenario]() : Promise.reject(new Error(`unknown scenario ${scenario}`)))

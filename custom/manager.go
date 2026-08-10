@@ -2,8 +2,10 @@ package custom
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -75,6 +77,26 @@ type proxyValidator interface {
 	ValidateStream([]storage.Proxy) <-chan validator.Result
 }
 
+type detailedProxyValidator interface {
+	ValidateOneResult(storage.Proxy) validator.Result
+}
+
+// validateOneResult 优先保留验证失败阶段；旧测试替身继续走兼容调用约定。
+func validateOneResult(v proxyValidator, proxy storage.Proxy) validator.Result {
+	if detailed, ok := v.(detailedProxyValidator); ok {
+		return detailed.ValidateOneResult(proxy)
+	}
+	valid, latency, exitIP, exitLocation, risk := v.ValidateOne(proxy)
+	reason := validator.FailureNone
+	if !valid {
+		reason = validator.FailureConnectivity
+	}
+	return validator.Result{
+		Proxy: proxy, Valid: valid, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation,
+		Risk: risk, FailureReason: reason,
+	}
+}
+
 // Manager 订阅管理器
 type Manager struct {
 	storage   *storage.Storage
@@ -101,23 +123,28 @@ type subscriptionProxyEntry struct {
 }
 
 // normalizeSubscriptionProxyEntries 在任何持久化前归一化同批代理。
-// 完全相同的项稳定保留首次出现；共享稳定 key 或 address 但配置不同则显式拒绝。
+// 完全相同的项稳定保留首次出现。
+// 共享稳定 key 或 address 但配置不同时：保留首次出现，跳过后续冲突项并打日志，
+// 不再整批失败（机场同一 host:port 多线路/多协议时整单 fail-closed 会把旧节点卡在 disabled）。
 func normalizeSubscriptionProxyEntries(entries []subscriptionProxyEntry) ([]subscriptionProxyEntry, error) {
 	normalized := make([]subscriptionProxyEntry, 0, len(entries))
 	byNodeKey := make(map[string]int, len(entries))
 	byAddress := make(map[string]int, len(entries))
+	skippedConflicts := 0
 	for inputIndex, entry := range entries {
 		if entry.nodeKey != "" {
 			if normalizedIndex, ok := byNodeKey[entry.nodeKey]; ok {
 				if normalized[normalizedIndex] != entry {
-					return nil, fmt.Errorf("订阅代理批次 node_key 冲突：第 %d 项与第 %d 项配置不一致", normalizedIndex+1, inputIndex+1)
+					skippedConflicts++
+					log.Printf("[custom] 跳过订阅批次 node_key 冲突项：保留第 %d 项，丢弃第 %d 项（配置不一致）", normalizedIndex+1, inputIndex+1)
 				}
 				continue
 			}
 		}
 		if normalizedIndex, ok := byAddress[entry.addr]; ok {
 			if normalized[normalizedIndex] != entry {
-				return nil, fmt.Errorf("订阅代理批次 address 冲突：第 %d 项与第 %d 项配置不一致", normalizedIndex+1, inputIndex+1)
+				skippedConflicts++
+				log.Printf("[custom] 跳过订阅批次 address 冲突项：保留第 %d 项，丢弃第 %d 项（配置不一致）addr=%s", normalizedIndex+1, inputIndex+1, entry.addr)
 			}
 			continue
 		}
@@ -128,6 +155,9 @@ func normalizeSubscriptionProxyEntries(entries []subscriptionProxyEntry) ([]subs
 		if entry.nodeKey != "" {
 			byNodeKey[entry.nodeKey] = normalizedIndex
 		}
+	}
+	if skippedConflicts > 0 {
+		log.Printf("[custom] 订阅批次归一化：跳过 %d 个冲突项，保留 %d 个唯一节点", skippedConflicts, len(normalized))
 	}
 	return normalized, nil
 }
@@ -181,8 +211,24 @@ func (m *Manager) Stop() {
 }
 
 // initialRefresh 启动时刷新所有活跃订阅
+var initialRefreshDelay = 3 * time.Second
+
 func (m *Manager) initialRefresh() {
-	time.Sleep(3 * time.Second) // 等待其他模块初始化
+	timer := time.NewTimer(initialRefreshDelay) // 等待其他模块初始化，但可被 Stop 立即打断
+	defer timer.Stop()
+	select {
+	case <-m.stopCh:
+		return
+	case <-timer.C:
+	}
+	select {
+	case <-m.stopCh:
+		return
+	default:
+	}
+	if m.storage == nil {
+		return
+	}
 	subs, err := m.storage.GetSubscriptions()
 	if err != nil || len(subs) == 0 {
 		return
@@ -196,6 +242,11 @@ func (m *Manager) initialRefresh() {
 	}
 	if activeSubs == 0 {
 		return
+	}
+	select {
+	case <-m.stopCh:
+		return
+	default:
 	}
 
 	log.Printf("[custom] 启动刷新，共 %d 个活跃订阅", activeSubs)
@@ -219,6 +270,11 @@ func (m *Manager) refreshLoop() {
 
 // checkAndRefresh 检查并刷新到期的订阅 + 暂停长期无可用节点的订阅
 func (m *Manager) checkAndRefresh() {
+	select {
+	case <-m.stopCh:
+		return
+	default:
+	}
 	// 暂停连续 7 天无可用节点的订阅，保留订阅和节点记录供人工排查。
 	m.cleanupStaleSubscriptions()
 
@@ -287,7 +343,6 @@ func (m *Manager) probeLoop() {
 // 先剔除仍占端口的长期禁用节点；仅探测当前 portMap 仍有本地 tunnel 地址的禁用节点。
 // 已剔除的长期禁用等待下次订阅刷新重新入池，不在此路径 dial。
 func (m *Manager) probeDisabled() {
-	// 与 Refresh/Stop 串行，避免 prune Reload 与订阅刷新交错。
 	m.refreshMu.Lock()
 	disabled, err := m.storage.GetDisabledCustomProxies()
 	if err != nil || len(disabled) == 0 {
@@ -301,8 +356,6 @@ func (m *Manager) probeDisabled() {
 	}
 	nodes := m.singbox.GetNodes()
 	portMap := m.singbox.GetPortMap()
-
-	// 仅探测仍持有本地 mixed 端口的禁用节点；无端口者视为长期剔除，等订阅刷新。
 	toProbe := make([]disabledProbeTarget, 0, len(disabled))
 	for _, proxy := range disabled {
 		if isLongTermDisabledProxy(proxy, time.Now()) {
@@ -324,53 +377,46 @@ func (m *Manager) probeDisabled() {
 	}
 
 	log.Printf("[custom] 🔍 探测 %d 个禁用的订阅代理（已跳过无运行态端口/长期禁用）", len(toProbe))
-
-	cfg := config.Get()
 	recovered := 0
 	recoveredSubs := make(map[int64]bool)
 	for _, target := range toProbe {
 		proxy := target.proxy
-		valid, latency, exitIP, exitLocation, risk := m.validator.ValidateOne(proxy)
-		if valid {
-			m.refreshMu.Lock()
-			if !m.probeTargetStillCurrentLocked(target) {
-				m.refreshMu.Unlock()
-				continue
-			}
-			// 检查地理过滤：恢复前确认不在屏蔽列表中
-			if exitLocation != "" && isGeoBlocked(exitLocation, cfg) {
-				log.Printf("[custom] 代理 %s 验证通过但被地理过滤 (%s)，保持禁用", proxy.Address, exitLocation)
-				if err := m.storage.UpdateDisabledSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.FlagsKnown, risk.CFBlocked, risk.AIReachability); err != nil {
-					log.Printf("[custom] 写回地理过滤出口信息失败 %s: %v", proxy.Address, err)
-				}
-				m.refreshMu.Unlock()
-				continue
-			}
-			if err := m.storage.RecoverSubscriptionProxyWithExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()), risk.IPAPIIsScore, risk.Flags, risk.FlagsKnown, risk.CFBlocked, risk.AIReachability); err != nil {
-				m.refreshMu.Unlock()
-				log.Printf("[custom] 原子写回探测恢复结果失败 %s: %v", proxy.Address, err)
-				continue
-			}
-			m.refreshMu.Unlock()
-			recovered++
-			recoveredSubs[proxy.SubscriptionID] = true
-			log.Printf("[custom] ✅ 代理 %s 恢复可用 (%dms)", proxy.Address, latency.Milliseconds())
-			continue
+		identity := storage.RouteIdentityFromProxy(proxy)
+		result := validateOneResult(m.validator, proxy)
+		observation := storage.ExitObservation{
+			ExitIP: result.ExitIP, ExitLocation: result.ExitLocation, LatencyMS: int(result.Latency.Milliseconds()),
+			IPAPIIsScore: result.Risk.IPAPIIsScore, IPAPIFlags: result.Risk.Flags,
+			IPAPIFlagsKnown: result.Risk.FlagsKnown, CFBlocked: result.Risk.CFBlocked,
+			AIReachability: result.Risk.AIReachability,
 		}
-
-		// invalid 结果必须在确认节点身份/端口仍有效后初始化失败时钟；
-		// 已有 disabled 时钟由存储层保留，避免周期探测无限续期。
 		m.refreshMu.Lock()
 		if !m.probeTargetStillCurrentLocked(target) {
 			m.refreshMu.Unlock()
 			continue
 		}
-		if err := m.storage.DisableSubscriptionProxy(proxy.Address, proxy.SubscriptionID); err != nil {
-			log.Printf("[custom] 记录禁用代理探测失败时间失败 %s: %v", proxy.Address, err)
+		if !result.Valid {
+			if result.FailureReason == validator.FailureGeoRejected {
+				if err := m.storage.ApplyProbeObservation(identity, observation); err != nil {
+					log.Printf("[custom] 写回地域拒绝节点出口信息失败 %s: %v", proxy.Address, err)
+				} else if err := m.storage.DisableRouteForPolicy(identity); err != nil {
+					log.Printf("[custom] 策略禁用地域拒绝节点失败 %s: %v", proxy.Address, err)
+				}
+			} else if err := m.storage.RecordDisabledProbeFailure(identity, observation); err != nil {
+				log.Printf("[custom] 写回禁用节点复检观测失败 %s: %v", proxy.Address, err)
+			}
+			m.refreshMu.Unlock()
+			continue
+		}
+		if err := m.storage.RecoverProxyFromProbe(identity, observation); err != nil {
+			m.refreshMu.Unlock()
+			log.Printf("[custom] 原子写回探测恢复结果失败 %s: %v", proxy.Address, err)
+			continue
 		}
 		m.refreshMu.Unlock()
+		recovered++
+		recoveredSubs[proxy.SubscriptionID] = true
+		log.Printf("[custom] ✅ 代理 %s 恢复可用 (%dms)", proxy.Address, result.Latency.Milliseconds())
 	}
-	// 有恢复的代理则更新对应订阅的 last_success
 	for subID := range recoveredSubs {
 		if subID > 0 {
 			if err := m.storage.UpdateSubscriptionSuccess(subID); err != nil {
@@ -378,14 +424,10 @@ func (m *Manager) probeDisabled() {
 			}
 		}
 	}
-
 	if recovered > 0 {
 		log.Printf("[custom] 探测完成：%d/%d 恢复可用", recovered, len(toProbe))
 	}
 }
-
-// probeTargetStillCurrentLocked 确认探测结果仍对应当前禁用记录、路由配置及隧道映射。
-// 调用方必须持有 refreshMu，避免 RefreshSubscription 在确认和写回之间改写同一节点。
 func (m *Manager) probeTargetStillCurrentLocked(target disabledProbeTarget) bool {
 	current, err := m.storage.GetProxyByIdentity(target.proxy.Address, storage.SourceSubscription, target.proxy.SubscriptionID)
 	if err != nil ||
@@ -409,10 +451,20 @@ func (m *Manager) probeTargetStillCurrentLocked(target disabledProbeTarget) bool
 func (m *Manager) RefreshSubscription(subID int64) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
+	select {
+	case <-m.stopCh:
+		return errors.New("订阅管理器已停止，拒绝刷新")
+	default:
+	}
 
 	sub, err := m.storage.GetSubscription(subID)
 	if err != nil {
 		return fmt.Errorf("获取订阅失败: %w", err)
+	}
+	// 订阅级暂停是外部拉取、解析、验证和运行态变更的硬边界。
+	// 除 active 外一律拒绝，避免状态损坏或暂停订阅绕过用户意图产生网络请求。
+	if sub.Status != "active" {
+		return fmt.Errorf("订阅 [%s] 当前状态为 %s，拒绝刷新", sub.Name, sub.Status)
 	}
 
 	// 获取订阅内容
@@ -755,7 +807,7 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 	}
 	oldRows, err := tx.Query(
 		`SELECT id, address, node_key, protocol, status, user_paused, fail_count,
-		        CASE WHEN last_check IS NULL THEN 0 ELSE 1 END,
+		        CASE WHEN exit_checked_at IS NULL THEN 0 ELSE 1 END,
 		        exit_ip, exit_location, latency, dual_protocol, proxy_username, proxy_password
 		   FROM proxies WHERE subscription_id = ? AND source = ?`,
 		subID, storage.SourceSubscription,
@@ -764,20 +816,20 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 		return nil, fmt.Errorf("读取订阅旧代理失败: %w", err)
 	}
 	type oldProxyRow struct {
-		id           int64
-		addr         string
-		key          string
-		proto        string
-		status       string
-		userPaused   int
-		failCount    int
-		hasLastCheck int
-		exitIP       string
-		exitLocation string
-		latency      int
-		dual         bool
-		username     string
-		password     string
+		id               int64
+		addr             string
+		key              string
+		proto            string
+		status           string
+		userPaused       int
+		failCount        int
+		hasExitCheckedAt int
+		exitIP           string
+		exitLocation     string
+		latency          int
+		dual             bool
+		username         string
+		password         string
 	}
 	var staleIDs []int64
 	keyToOld := map[string]oldProxyRow{}
@@ -785,7 +837,7 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 		var r oldProxyRow
 		if err := oldRows.Scan(
 			&r.id, &r.addr, &r.key, &r.proto, &r.status, &r.userPaused,
-			&r.failCount, &r.hasLastCheck, &r.exitIP, &r.exitLocation, &r.latency,
+			&r.failCount, &r.hasExitCheckedAt, &r.exitIP, &r.exitLocation, &r.latency,
 			&r.dual, &r.username, &r.password,
 		); err != nil {
 			oldRows.Close()
@@ -826,7 +878,6 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 		userPaused     int
 		preserveActive bool
 		resetEvidence  bool
-		startClock     bool
 	}
 	type pendingInsert struct {
 		index      int
@@ -850,20 +901,18 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 				resetEvidence := old.addr != entry.addr || old.proto != entry.proto ||
 					old.dual != entry.dual || old.username != entry.username ||
 					old.password != entry.password
-				// 仅保留具有明确最近成功记录、仍可选且路由配置逐字段未变的旧节点。
-				// last_check 存在且 fail_count=0 表示最新持久化检查没有未清零失败；
+				// 仅保留已验证出口、仍可选且路由配置逐字段未变的旧节点。
+				// exit_checked_at 才是出口元数据的观测时钟；last_check 不能证明出口快照存在。
 				// 任一身份字段变化都必须先禁用，等待本轮验证重新建立信任。
 				preserveActive := subscriptionStatus == "active" &&
 					old.status == "active" && old.userPaused == 0 &&
-					old.failCount == 0 && old.hasLastCheck == 1 &&
+					old.failCount == 0 && old.hasExitCheckedAt == 1 &&
 					old.exitIP != "" && old.exitLocation != "" && old.latency > 0 &&
 					!resetEvidence && old.key == entry.nodeKey
-				startClock := !resetEvidence && !preserveActive &&
-					(old.status == "active" || old.status == "degraded")
 				keyed = append(keyed, keyedUpdate{
 					index: entryIndex, id: old.id, entry: entry,
 					userPaused: userPaused, preserveActive: preserveActive,
-					resetEvidence: resetEvidence, startClock: startClock,
+					resetEvidence: resetEvidence,
 				})
 				continue
 			}
@@ -880,13 +929,11 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 		resetSQL := ""
 		if ku.resetEvidence {
 			resetSQL = `,
-				fail_count = 0, last_check = NULL, exit_ip = '', exit_location = '',
+				fail_count = 0, last_check = NULL, exit_checked_at = NULL, disabled_at = NULL, exit_ip = '', exit_location = '',
 				latency = 0, quality_grade = 'C',
 				region = CASE WHEN region_source != 'manual' THEN '' ELSE region END,
 				ipapiis_score = -1, ipapi_flags = '', ipapi_flags_seen = 0,
 				cf_blocked = -1, ai_reachability = ''`
-		} else if ku.startClock {
-			resetSQL = `, last_check = CURRENT_TIMESTAMP`
 		}
 		query := `UPDATE proxies SET address = ?, protocol = ?, status = ?, dual_protocol = ?,
 				user_paused = ?, proxy_username = ?, proxy_password = ?, node_key = ?,
@@ -1334,86 +1381,61 @@ func isUnsafeSubscriptionIP(ip net.IP) bool {
 	return false
 }
 
-// validateCustomProxies 验证订阅代理，返回可用数
+// validateCustomProxies 验证订阅代理，返回可用数。
+// 契约：父订阅 paused 时节点必须保持/变为 disabled，且不得 Enable。
+// 父订阅 active 时：成功验证可 Enable；失败则 Disable。
 func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) int {
 	if len(proxies) == 0 {
 		return 0
 	}
-
 	log.Printf("[custom] 🔍 开始验证 %d 个订阅代理", len(proxies))
 
-	cfg := config.Get()
-	resultCh := m.validator.ValidateStream(proxies)
 	valid, invalid := 0, 0
-	for result := range resultCh {
-		if result.Valid {
-			latencyMs := int(result.Latency.Milliseconds())
-			// 旧节点在暂存阶段可能仍为 active。先撤销旧信任，再做出口
-			// 写回与地理/父订阅判断，确保任何后续失败都不会留下 active。
-			if result.Proxy.Status == "active" {
-				if err := m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
-					log.Printf("[custom] 暂存节点预禁用失败 %s: %v", result.Proxy.Address, err)
-					invalid++
+	for result := range m.validator.ValidateStream(proxies) {
+		identity := storage.RouteIdentityFromProxy(result.Proxy)
+		observation := storage.ExitObservation{
+			ExitIP: result.ExitIP, ExitLocation: result.ExitLocation, LatencyMS: int(result.Latency.Milliseconds()),
+			IPAPIIsScore: result.Risk.IPAPIIsScore, IPAPIFlags: result.Risk.Flags,
+			IPAPIFlagsKnown: result.Risk.FlagsKnown, CFBlocked: result.Risk.CFBlocked,
+			AIReachability: result.Risk.AIReachability,
+		}
+		if !result.Valid {
+			invalid++
+			if result.FailureReason == validator.FailureGeoRejected {
+				if err := m.storage.DisableRouteForPolicy(identity); err != nil {
+					log.Printf("[custom] 策略禁用地域拒绝节点失败 %s: %v", result.Proxy.Address, err)
 					continue
 				}
-			}
-			// 地理过滤节点保持 disabled；写回出口元数据时不得刷新既有禁用时钟。
-			if result.ExitLocation != "" && isGeoBlocked(result.ExitLocation, cfg) {
-				if err := m.storage.UpdateDisabledSubscriptionProxyExitInfo(result.Proxy.Address, subID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.FlagsKnown, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
-					log.Printf("[custom] 写回地理过滤出口信息失败 %s: %v", result.Proxy.Address, err)
+				if err := m.storage.ApplyProbeObservation(identity, observation); err != nil {
+					log.Printf("[custom] 写回地域拒绝出口信息失败 %s: %v", result.Proxy.Address, err)
 				}
-				invalid++
-				continue
+			} else if _, err := m.storage.RecordProbeFailure(identity, observation, 1); err != nil {
+				log.Printf("[custom] 写回验证失败节点失败 %s: %v", result.Proxy.Address, err)
 			}
-			if err := m.storage.UpdateSubscriptionProxyExitInfo(result.Proxy.Address, subID, result.ExitIP, result.ExitLocation, latencyMs, result.Risk.IPAPIIsScore, result.Risk.Flags, result.Risk.FlagsKnown, result.Risk.CFBlocked, result.Risk.AIReachability); err != nil {
-				log.Printf("[custom] 写回验证出口信息失败 %s: %v", result.Proxy.Address, err)
-				// 预禁用后写回仍失败时再次禁用，覆盖并发恢复或非标准调用，
-				// 不能让本轮未落地的成功结果沿用 active。
-				if disableErr := m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID); disableErr != nil {
-					log.Printf("[custom] 写回失败后禁用节点失败 %s: %v", result.Proxy.Address, disableErr)
-				}
-				invalid++
-				continue
-			}
-			parentPaused, err := m.storage.IsSubscriptionPaused(subID)
-			if err != nil || parentPaused {
-				log.Printf("[custom] 验证通过但父订阅不可用 %s: paused=%v err=%v", result.Proxy.Address, parentPaused, err)
-				invalid++
-				continue
-			}
-			current, err := m.storage.GetProxyByIdentity(result.Proxy.Address, storage.SourceSubscription, subID)
-			if err != nil {
-				log.Printf("[custom] 读取验证通过节点状态失败 %s: %v", result.Proxy.Address, err)
-				invalid++
-				continue
-			}
-			if current.Status == "disabled" {
-				if err := m.storage.EnableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
-					log.Printf("[custom] 启用验证通过节点失败 %s: %v", result.Proxy.Address, err)
-					invalid++
-					continue
-				}
-			} else if current.Status != "active" {
-				log.Printf("[custom] 验证通过节点状态不可恢复 %s: %s", result.Proxy.Address, current.Status)
-				invalid++
-				continue
-			}
-			valid++
 			continue
 		}
-		invalid++
-		if err := m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID); err != nil {
-			log.Printf("[custom] 禁用验证失败节点失败 %s: %v", result.Proxy.Address, err)
+		if err := m.storage.RecoverProxyFromProbe(identity, observation); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[custom] 原子恢复验证节点失败 %s: %v", result.Proxy.Address, err)
+				invalid++
+				continue
+			}
+			if err := m.storage.ApplyProbeObservation(identity, observation); err != nil {
+				log.Printf("[custom] 写回验证出口信息失败 %s: %v", result.Proxy.Address, err)
+				if disableErr := m.storage.DisableRouteForPolicy(identity); disableErr != nil {
+					log.Printf("[custom] 验证写回失败后禁用节点失败 %s: %v", result.Proxy.Address, disableErr)
+				}
+				invalid++
+				continue
+			}
 		}
+		valid++
 	}
-
-	// 有可用节点则更新 last_success
 	if valid > 0 && subID > 0 {
 		if err := m.storage.UpdateSubscriptionSuccess(subID); err != nil {
 			log.Printf("[custom] 更新订阅 last_success 失败 sub=%d: %v", subID, err)
 		}
 	}
-
 	log.Printf("[custom] 验证完成：%d 可用，%d 不可用", valid, invalid)
 	return valid
 }
@@ -1741,39 +1763,44 @@ func (m *Manager) validateManualProxies(proxies []storage.Proxy) {
 		return
 	}
 	log.Printf("[custom] 🔍 开始验证 %d 个手工节点", len(proxies))
-	cfg := config.Get()
 	valid, invalid := 0, 0
 	for result := range m.validator.ValidateStream(proxies) {
+		identity := storage.RouteIdentityFromProxy(result.Proxy)
+		observation := storage.ExitObservation{
+			ExitIP: result.ExitIP, ExitLocation: result.ExitLocation, LatencyMS: int(result.Latency.Milliseconds()),
+			IPAPIIsScore: result.Risk.IPAPIIsScore, IPAPIFlags: result.Risk.Flags,
+			IPAPIFlagsKnown: result.Risk.FlagsKnown, CFBlocked: result.Risk.CFBlocked,
+			AIReachability: result.Risk.AIReachability,
+		}
 		if !result.Valid {
 			invalid++
-			_ = m.storage.DisableProxyByID(result.Proxy.ID)
+			if result.FailureReason == validator.FailureGeoRejected {
+				if err := m.storage.DisableRouteForPolicy(identity); err != nil {
+					log.Printf("[custom] 策略禁用地域拒绝手工节点失败 %s: %v", result.Proxy.Address, err)
+					continue
+				}
+				if err := m.storage.ApplyProbeObservation(identity, observation); err != nil {
+					log.Printf("[custom] 写回地域拒绝手工节点出口信息失败 %s: %v", result.Proxy.Address, err)
+				}
+			} else if _, err := m.storage.RecordProbeFailure(identity, observation, 1); err != nil {
+				log.Printf("[custom] 写回手工节点验证失败结果失败 %s: %v", result.Proxy.Address, err)
+			}
 			continue
 		}
-		latencyMs := int(result.Latency.Milliseconds())
-		if err := m.storage.UpdateProxyExitInfo(
-			result.Proxy.ID,
-			result.ExitIP,
-			result.ExitLocation,
-			latencyMs,
-			result.Risk.IPAPIIsScore,
-			result.Risk.Flags,
-			result.Risk.FlagsKnown,
-			result.Risk.CFBlocked,
-			result.Risk.AIReachability,
-		); err != nil {
-			log.Printf("[custom] ⚠️ 写回手工节点 %s 探测结果失败: %v", result.Proxy.Address, err)
-			invalid++
-			continue
-		}
-		if result.ExitLocation != "" && isGeoBlocked(result.ExitLocation, cfg) {
-			log.Printf("[custom] 手工节点 %s 验证通过但被地理过滤 (%s)，保持禁用", result.Proxy.Address, result.ExitLocation)
-			invalid++
-			continue
-		}
-		if err := m.storage.EnableProxyByID(result.Proxy.ID); err != nil {
-			log.Printf("[custom] ⚠️ 启用手工节点 %s 失败: %v", result.Proxy.Address, err)
-			invalid++
-			continue
+		if err := m.storage.RecoverProxyFromProbe(identity, observation); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[custom] 原子恢复手工节点失败 %s: %v", result.Proxy.Address, err)
+				invalid++
+				continue
+			}
+			if err := m.storage.ApplyProbeObservation(identity, observation); err != nil {
+				log.Printf("[custom] 写回手工节点探测结果失败 %s: %v", result.Proxy.Address, err)
+				if disableErr := m.storage.DisableRouteForPolicy(identity); disableErr != nil {
+					log.Printf("[custom] 手工节点验证写回失败后禁用失败 %s: %v", result.Proxy.Address, disableErr)
+				}
+				invalid++
+				continue
+			}
 		}
 		valid++
 	}
@@ -1916,16 +1943,16 @@ func isLocalTunnelAddress(addr string) bool {
 	return host == "127.0.0.1" || host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
-// isLongTermDisabledProxy 判定是否为长期禁用：status=disabled 且 last_check 非零且超过阈值。
-// last_check 为零视为短期禁用，保留运行态端口供 probeDisabled 重验证。
+// isLongTermDisabledProxy 判定是否为长期禁用：status=disabled 且 disabled_at 超过阈值。
+// last_check 是最近探测时钟，不能替代系统禁用开始时间；无 disabled_at 的策略禁用节点保留运行态。
 func isLongTermDisabledProxy(p storage.Proxy, now time.Time) bool {
 	if p.Status != "disabled" {
 		return false
 	}
-	if p.LastCheck.IsZero() {
+	if p.DisabledAt.IsZero() {
 		return false
 	}
-	return now.Sub(p.LastCheck) > longTermDisabledRetention
+	return now.Sub(p.DisabledAt) > longTermDisabledRetention
 }
 
 // disabledProxyHasRuntimePort 判断禁用代理的本地地址是否仍在当前 portMap 中。

@@ -25,6 +25,8 @@ type Proxy struct {
 	FailCount      int       `json:"fail_count"`
 	LastUsed       time.Time `json:"last_used"`
 	LastCheck      time.Time `json:"last_check"`
+	ExitCheckedAt  time.Time `json:"exit_checked_at"`
+	DisabledAt     time.Time `json:"disabled_at"`
 	CreatedAt      time.Time `json:"created_at"`
 	Status         string    `json:"status"`
 	UserPaused     bool      `json:"user_paused"`
@@ -121,6 +123,8 @@ func (s *Storage) initSchema() error {
 			fail_count     INTEGER NOT NULL DEFAULT 0,
 			last_used      DATETIME,
 			last_check     DATETIME,
+			exit_checked_at DATETIME,
+			disabled_at    DATETIME,
 			created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			status         TEXT NOT NULL DEFAULT 'active',
 			user_paused    INTEGER NOT NULL DEFAULT 0,

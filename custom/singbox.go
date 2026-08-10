@@ -121,10 +121,17 @@ func NewSingBoxProcess(binPath, dataDir string, basePort int) *SingBoxProcess {
 		s.reason = "data_dir_invalid"
 		return s
 	}
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		s.initErr = fmt.Errorf("创建 sing-box 数据目录 %q 失败: %w", configDir, err)
 		s.status = SingBoxStatusFailed
 		s.reason = "data_dir_unavailable"
+		return s
+	}
+	// 目录可能由旧版本以宽松权限创建；每次启动都收紧，配置中含上游认证信息。
+	if err := os.Chmod(configDir, 0700); err != nil {
+		s.initErr = fmt.Errorf("收紧 sing-box 数据目录权限 %q 失败: %w", configDir, err)
+		s.status = SingBoxStatusFailed
+		s.reason = "data_dir_permission_denied"
 		return s
 	}
 	s.configDir = configDir
@@ -175,7 +182,7 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		s.nodes = oldNodes
 		s.assembly = oldAssembly
 		if oldConfigErr == nil {
-			if err := os.WriteFile(s.configFile, oldConfig, 0644); err != nil {
+			if err := writePrivateSingBoxConfig(s.configFile, oldConfig); err != nil {
 				log.Printf("[custom] ⚠️ 恢复旧 sing-box 配置文件失败: %v", err)
 			}
 		}
@@ -397,10 +404,18 @@ func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) (assemblyDiagnostics
 		return assemblyDiagnostics{}, err
 	}
 	s.portMap = portMap
-	if err := os.WriteFile(s.configFile, data, 0644); err != nil {
+	if err := writePrivateSingBoxConfig(s.configFile, data); err != nil {
 		return assemblyDiagnostics{}, err
 	}
 	return diagnostics, nil
+}
+
+// writePrivateSingBoxConfig 写入包含节点认证信息的配置，并收紧旧文件的既有权限。
+func writePrivateSingBoxConfig(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }
 
 // buildConfigBytes 生成配置 JSON 字节，但不改动运行态；供 checkNodes 探测校验使用。
@@ -589,7 +604,9 @@ func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) 
 		out["password"] = getStr(raw, "password")
 		if plugin := getStr(raw, "plugin"); plugin != "" {
 			out["plugin"] = plugin
-			if pluginOpts, ok := raw["plugin-opts"].(map[string]interface{}); ok {
+			if pluginOptsRaw := getStr(raw, "plugin-opts-raw"); pluginOptsRaw != "" {
+				out["plugin_opts"] = pluginOptsRaw
+			} else if pluginOpts, ok := raw["plugin-opts"].(map[string]interface{}); ok {
 				out["plugin_opts"] = convertPluginOpts(plugin, pluginOpts)
 			}
 		}

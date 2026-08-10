@@ -78,8 +78,28 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 		if err != nil {
 			return nil, err
 		}
-		if route.Session != "" && sessions != nil {
-			sessions.SetProxy(route.Session, proxy.ID, proxy.Address, proxy.Region)
+		if route.Session == "" || sessions == nil {
+			return proxy, nil
+		}
+
+		// 带 session 的 pin 同样占用可观测容量，并服从首次绑定冷却。
+		// 已经绑定到同一节点的会话属于 sticky 重入，不重复占用或触发冷却。
+		sessions.BeginFirstBind()
+		defer sessions.EndFirstBind()
+		if binding, ok := sessions.Get(route.Session); ok && binding.ProxyID == proxy.ID {
+			return proxy, nil
+		}
+		if maxSessions := maxSessionsPerProxy(); maxSessions > 0 &&
+			sessions.CountByProxy(proxy.ID) >= maxSessions {
+			return nil, noNodeCapacityError(route.Region)
+		}
+		cooldownMinutes := proxyCooldownMinutes()
+		if cooldownMinutes > 0 && sessions.InCooldown(proxy.ID) {
+			return nil, noNodeCooldownError(route.Region)
+		}
+		sessions.SetProxy(route.Session, proxy.ID, proxy.Address, proxy.Region)
+		if cooldownMinutes > 0 {
+			sessions.SetCooldown(proxy.ID, sessionsNow(sessions).Add(time.Duration(cooldownMinutes)*time.Minute))
 		}
 		return proxy, nil
 	}

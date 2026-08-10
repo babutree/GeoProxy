@@ -43,30 +43,45 @@ func (c *Checker) run() {
 
 	// 每次根据最新配置创建验证器。
 	cfg := config.Get()
-	validate := validator.New(cfg.ValidateConcurrency, cfg.ValidateTimeout, cfg.ValidateURL)
+	validate := validator.NewWithConfig(cfg)
 
 	log.Printf("[checker] 检查 %d 个代理...", len(proxies))
 	results := validate.ValidateAll(proxies)
 
 	valid, invalid := 0, 0
-	for _, r := range results {
-		if r.Valid {
+	for _, result := range results {
+		identity := storage.RouteIdentityFromProxy(result.Proxy)
+		observation := storage.ExitObservation{
+			ExitIP:          result.ExitIP,
+			ExitLocation:    result.ExitLocation,
+			LatencyMS:       int(result.Latency.Milliseconds()),
+			IPAPIIsScore:    result.Risk.IPAPIIsScore,
+			IPAPIFlags:      result.Risk.Flags,
+			IPAPIFlagsKnown: result.Risk.FlagsKnown,
+			CFBlocked:       result.Risk.CFBlocked,
+			AIReachability:  result.Risk.AIReachability,
+		}
+		if result.Valid {
 			valid++
-			latencyMs := int(r.Latency.Milliseconds())
-			if r.ExitIP != "" && r.ExitLocation != "" {
-				if err := c.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags, r.Risk.FlagsKnown, r.Risk.CFBlocked, r.Risk.AIReachability); err != nil {
-					log.Printf("[checker] 更新出口信息失败: %v", err)
-				}
-			} else if r.Latency > 0 {
-				if err := c.storage.UpdateLatencyByID(r.Proxy.ID, latencyMs); err != nil {
-					log.Printf("[checker] 更新延迟失败: %v", err)
-				}
+			if err := c.storage.ApplyProbeObservation(identity, observation); err != nil {
+				log.Printf("[checker] 更新出口信息失败: %v", err)
 			}
-		} else {
-			invalid++
-			if err := c.storage.DisableProxyByID(r.Proxy.ID); err != nil {
-				log.Printf("[checker] 禁用代理失败: %v", err)
+			continue
+		}
+		invalid++
+		if result.FailureReason == validator.FailureGeoRejected {
+			// 地域拒绝属于当前策略，不是上游或传输故障；不得启动系统禁用保留期。
+			if err := c.storage.DisableRouteForPolicy(identity); err != nil {
+				log.Printf("[checker] 策略禁用地域拒绝节点失败: %v", err)
+				continue
 			}
+			if err := c.storage.ApplyProbeObservation(identity, observation); err != nil {
+				log.Printf("[checker] 写回地域拒绝出口信息失败: %v", err)
+			}
+			continue
+		}
+		if _, err := c.storage.RecordProbeFailure(identity, observation, 1); err != nil {
+			log.Printf("[checker] 禁用代理失败: %v", err)
 		}
 	}
 

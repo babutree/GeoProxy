@@ -131,6 +131,9 @@ func (s *Storage) GetSubscriptions() ([]Subscription, error) {
 		}
 		subs = append(subs, *sub)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return subs, nil
 }
 
@@ -147,6 +150,9 @@ func (s *Storage) GetSubscription(id int64) (*Subscription, error) {
 
 	if rows.Next() {
 		return scanSubscription(rows)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return nil, fmt.Errorf("subscription %d not found", id)
 }
@@ -207,12 +213,15 @@ func (s *Storage) GetStaleSubscriptions(staleDays int) ([]Subscription, error) {
 		}
 		subs = append(subs, *sub)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return subs, nil
 }
 
-// ToggleSubscription 只切换 subscriptions.status，不直接修改该订阅下 proxies 的状态。
-// 返回切换后的订阅状态（"active" 或 "paused"）。
-// 订阅暂停后的不可用性由查询侧结合父订阅状态过滤，节点自身 status/user_paused 保持不变。
+// ToggleSubscription 切换 subscriptions.status。
+// 切到 paused 时同步禁用该订阅下全部代理；切到 active 时只恢复订阅行，
+// 节点需经刷新/验证后再 Enable（由 Manager 异步重验）。
 func (s *Storage) ToggleSubscription(id int64) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -233,6 +242,16 @@ func (s *Storage) ToggleSubscription(id int64) (string, error) {
 	if _, err := tx.Exec(`UPDATE subscriptions SET status = ? WHERE id = ?`, newStatus, id); err != nil {
 		return "", err
 	}
+	if newStatus == "paused" {
+		if _, err := tx.Exec(
+			`UPDATE proxies
+			 SET status = 'disabled'
+			 WHERE source = ? AND subscription_id = ? AND status != 'disabled'`,
+			SourceSubscription, id,
+		); err != nil {
+			return "", err
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", err
@@ -240,13 +259,29 @@ func (s *Storage) ToggleSubscription(id int64) (string, error) {
 	return newStatus, nil
 }
 
-// PauseSubscription 暂停订阅但保留订阅和节点记录。
+// PauseSubscription 暂停订阅并禁用其全部代理，保留记录供排查与恢复后重验。
 func (s *Storage) PauseSubscription(id int64) error {
-	res, err := s.db.Exec(`UPDATE subscriptions SET status = 'paused' WHERE id = ?`, id)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	return requireRowsAffected(res.RowsAffected())
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE subscriptions SET status = 'paused' WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if err := requireRowsAffected(res.RowsAffected()); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE proxies
+		 SET status = 'disabled'
+		 WHERE source = ? AND subscription_id = ? AND status != 'disabled'`,
+		SourceSubscription, id,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // scanSubscription 扫描订阅行数据
