@@ -40,6 +40,9 @@
 
 ### 修复
 
+- **WebUI 筛选/手工输入 aria-label 双语**：延迟、关键字、手工链接/地域/备注输入框补 `data-i18n-aria` 与中/英文案，`applyLang` 切换语言时同步更新
+- **WebUI session 提示双语**：`session_hint` 去掉 `<code>` 子元素，避免 `applyLang` 因存在子节点而跳过，英文案可直接应用
+
 - **Docker Compose 只读 API 首启配置**：透传 `PUBLIC_HOST`、`READONLY_API_KEYS` 与 `READONLY_API_RATE_PER_MIN`，并在 README 明确其仅首启导入的持久化合同。
 
 - **地域分布中文名补全**：`REGION_ZH` 补齐波罗的海（LV/EE/LT）及巴尔干/中亚/中东/拉美/非洲等节点池高频码；未知码仍回退大写 ISO

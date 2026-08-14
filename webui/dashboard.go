@@ -152,14 +152,14 @@ const dashboardHTML = `<!DOCTYPE html>
       <select class="hidden-select" id="ai-grok-filter"><option value="" data-i18n="filter_grok_all">Grok 全部</option><option value="unlocked" data-i18n="filter_grok_ok">Grok 畅通</option><option value="blocked" data-i18n="filter_grok_bad">Grok 阻断</option><option value="unprobed" data-i18n="filter_grok_unprobed">Grok 未探测</option></select><button type="button" class="filter-toggle" id="ai-grok-toggle" data-sel="ai-grok-filter" onclick="cycleFilter('ai-grok-filter','ai-grok-toggle')" aria-pressed="false" data-i18n-title="filter_grok_title" title="Grok：全部/畅通/阻断/未探测"><span class="tx">Grok</span><span class="st" data-i18n="filter_all">全部</span></button>
     </div>
      <div class="toolbar filters search-row">
-     <input class="input narrow" id="latency-min" type="number" min="0" step="1" data-i18n-placeholder="filter_latency_min" placeholder="延迟≥ms" oninput="renderProxies()" aria-label="最小延迟">
-     <input class="input narrow" id="latency-max" type="number" min="0" step="1" data-i18n-placeholder="filter_latency_max" placeholder="延迟≤ms" oninput="renderProxies()" aria-label="最大延迟">
-     <input class="input grow" id="keyword-filter" type="search" data-i18n-placeholder="filter_keyword" placeholder="搜索地址 / 备注 / 出口 IP" oninput="renderProxies()" aria-label="搜索地址、备注或出口 IP">
+     <input class="input narrow" id="latency-min" type="number" min="0" step="1" data-i18n-placeholder="filter_latency_min" data-i18n-aria="aria_latency_min" placeholder="延迟≥ms" oninput="renderProxies()" aria-label="最小延迟">
+     <input class="input narrow" id="latency-max" type="number" min="0" step="1" data-i18n-placeholder="filter_latency_max" data-i18n-aria="aria_latency_max" placeholder="延迟≤ms" oninput="renderProxies()" aria-label="最大延迟">
+     <input class="input grow" id="keyword-filter" type="search" data-i18n-placeholder="filter_keyword" data-i18n-aria="aria_keyword_search" placeholder="搜索地址 / 备注 / 出口 IP" oninput="renderProxies()" aria-label="搜索地址、备注或出口 IP">
     </div>
     <div class="toolbar">
-      <input class="input grow" id="manual-link" data-i18n-placeholder="filter_manual_link" placeholder="添加手工节点: http://host:port 或 socks5://host:port" aria-label="手工节点链接">
-      <input class="input narrow" id="manual-region" maxlength="2" data-i18n-placeholder="filter_region" placeholder="地域" aria-label="地域">
-      <input class="input mid" id="manual-note" data-i18n-placeholder="filter_note" placeholder="备注" aria-label="备注">
+      <input class="input grow" id="manual-link" data-i18n-placeholder="filter_manual_link" data-i18n-aria="aria_manual_link" placeholder="添加手工节点: http://host:port 或 socks5://host:port" aria-label="手工节点链接">
+      <input class="input narrow" id="manual-region" maxlength="2" data-i18n-placeholder="filter_region" data-i18n-aria="aria_region" placeholder="地域" aria-label="地域">
+      <input class="input mid" id="manual-note" data-i18n-placeholder="filter_note" data-i18n-aria="aria_note" placeholder="备注" aria-label="备注">
       <button class="mini primary" onclick="addManualNode()" data-i18n="btn_add_node">添加</button>
     </div>
       <div class="hint" style="margin:0 0 10px" data-i18n="filter_ai_hint">AI 解锁：ChatGPT / Claude / Grok / Gemini（绿色畅通 / 红色阻断 / 淡灰未探测）</div>
@@ -208,7 +208,7 @@ const dashboardHTML = `<!DOCTYPE html>
      </div>
     </div>
     <div class="card-body card-b">
-     <div class="hint" style="margin-bottom:12px" data-i18n="session_hint">仅展示 sticky 绑定：用户名含 <code>-session-&lt;id&gt;</code> 才进入亲和表；无 session 的请求不出现在此列表。</div>
+     <div class="hint" style="margin-bottom:12px" data-i18n="session_hint">仅展示 sticky 绑定：用户名含 -session-&lt;id&gt; 才进入亲和表；无 session 的请求不出现在此列表。</div>
      <div class="session-list session-grid" id="session-rows"><div class="empty" data-i18n="loading">加载中</div></div>
     </div>
    </div>

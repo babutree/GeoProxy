@@ -1217,3 +1217,84 @@ func TestDashboardProxyListPagination(t *testing.T) {
 		})
 	}
 }
+
+// TestDashboardFilterManualInputsLocalizeARIALabels 验证筛选/手工输入框在切换语言后
+// aria-label 一并翻译（BUG：这些 input 只有 data-i18n-placeholder，aria-label 写死中文，
+// applyLang 只对 [data-i18n-aria] 生效，英文模式下读屏仍是中文）。
+func TestDashboardFilterManualInputsLocalizeARIALabels(t *testing.T) {
+	// 每个筛选/手工输入框必须同时带 data-i18n-placeholder（placeholder 翻译）与
+	// data-i18n-aria（aria-label 翻译），且 aria key 在 zh/en 字典中一一对应。
+	inputs := []struct {
+		id        string
+		ariaKeyZh string
+		ariaKeyEn string
+	}{
+		{id: "latency-min", ariaKeyZh: "aria_latency_min:'最小延迟'", ariaKeyEn: "aria_latency_min:'Min latency'"},
+		{id: "latency-max", ariaKeyZh: "aria_latency_max:'最大延迟'", ariaKeyEn: "aria_latency_max:'Max latency'"},
+		{id: "keyword-filter", ariaKeyZh: "aria_keyword_search:'搜索地址、备注或出口 IP'", ariaKeyEn: "aria_keyword_search:'Search address, note, or exit IP'"},
+		{id: "manual-link", ariaKeyZh: "aria_manual_link:'手工节点链接'", ariaKeyEn: "aria_manual_link:'Manual node link'"},
+		{id: "manual-region", ariaKeyZh: "aria_region:'地域'", ariaKeyEn: "aria_region:'Region'"},
+		{id: "manual-note", ariaKeyZh: "aria_note:'备注'", ariaKeyEn: "aria_note:'Note'"},
+	}
+	for _, in := range inputs {
+		t.Run(in.id, func(t *testing.T) {
+			idAnchor := `id="` + in.id + `"`
+			idx := strings.Index(dashboardHTML, idAnchor)
+			if idx < 0 {
+				t.Fatalf("dashboardHTML missing input %q", idAnchor)
+			}
+			// 只检查该 input 自身的 aria-bound；attribute 顺序不强制。
+			if !strings.Contains(dashboardHTML[idx:], `data-i18n-aria="`) {
+				t.Fatalf("input %q missing data-i18n-aria for localized aria-label (BUG: aria-label 硬编码中文)", in.id)
+			}
+			if !strings.Contains(dashboardHTML[idx:], `aria-label="`) {
+				t.Fatalf("input %q missing static aria-label fallback", in.id)
+			}
+		})
+	}
+	// 字典必须同时提供 zh/en 两个 aria key（applyLang 切 en 时 t(k) 才命中）。
+	for _, tc := range []struct {
+		name string
+		zh   string
+		en   string
+	}{
+		{name: "latency-min", zh: "aria_latency_min:'最小延迟'", en: "aria_latency_min:'Min latency'"},
+		{name: "latency-max", zh: "aria_latency_max:'最大延迟'", en: "aria_latency_max:'Max latency'"},
+		{name: "keyword-search", zh: "aria_keyword_search:'搜索地址、备注或出口 IP'", en: "aria_keyword_search:'Search address, note, or exit IP'"},
+		{name: "manual-link", zh: "aria_manual_link:'手工节点链接'", en: "aria_manual_link:'Manual node link'"},
+		{name: "manual-region", zh: "aria_region:'地域'", en: "aria_region:'Region'"},
+		{name: "manual-note", zh: "aria_note:'备注'", en: "aria_note:'Note'"},
+	} {
+		t.Run("dict "+tc.name, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, tc.zh) {
+				t.Fatalf("I18N.zh missing %q", tc.zh)
+			}
+			if !strings.Contains(dashboardBundle, tc.en) {
+				t.Fatalf("I18N.en missing %q", tc.en)
+			}
+		})
+	}
+}
+
+// TestDashboardSessionHintNoChildElementBlocksI18n 验证 session_hint 不再含子元素：
+// applyLang 在 el.childElementCount（如 <code>）且无 data-i18n-force 时跳过 data-i18n，
+// 导致英文译文永不生效（BUG：含 <code> 时 applyLang 跳过覆盖，DOM 保持中文）。
+func TestDashboardSessionHintNoChildElementBlocksI18n(t *testing.T) {
+	const hint = `data-i18n="session_hint">仅展示 sticky 绑定：用户名含 -session-&lt;id&gt; 才进入亲和表；无 session 的请求不出现在此列表。</div>`
+	if !strings.Contains(dashboardHTML, hint) {
+		t.Fatalf("dashboardHTML session_hint 应为无子元素的纯文本（移除 <code>），got missing %q", hint)
+	}
+	// 回归防护：session_hint 若重新引入子元素（<code> 等），applyLang 会再次跳过英文覆盖。
+	if strings.Contains(dashboardHTML, `data-i18n="session_hint">仅展示 sticky 绑定：用户名含 <code>`) {
+		t.Fatal("session_hint 重新引入子元素 <code>，会再次阻断 i18n 覆盖")
+	}
+	// zh/en 译文都必须在字典里，切 en 后的 DOM 才会有英文。
+	for _, want := range []string{
+		"session_hint:'仅展示 sticky 绑定：用户名含 -session-<id> 才进入亲和表",
+		"session_hint:'Sticky only: usernames with -session-<id> appear here",
+	} {
+		if !strings.Contains(dashboardBundle, want) {
+			t.Fatalf("dashboardJS missing session_hint translation %q", want)
+		}
+	}
+}
