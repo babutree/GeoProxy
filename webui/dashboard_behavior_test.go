@@ -162,7 +162,13 @@ function nodeSupportsInboundProtocol(p,protocol){
 
 func requireDashboardBehaviorScenario(t *testing.T, bundle, scenario string) dashboardHarnessResult {
 	t.Helper()
-	stdout, stderr, err := runDashboardBehaviorScenario(t, bundle, scenario)
+	return requireDashboardBehaviorScenarioWithWire(t, bundle, scenario, nil)
+}
+
+// requireDashboardBehaviorScenarioWithWire 允许场景消费由真实 handler 采集的 wire 载荷。
+func requireDashboardBehaviorScenarioWithWire(t *testing.T, bundle, scenario string, wire map[string]dashboardWirePayload) dashboardHarnessResult {
+	t.Helper()
+	stdout, stderr, err := runDashboardBehaviorScenarioWithWire(t, bundle, scenario, wire)
 	if err != nil {
 		t.Fatalf("dashboard behavior scenario %q failed: %v\nstderr:\n%s\nstdout:\n%s", scenario, err, stderr, stdout)
 	}
@@ -173,7 +179,18 @@ func requireDashboardBehaviorScenario(t *testing.T, bundle, scenario string) das
 	return result
 }
 
+// dashboardWirePayload 是单个 API 响应的原样快照：状态码 + 未经改写的响应体。
+type dashboardWirePayload struct {
+	Status int    `json:"status"`
+	Body   string `json:"body"`
+}
+
 func runDashboardBehaviorScenario(t *testing.T, bundle, scenario string) (string, string, error) {
+	t.Helper()
+	return runDashboardBehaviorScenarioWithWire(t, bundle, scenario, nil)
+}
+
+func runDashboardBehaviorScenarioWithWire(t *testing.T, bundle, scenario string, wire map[string]dashboardWirePayload) (string, string, error) {
 	t.Helper()
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
@@ -186,14 +203,27 @@ func runDashboardBehaviorScenario(t *testing.T, bundle, scenario string) (string
 	if _, err := os.Stat(harnessPath); err != nil {
 		t.Fatalf("stat dashboard behavior harness: %v", err)
 	}
-	bundlePath := filepath.Join(t.TempDir(), "dashboard-production.js")
+	workDir := t.TempDir()
+	bundlePath := filepath.Join(workDir, "dashboard-production.js")
 	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
 		t.Fatalf("write UTF-8 dashboard bundle: %v", err)
+	}
+	args := []string{harnessPath, bundlePath, scenario}
+	if wire != nil {
+		encoded, err := json.Marshal(wire)
+		if err != nil {
+			t.Fatalf("encode dashboard wire payloads: %v", err)
+		}
+		wirePath := filepath.Join(workDir, "wire.json")
+		if err := os.WriteFile(wirePath, encoded, 0o600); err != nil {
+			t.Fatalf("write dashboard wire payloads: %v", err)
+		}
+		args = append(args, wirePath)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, nodePath, harnessPath, bundlePath, scenario)
+	cmd := exec.CommandContext(ctx, nodePath, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

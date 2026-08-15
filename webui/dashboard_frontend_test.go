@@ -946,6 +946,7 @@ func TestDashboardOrbitSessionBeamsMatchQuality(t *testing.T) {
 	checks := []string{
 		"function orbitSessionQualityTrack(",
 		"function orbitSessionBeamKey(",
+		"function sessionRegionKey(",
 		"b.k=sessCount[b.cc+'|'+b.q]||0",
 		"const byQ={s:[],a:[],b:[],c:[]}",
 		"regionTracks",
@@ -964,6 +965,13 @@ func TestDashboardOrbitSessionBeamsMatchQuality(t *testing.T) {
 	// D 档不得进入 byQ（轨道不展示 D 是正确产品行为）。
 	if strings.Contains(dashboardBundle, "const byQ={s:[],a:[],b:[],c:[],d:[]}") {
 		t.Fatal("dashboard must not place D-grade satellites on orbit tracks")
+	}
+	// /api/sessions 早已不再下发裸 region 字段（改为 selected_region / exit_region）。
+	// 所有会话地域聚合必须经 sessionRegionKey，禁止再直接读 s.region。
+	// 真正的行为拦截在 dashboard_wire_contract_test.go 的连线契约场景；
+	// 这里做静态兜底，让退回旧字段在改动当下就失败。
+	if strings.Contains(dashboardBundle, "String((s&&s.region)||'')") {
+		t.Fatal("dashboard still reads the removed s.region field for session region aggregation")
 	}
 }
 

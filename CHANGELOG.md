@@ -35,10 +35,27 @@
 - **节点状态**：`disabled` 且无 `last_check` 显示「待验证」，有验证记录或失败次数超限显示「不可用」
 - **示例凭据**：文档/默认用户名占位改为 `username`，连接示例主机改为 `YOUR-HOST-IP`
 - **DSL 文档与连接提示**：README / GEO_FILTER / PRD / WebUI 统一 `region → unlock → node → session`；优先使用 `key-<base64url(nodeKey)>` 稳定身份，保留 `host:port` 兼容入口，并明确入口节点、最终出口、fail-closed 与 node 优先 session 语义
-- **部署文档**：`DATA_DIRECTORY.md` 默认数据路径改为 bind mount `./data`；README 镜像与中文免责声明对齐当前网关模型
+- **部署文档**：README / PRD 改为正式提供 `ghcr.io/babutree/geoproxy:latest`（`linux/amd64` + `linux/arm64`）；`DATA_DIRECTORY.md` 默认数据路径改为 bind mount `./data`；中文免责声明对齐当前网关模型
 - **仓库卫生**：`.gitignore` / `.dockerignore` 排除 `subscriptions/`、`proxygo`、`shard-*/`；从索引移除已跟踪运行时订阅与二进制（历史清理需另授权）
+- **sing-box 升级 1.13.5 → 1.13.16**：Dockerfile `ARG SINGBOX_VERSION` 与 CI `SINGBOX_VERSION` 同步；1.13.6–1.13.16 区间全为修复与依赖更新，无配置破坏性变更（1.13.16 默认不再上传 AnyTLS 客户端元数据，避免被上游画像）。停在 1.13.16 而非最新 1.13.18，避开刚发布的 naiveproxy 依赖升级窗口
+- **sing-box 版本一致性门禁**：新增 `TestSingBoxVersionIsPinnedConsistently`，锁定 Dockerfile 与 CI 用同一版本常量，并禁止回退到 `releases/latest`——防止「CI 用 A 版跑测试、镜像装 B 版跑生产」
+- **前端契约测试（真实 handler + 真实 JS）**：`dashboard_behavior_harness.js` 新增三类契约场景，输入全部由 Go 侧真实 handler 采集（禁止手写 JSON），覆盖会话字段与列表端点空值形态；配套四个变异测试证明断言真的能拦住对应回归。此前前端测试只对 JS 源码做 `strings.Contains`，不执行代码，对字段改名和 `null` vs `[]` 完全无感
 
 ### 修复
+
+- **出口写回空值保护**：`updateExitInfoWhereResult` 的 `exit_ip`/`exit_location`/`latency`/`quality_grade` 原为无条件覆写，与同函数内其它字段及 `ApplyProbeObservation`/`RecordProbeFailure` 的 `CASE WHEN` 保护不一致。部分探测结果（出口缺失或未测得延迟）会清空已有有效出口身份，且 `CalculateQualityGrade(0)=="S"` 会把未测得延迟伪装成最优品质。现按 `trustedExit`/`hasLatency` 条件更新。四个公开方法 `UpdateExitInfo`/`UpdateProxyExitInfo`/`UpdateSubscriptionProxyExitInfo`/`UpdateDisabledSubscriptionProxyExitInfo` 生产侧无调用方，属公开 API 防御缺口而非在跑的数据损坏
+- **删除遗留 `checker.Checker`**：全仓（含测试）零引用，`main.go` 只装配 `NewHealthChecker`。该类型的 `Start()` 无停止 channel（goroutine 永久泄漏），且 `HealthIntervalMinutes=0` 时 `time.Sleep(0)` 会变忙循环。整文件删除，不留待误用
+- **`sing-box check` 子进程超时**：`checkNodes` 与 `startLocked` 的配置校验原用无超时的 `exec.Command`；两处都在 `refreshMu` 内运行，一旦挂起会冻结全部订阅刷新。改用 `exec.CommandContext` + 30s 上限（check 仅做语法校验，正常毫秒级完成），并显式区分超时与校验失败
+- **`checkNodes` 临时配置权限**：含节点凭据的 `check-*.json` 补显式 `Chmod(0600)` 兜底
+- **`StderrPipe()` 错误不再被丢弃**：失败时 `stderrPipe` 为 nil，读取 goroutine 会解引用 nil 而 panic 并终止整个进程；现降级为直连 `os.Stderr`
+- **`plugin_opts` 确定性输出**：`convertPluginOpts` 按 key 排序。原实现依赖 Go map 随机迭代顺序，同一节点每次生成不同串，sing-box 配置不可复现。（NodeKey 由 `json.Marshal(Raw)` 计算、`encoding/json` 对 map key 排序，故此项不影响节点身份与端口稳定性——已加测试固化这一分工）
+- **手工节点地域 API 边界校验**：`/api/manual-node/region` 对非 alpha-2 输入返回 400。原先非法值被存储层 `normalizeManualRegion` 静默归一化为空串后仍返回 `200 {"status":"updated"}`，用户看到"已更新"而地域实际被清空，违反「不静默回退」约定。空串仍合法（语义为清除手工地域覆盖）
+- **API Key 操作按钮 JS 上下文转义**：`onclick` 内的 key id 改用新增的 `jsArg()`（`JSON.stringify` + HTML 属性转义）。`html()` 是 HTML 文本转义器，浏览器解析属性值时会把 `&#39;` 解码回单引号再交给 JS 解析器，用在 JS 字符串上下文等于未转义。当前 id 来自 `crypto/rand`+hex 不可利用，属防御性修复
+- **健康检查批量下限**：`GetBatchForHealthCheck` 拒绝非正 `batchSize`（SQLite `LIMIT -1` 语义是无限制，会全表扫描）；`HealthChecker` 侧对损坏配置回退默认 20，不让健康检查因非法配置停摆
+
+- **星系图会话连线消失**：`/api/sessions` 已把 `region` 字段拆成 `selected_region` / `exit_region`，前端 `orbitSessionBeamKey` 与 `buildRegionStats` 仍读已删除的 `s.region`，导致会话计数恒为 0——连线不绘制、卫星不点亮、地域面板「N 会话」徽章不显示（会话页本身正常，所以不易察觉）。新增 `sessionRegionKey()` 统一取键：优先按 `proxy_id` 反查节点 `regionOf(p)`（与卫星/地域面板同一分桶源），其次 `selected_region`，最后兜底 `exit_region`
+- **订阅删除后列表仍显示旧订阅**：`/api/subscriptions` 在空订阅表时把 nil 切片编码成 JSON `null`，前端 `if(!subs)return` 当作请求失败提前退出，`allSubs` 保留删除前的值——删掉最后一条订阅时表现为「确认后仍未删除」；同一原因还让 `subscriptionsLoaded` 停在 `false`，0 条订阅时刷新页面订阅页永久卡在骨架屏。改为返回空数组
+- **订阅删除部分失败仍需刷新**：`/api/subscription/delete` 存在「订阅已删除但受管文件清理失败」的 500 分支，此时服务端状态已变；`deleteSub` 改为无论成功或该类失败都重新拉取列表，并把真实错误报给用户，不谎报成功
 
 - **CI `custom` 测试 Linux 兼容**：`TestNewSingBoxProcessRejectsFileDataDir` 不再把 Linux `ENOTDIR` 误判为旁路目录存在
 

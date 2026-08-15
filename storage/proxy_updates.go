@@ -153,17 +153,35 @@ func (s *Storage) updateExitInfoWhereResult(where string, args []interface{}, ex
 	grade := CalculateQualityGrade(latencyMs)
 	region := regionFromExitLocation(exitLocation)
 	trustedExit := exitIP != "" && exitLocation != ""
-	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, renewLastCheck, trustedExit, region, region, ipapiisScore, ipapiisScore, ipapiFlagsKnown, ipapiFlags, ipapiFlagsKnown, cfBlocked, cfBlocked, aiReachability, aiReachability}
+	// hasLatency 与 RecordProbeFailure/ApplyProbeObservation 同义：latencyMs<=0 表示本次
+	// 未测得延迟，不得覆盖已有有效值，也不得据此改写 quality_grade。
+	// 特别是 CalculateQualityGrade(0) 返回 "S"，无条件写入会把未测得延迟伪装成最优品质。
+	hasLatency := latencyMs > 0
+	queryArgs := []interface{}{
+		trustedExit, exitIP,
+		trustedExit, exitLocation,
+		hasLatency, latencyMs,
+		hasLatency, grade,
+		renewLastCheck, trustedExit, region, region,
+		ipapiisScore, ipapiisScore, ipapiFlagsKnown, ipapiFlags, ipapiFlagsKnown,
+		cfBlocked, cfBlocked, aiReachability, aiReachability,
+	}
 	queryArgs = append(queryArgs, args...)
 	// 健康检查/验证成功时同样清零 fail_count（BUG-53）：只有到达此处才代表
 	// 探测通过，之前累积的失败应清除，节点方能重新参与选路/后续检查。
 	// 健康检查失败路径仍会累加 fail_count 至阈值并 disable，故持续坏的节点
 	// 不会来回横跳——只有真正探测成功才归零。
+	// exit_ip/exit_location 仅在 trustedExit（两者都非空）时更新：部分探测结果不得
+	// 清空已有有效出口身份，与 ApplyProbeObservation / RecordProbeFailure 语义一致。
 	// cf_blocked 仅在 cfBlocked >= 0 时更新：-1 代表本次未能探测(未知)，不得覆盖已有有效值(0/1)。
 	// ai_reachability 仅在非空串时更新：空串代表本次未探测(未知)，不得覆盖已有有效 JSON（与 cf_blocked 的 -1 不覆盖同理）。
 	return s.db.Exec(
 		`UPDATE proxies
-			 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
+			 SET exit_ip = CASE WHEN ? THEN ? ELSE exit_ip END,
+			     exit_location = CASE WHEN ? THEN ? ELSE exit_location END,
+			     latency = CASE WHEN ? THEN ? ELSE latency END,
+			     quality_grade = CASE WHEN ? THEN ? ELSE quality_grade END,
+			     fail_count = 0,
 			     last_check = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE COALESCE(last_check, CURRENT_TIMESTAMP) END,
 			     exit_checked_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE exit_checked_at END,
 			     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END,

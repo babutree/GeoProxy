@@ -10,6 +10,9 @@ if (!bundlePath || !scenario) {
 }
 
 const source = fs.readFileSync(bundlePath, 'utf8');
+// 契约 wire 载荷：由 Go 测试用真实 handler 采集后落盘（path -> {status, body}）。
+const wirePath = process.argv[4];
+const wirePayloads = wirePath ? JSON.parse(fs.readFileSync(wirePath, 'utf8')) : null;
 const bootMarker = "initFilterToggles();showSkeletons();markViewLazy('overview');";
 const bootIndex = source.indexOf(bootMarker);
 if (bootIndex < 0) {
@@ -39,11 +42,15 @@ function fakeElement(id) {
     innerHTML: '',
     textContent: '',
     title: '',
+    className: '',
     disabled: false,
     checked: false,
     options: [],
     childNodes: [],
     childElementCount: 0,
+    // 轨道几何读 clientWidth/clientHeight；缺省会让 orbitStageGeom 得到 NaN。
+    clientWidth: 600,
+    clientHeight: 338,
     dataset: {},
     style: { setProperty() {} },
     classList: fakeClassList(),
@@ -96,6 +103,7 @@ let confirmResult = true;
 let fetchHandler = () => { throw new Error('behavior harness must not perform network requests'); };
 const storage = new Map();
 const lastClipboardWrite = () => clipboardWrites[clipboardWrites.length - 1];
+let rafDepth = 0;
 const sandbox = {
   console,
   document,
@@ -111,7 +119,17 @@ const sandbox = {
   },
   window: { addEventListener() {} },
   confirm() { return confirmResult; },
-  requestAnimationFrame(cb) { if (typeof cb === 'function') cb(); return 1; },
+  // 同步执行回调，保留生产代码里「双 rAF 等布局」的语义；但轨道动画
+  // orbitFrame 会在末尾自我重排，同步递归会炸栈，故限制嵌套深度。
+  // 深度耗尽时只返回句柄不执行：ensureOrbitLoop 得到非 0 的 orbitRAF，
+  // 不会反复重入，被测的 buildOrbitSvg/buildOrbitSats 仍由场景显式驱动。
+  requestAnimationFrame(cb) {
+    if (typeof cb !== 'function') return 1;
+    if (rafDepth >= 4) return 1;
+    rafDepth += 1;
+    try { cb(0); } finally { rafDepth -= 1; }
+    return 1;
+  },
   setTimeout() { return 1; },
   clearTimeout() {},
   setInterval() { return 1; },
@@ -140,6 +158,21 @@ globalThis.__dashboardBehavior = {
   encodeNodeKeyPin,
   logWindowShift,
   loadLogs,
+  loadProxies,
+  loadSubscriptions,
+  loadSessions,
+  showSkeletons,
+  deleteSub,
+  buildRegionStats,
+  buildOrbitSvg,
+  buildOrbitSats,
+  orbitSessionBeamKey,
+  orbitQualityTrack,
+  sessionRegionKey,
+  subsLoaded() { return subscriptionsLoaded; },
+  subs() { return allSubs.slice(); },
+  orbitSats() { return orbitSats.map((sat) => ({ q: sat.q, hasBeam: !!sat.beam, live: String(sat.el.className || '').includes('live') })); },
+  setOrbitSessions(value) { orbitSessions = value; },
   proxyPagePrev,
   proxyPageNext,
   proxyPageSizeChange,
@@ -752,6 +785,142 @@ async function runCopyScenario() {
   return { scenario: 'copy', assertions: 19, gatewayUser, nodeKey };
 }
 
+// wireResponse 把 Go 侧真实 handler 采集的 {status, body} 包装成 fetch 响应。
+// 这里绝不手写 JSON 字面量：整个契约场景的输入必须来自真实 handler，
+// 否则字段改名 / nil 切片这类后端契约漂移仍然测不出来。
+function wireResponse(path) {
+  if (!wirePayloads) throw new Error('wire payload file is required for contract scenarios');
+  const payload = wirePayloads[path];
+  if (!payload) throw new Error(`wire payload missing for ${path}`);
+  return {
+    status: payload.status,
+    ok: payload.status >= 200 && payload.status < 300,
+    statusText: 'OK',
+    async text() { return payload.body; },
+  };
+}
+
+// 契约场景 1：空订阅表时的真实响应必须让前端把列表清空并结束骨架态。
+// 覆盖「删掉最后一条订阅后列表仍显示旧订阅」以及「刷新后订阅页卡在骨架」。
+async function runSubscriptionEmptyWireScenario() {
+  resetDOM();
+  ['sub-list', 'toast'].forEach(ensureElement);
+  fetchHandler = async (path) => wireResponse(String(path));
+
+  const box = ensureElement('sub-list');
+  dashboard.showSkeletons();
+  equal(box.innerHTML.includes('skeleton'), true, 'boot renders subscription skeletons');
+
+  await dashboard.loadSubscriptions();
+  equal(dashboard.subsLoaded(), true, 'empty subscription wire response completes the load');
+  equal(dashboard.subs().length, 0, 'empty subscription wire response clears cached rows');
+  equal(box.innerHTML.includes('skeleton'), false, 'empty subscription wire response replaces skeletons');
+  equal(box.innerHTML.includes('暂无订阅'), true, 'empty subscription wire response renders the empty state');
+  return { scenario: 'subs_empty_wire', assertions: 5 };
+}
+
+// 契约场景 2：删除最后一条订阅后，列表必须真正消失（不依赖手写 mock 的 []）。
+async function runSubscriptionDeleteLastScenario() {
+  resetDOM();
+  ['sub-list', 'toast', 'confirm-modal', 'confirm-modal-msg', 'confirm-modal-ok', 'confirm-modal-cancel',
+    // deleteSub 成功后并发刷新 stats/proxies/subscriptions，这些节点必须存在，
+    // 否则真实代码会抛 TypeError 并被 runAsync 吞成 toast，掩盖删除结果。
+    'stat-total', 'stat-http', 'stat-socks5', 'stat-subscription', 'stat-sessions',
+    'region-filter', 'proxy-rows', 'region-list', 'region-page-list', 'region-total', 'region-page-total',
+    'orbit-stage', 'orbit-svg', 'orbit-sats', 'orbit-beams', 'orbit-gw-ip',
+    'proxy-page-info', 'proxy-page-num', 'proxy-page-prev', 'proxy-page-next', 'proxy-page-size'].forEach(ensureElement);
+  const box = ensureElement('sub-list');
+  const okBtn = ensureElement('confirm-modal-ok');
+
+  // 起始状态用「删除前」的真实 handler 响应渲染。
+  fetchHandler = async () => wireResponse('/api/subscriptions#before');
+  await dashboard.loadSubscriptions();
+  equal(dashboard.subs().length, 1, 'pre-delete wire response lists one subscription');
+  equal(box.innerHTML.includes('wire-sub'), true, 'pre-delete list renders the subscription name');
+
+  // 删除后列表端点返回「删除后」的真实响应（空表）。
+  fetchHandler = async (path) => wireResponse(String(path) === '/api/subscriptions' ? '/api/subscriptions#after' : String(path));
+  const pending = dashboard.deleteSub(1);
+  // showConfirm 把确认按钮的 onclick 挂在 DOM 上；模拟用户点「确定」。
+  await Promise.resolve();
+  equal(typeof okBtn.onclick, 'function', 'delete flow opens the in-app confirm dialog');
+  okBtn.onclick();
+  await pending;
+
+  equal(dashboard.subs().length, 0, 'confirmed delete drops the subscription from cache');
+  equal(box.innerHTML.includes('wire-sub'), false, 'confirmed delete removes the row from the DOM');
+  equal(ensureElement('toast').textContent, '订阅已删除', 'confirmed delete reports success');
+  return { scenario: 'subs_delete_last', assertions: 6 };
+}
+
+// 契约场景 3：会话连线。用真实 /api/sessions + /api/proxies 响应驱动轨道，
+// 断言「有 sticky 会话 ⇒ 至少一条连线 + 卫星点亮」。
+// 这是字段改名（region → selected_region）回归的直接拦截点。
+async function runOrbitSessionBeamWireScenario() {
+  resetDOM();
+  ['orbit-stage', 'orbit-svg', 'orbit-sats', 'orbit-beams', 'orbit-gw-ip',
+    'session-rows', 'sess-count', 'ov-session-rows', 'ov-sess-count',
+    'region-list', 'region-page-list', 'region-total', 'region-page-total',
+    'proxy-rows', 'region-filter'].forEach(ensureElement);
+  fetchHandler = async (path) => wireResponse(String(path));
+
+  await dashboard.loadProxies();
+  await dashboard.loadSessions();
+
+  const sessions = JSON.parse(wirePayloads['/api/sessions'].body);
+  equal(Array.isArray(sessions) && sessions.length > 0, true, 'wire payload carries at least one sticky binding');
+  equal('region' in sessions[0], false, 'wire contract no longer exposes the legacy region field');
+
+  // 轨道必须被真实渲染路径构建（loadSessions → renderSessions → renderOrbitSystem）。
+  dashboard.buildOrbitSvg();
+  dashboard.buildOrbitSats();
+  const sats = dashboard.orbitSats();
+  equal(sats.length > 0, true, 'available nodes produce orbit satellites');
+  equal(sats.filter((sat) => sat.hasBeam).length > 0, true, 'sticky sessions produce at least one session beam');
+  equal(sats.filter((sat) => sat.live).length > 0, true, 'satellites bound to sessions are marked live');
+
+  // 地域面板的会话计数同样来自 sessionRegionKey，必须与连线一致。
+  const stats = dashboard.buildRegionStats();
+  equal(stats.reduce((sum, item) => sum + Number(item.sess || 0), 0) > 0, true, 'region panel counts sticky sessions');
+
+  // 键必须落在真实存在的地域桶上，不能是空串。
+  equal(dashboard.sessionRegionKey(sessions[0]) !== '', true, 'session region key resolves from the wire contract');
+  return { scenario: 'orbit_session_beams', assertions: 7 };
+}
+
+// 契约场景 4：删除接口返回 500「订阅已删除但文件清理失败」时，
+// 服务端状态已变，前端必须仍然刷新列表并把错误报给用户。
+async function runSubscriptionDeletePartialFailureScenario() {
+  resetDOM();
+  ['sub-list', 'toast', 'confirm-modal', 'confirm-modal-msg', 'confirm-modal-ok', 'confirm-modal-cancel',
+    'stat-total', 'stat-http', 'stat-socks5', 'stat-subscription', 'stat-sessions',
+    'region-filter', 'proxy-rows', 'region-list', 'region-page-list', 'region-total', 'region-page-total',
+    'orbit-stage', 'orbit-svg', 'orbit-sats', 'orbit-beams', 'orbit-gw-ip',
+    'proxy-page-info', 'proxy-page-num', 'proxy-page-prev', 'proxy-page-next', 'proxy-page-size'].forEach(ensureElement);
+  const box = ensureElement('sub-list');
+  const okBtn = ensureElement('confirm-modal-ok');
+
+  fetchHandler = async () => wireResponse('/api/subscriptions#before');
+  await dashboard.loadSubscriptions();
+  equal(dashboard.subs().length, 1, 'pre-delete wire response lists one subscription');
+
+  fetchHandler = async (path) => wireResponse(String(path) === '/api/subscriptions' ? '/api/subscriptions#after' : String(path));
+  const pending = dashboard.deleteSub(1);
+  await Promise.resolve();
+  equal(typeof okBtn.onclick, 'function', 'delete flow opens the in-app confirm dialog');
+  okBtn.onclick();
+  await pending;
+
+  equal(dashboard.subs().length, 0, 'partial delete failure still refreshes the cached list');
+  equal(box.innerHTML.includes('wire-sub'), false, 'partial delete failure still removes the stale row');
+  equal(
+    ensureElement('toast').textContent.includes('file cleanup failed'),
+    true,
+    'partial delete failure surfaces the server error instead of a success toast',
+  );
+  return { scenario: 'subs_delete_partial_failure', assertions: 5 };
+}
+
 const scenarios = {
   protocol: runProtocolScenario,
   filters: runFilterScenario,
@@ -764,6 +933,10 @@ const scenarios = {
   log_window: runLogWindowScenario,
   session: runSessionScenario,
   logs_empty: runEmptyLogsI18NScenario,
+  subs_empty_wire: runSubscriptionEmptyWireScenario,
+  subs_delete_last: runSubscriptionDeleteLastScenario,
+  subs_delete_partial_failure: runSubscriptionDeletePartialFailureScenario,
+  orbit_session_beams: runOrbitSessionBeamWireScenario,
 };
 
 Promise.resolve(scenarios[scenario] ? scenarios[scenario]() : Promise.reject(new Error(`unknown scenario ${scenario}`)))

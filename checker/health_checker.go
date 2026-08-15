@@ -15,6 +15,10 @@ import (
 // (proxy 包) 使用同一阈值语义。见 BUG-53。
 const failDisableThreshold = 3
 
+// defaultHealthCheckBatchSize 与 config.DefaultConfig 的 HealthCheckBatchSize 一致，
+// 用于配置被写坏（<=0）时的回退，避免健康检查因非法批量彻底停摆。
+const defaultHealthCheckBatchSize = 20
+
 // healthStore 健康检查对存储的最小依赖，便于单测注入假实现。
 type healthStore interface {
 	GetBatchForHealthCheck(batchSize int) ([]storage.Proxy, error)
@@ -139,8 +143,14 @@ func (hc *HealthChecker) RunOnce() {
 		return
 	}
 
-	// 批量获取需要检查的代理
-	proxies, err := hc.storage.GetBatchForHealthCheck(cfg.HealthCheckBatchSize)
+	// 批量获取需要检查的代理。batchSize 非正时用默认值：配置损坏不应让健康检查
+	// 彻底停摆（存储层会拒绝非正值，不会退化成全表扫描）。
+	batchSize := cfg.HealthCheckBatchSize
+	if batchSize <= 0 {
+		log.Printf("[health] ⚠️ HealthCheckBatchSize=%d 非法，回退为默认 %d", batchSize, defaultHealthCheckBatchSize)
+		batchSize = defaultHealthCheckBatchSize
+	}
+	proxies, err := hc.storage.GetBatchForHealthCheck(batchSize)
 	if err != nil {
 		log.Printf("[health] 获取检查批次失败: %v", err)
 		return

@@ -38,7 +38,7 @@ jobs:
 
       - name: Set up sing-box
         env:
-          SINGBOX_VERSION: 1.13.5
+          SINGBOX_VERSION: 1.13.16
         run: |
           case "$(uname -m)" in
             x86_64) arch=amd64 ;;

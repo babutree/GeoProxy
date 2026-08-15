@@ -112,6 +112,13 @@ func (s *Server) apiManualNodeRegion(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// 在 API 边界显式拒绝非法地域。存储层 normalizeManualRegion 会把非 alpha-2 值
+	// 归一化为空串，若不在此拦截，用户填错会得到 200 "updated" 而地域被静默清空——
+	// 违反项目「不静默回退」约定。空串是合法输入，语义为「清除手工地域覆盖」。
+	if req.Region != "" && !isNodeAPIAlpha2Region(strings.ToLower(strings.TrimSpace(req.Region))) {
+		jsonError(w, "invalid region", http.StatusBadRequest)
+		return
+	}
 	if err := s.storage.UpdateProxyRegionByID(proxy.ID, req.Region, true); err != nil {
 		log.Printf("[webui] 更新节点 %q 地域失败: %v", req.Address, err)
 		jsonError(w, "failed to update node region", http.StatusInternalServerError)

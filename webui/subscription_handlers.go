@@ -57,7 +57,9 @@ func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		DisabledCount int `json:"disabled_count"`
 		PausedCount   int `json:"paused_count"`
 	}
-	var result []subWithStats
+	// 必须用非 nil 切片：nil 切片会被 json 编码成 "null"，前端 `if(!subs)return`
+	// 会当成请求失败提前退出，删掉最后一条订阅后列表不刷新（看起来像没删掉）。
+	result := make([]subWithStats, 0, len(subs))
 	for _, sub := range subs {
 		active, disabled, err := s.storage.CountBySubscriptionID(sub.ID)
 		if err != nil {

@@ -1,6 +1,7 @@
 package custom
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,6 +19,11 @@ import (
 
 // portRangeSpan 保留给既有配置兼容；当前 Reload 保持已加载节点端口稳定，避免入库地址漂移。
 const portRangeSpan = 5000
+
+// singBoxCheckTimeout 限制 `sing-box check` 子进程时长。
+// checkNodes / pruneInvalidNodes 在调用方持有 refreshMu 时运行，挂起会冻结全部订阅刷新；
+// check 只做配置语法校验（不发起网络请求），正常在毫秒级完成，30s 已是极宽松的上限。
+const singBoxCheckTimeout = 30 * time.Second
 
 // SingBoxProcess 管理 sing-box 子进程
 type SingBoxProcess struct {
@@ -335,6 +341,10 @@ func incompletePortAllocationErrorWithDiagnostics(nodes []ParsedNode, portMap ma
 
 // checkNodes 生成一份仅含给定节点的临时配置并运行 sing-box check，返回是否通过。
 // 不改动 s.portMap / s.configFile 等运行态，仅用于校验探测。
+//
+// 临时配置含节点凭据，必须以 0600 写入（os.CreateTemp 默认即 0600，仍显式 Chmod 兜底），
+// 并在返回前删除。check 子进程带超时：调用方持有 refreshMu，一旦 sing-box 挂起
+// 会冻结所有订阅刷新，因此宁可判定"未通过"也不能无限等待。
 func (s *SingBoxProcess) checkNodes(nodes []ParsedNode) bool {
 	if len(nodes) == 0 {
 		return true
@@ -349,6 +359,10 @@ func (s *SingBoxProcess) checkNodes(nodes []ParsedNode) bool {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return false
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return false
@@ -359,8 +373,16 @@ func (s *SingBoxProcess) checkNodes(nodes []ParsedNode) bool {
 	if err != nil {
 		return false
 	}
-	cmd := exec.Command(binPath, "check", "-c", tmpPath, "-D", s.configDir)
-	return cmd.Run() == nil
+	ctx, cancel := context.WithTimeout(context.Background(), singBoxCheckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "check", "-c", tmpPath, "-D", s.configDir)
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			log.Printf("[custom] ⚠️ sing-box check 超时（%s），判定该批节点未通过校验", singBoxCheckTimeout)
+		}
+		return false
+	}
+	return true
 }
 
 // pruneInvalidNodes 返回能通过 sing-box 校验的节点子集。
@@ -835,9 +857,18 @@ func applyTransport(raw map[string]interface{}, out map[string]interface{}) erro
 
 // convertPluginOpts 转换 shadowsocks 插件选项
 func convertPluginOpts(plugin string, opts map[string]interface{}) string {
-	var parts []string
-	for k, v := range opts {
-		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+	// 按 key 排序：Go map 迭代顺序随机，不排序会让同一节点每次生成不同的
+	// plugin_opts 串，导致生成的 sing-box 配置不可复现（排障 diff 全是噪音）。
+	// NodeKey 由 json.Marshal(Raw) 计算（encoding/json 对 map key 排序），
+	// 不经过本函数，因此这里不影响节点身份与端口稳定性。
+	keys := make([]string, 0, len(opts))
+	for k := range opts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, opts[k]))
 	}
 	return strings.Join(parts, ";")
 }
@@ -850,9 +881,16 @@ func (s *SingBoxProcess) startLocked() error {
 		return fmt.Errorf("sing-box 未找到: %s（请安装 sing-box 或设置 SINGBOX_PATH）", s.binPath)
 	}
 
-	// 先检查配置是否有效
-	checkCmd := exec.Command(binPath, "check", "-c", s.configFile, "-D", s.configDir)
+	// 先检查配置是否有效。带超时：本函数在 refreshMu 内运行，check 挂起会冻结全部订阅刷新。
+	checkCtx, cancelCheck := context.WithTimeout(context.Background(), singBoxCheckTimeout)
+	defer cancelCheck()
+	checkCmd := exec.CommandContext(checkCtx, binPath, "check", "-c", s.configFile, "-D", s.configDir)
 	if checkOutput, err := checkCmd.CombinedOutput(); err != nil {
+		if checkCtx.Err() != nil {
+			log.Printf("[custom] ❌ sing-box 配置检查超时（%s）", singBoxCheckTimeout)
+			s.setStatusLocked(SingBoxStatusFailed, "config_check_timeout", 0)
+			return fmt.Errorf("sing-box 配置检查超时（%s）", singBoxCheckTimeout)
+		}
 		log.Printf("[custom] ❌ sing-box 配置检查失败:\n%s", string(checkOutput))
 		s.setStatusLocked(SingBoxStatusFailed, "config_invalid", 0)
 		return fmt.Errorf("sing-box 配置无效: %s", string(checkOutput))
@@ -869,8 +907,15 @@ func (s *SingBoxProcess) startLocked() error {
 
 	s.cmd = exec.Command(binPath, "run", "-c", s.configFile, "-D", s.configDir)
 
-	// 捕获 stderr 用于错误诊断
-	stderrPipe, _ := s.cmd.StderrPipe()
+	// 捕获 stderr 用于错误诊断。StderrPipe 失败时 stderrPipe 为 nil，
+	// 下面的读取 goroutine 会对 nil 接口解引用而 panic 并终止整个进程；
+	// 因此失败时降级为直连 os.Stderr（丢失日志前缀，但不影响 sing-box 运行）。
+	stderrPipe, stderrErr := s.cmd.StderrPipe()
+	if stderrErr != nil {
+		log.Printf("[custom] ⚠️ 获取 sing-box stderr 管道失败，降级为直接透传: %v", stderrErr)
+		s.cmd.Stderr = os.Stderr
+		stderrPipe = nil
+	}
 	s.cmd.Stdout = os.Stdout
 
 	if err := s.cmd.Start(); err != nil {
@@ -880,18 +925,20 @@ func (s *SingBoxProcess) startLocked() error {
 	s.running = true
 
 	// 异步读取 stderr 并输出到日志
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := stderrPipe.Read(buf)
-			if n > 0 {
-				log.Printf("[sing-box] %s", strings.TrimSpace(string(buf[:n])))
+	if stderrPipe != nil {
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, err := stderrPipe.Read(buf)
+				if n > 0 {
+					log.Printf("[sing-box] %s", strings.TrimSpace(string(buf[:n])))
+				}
+				if err != nil {
+					break
+				}
 			}
-			if err != nil {
-				break
-			}
-		}
-	}()
+		}()
+	}
 
 	// 监控进程退出
 	exitCh := make(chan struct{})

@@ -223,7 +223,12 @@ func (s *Storage) GetLowestLatencyByProtocolExcludeFiltered(protocol string, exc
 }
 
 // GetBatchForHealthCheck 按最久未检查优先获取一批可用代理。
+// batchSize <= 0 显式报错：SQLite 的 LIMIT -1 语义是"无限制"，会把整表拉进内存，
+// 在 6000+ 节点规模下等于让健康检查一次验证全部节点。宁可让调用方失败也不静默全表。
 func (s *Storage) GetBatchForHealthCheck(batchSize int) ([]Proxy, error) {
+	if batchSize <= 0 {
+		return nil, fmt.Errorf("health check batch size must be positive, got %d", batchSize)
+	}
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3

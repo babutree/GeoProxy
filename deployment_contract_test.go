@@ -117,6 +117,11 @@ func TestREADMEListsReadOnlyAPIEnvironment(t *testing.T) {
 	}
 }
 
+// singBoxPinnedVersion 是本仓库锁定的 sing-box 版本。
+// CI 与镜像必须用同一版本：CI 用它跑 sing-box 相关测试，运行镜像用它生成/加载配置，
+// 版本漂移会让 CI 通过而线上因协议字段差异启动失败。
+const singBoxPinnedVersion = "1.13.16"
+
 // 发布工作流必须同时要求 Docker Hub 用户名与 token，且在任何镜像构建/推送前运行 Go 测试和静态检查。
 func TestDockerWorkflowRequiresBothSecretsAndPreflight(t *testing.T) {
 	workflow, err := os.ReadFile(".github/workflows/docker-image.yml")
@@ -133,7 +138,7 @@ func TestDockerWorkflowRequiresBothSecretsAndPreflight(t *testing.T) {
 		"uses: actions/setup-node@v4",
 		"node-version: 20",
 		"name: Set up sing-box",
-		"SINGBOX_VERSION: 1.13.5",
+		"SINGBOX_VERSION: " + singBoxPinnedVersion,
 		"install -m 0755",
 		"$RUNNER_TEMP/bin/sing-box",
 		"echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"",
@@ -159,6 +164,31 @@ func TestDockerWorkflowRequiresBothSecretsAndPreflight(t *testing.T) {
 	singBoxIndex := strings.Index(content, "name: Set up sing-box")
 	if nodeIndex < 0 || singBoxIndex < 0 || testIndex < 0 || nodeIndex > testIndex || singBoxIndex > testIndex {
 		t.Error("Node and sing-box must be prepared before Go tests")
+	}
+}
+
+// TestSingBoxVersionIsPinnedConsistently 锁定 CI 与运行镜像使用同一 sing-box 版本。
+// 两处任一漂移都会造成「CI 用 A 版跑测试、镜像装 B 版跑生产」，
+// 协议字段差异只会在线上暴露。
+func TestSingBoxVersionIsPinnedConsistently(t *testing.T) {
+	dockerfile, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatalf("ReadFile(Dockerfile) error = %v", err)
+	}
+	wantARG := "ARG SINGBOX_VERSION=" + singBoxPinnedVersion
+	if !strings.Contains(string(dockerfile), wantARG) {
+		t.Errorf("Dockerfile missing %q; CI and runtime sing-box versions must match", wantARG)
+	}
+	// Dockerfile 与工作流都必须按 tag 精确下载，不得回退到 latest。
+	if strings.Contains(string(dockerfile), "releases/latest") {
+		t.Error("Dockerfile must download a pinned sing-box tag, not latest")
+	}
+	workflow, err := os.ReadFile(".github/workflows/docker-image.yml")
+	if err != nil {
+		t.Fatalf("ReadFile(docker workflow) error = %v", err)
+	}
+	if strings.Contains(string(workflow), "releases/latest") {
+		t.Error("docker workflow must download a pinned sing-box tag, not latest")
 	}
 }
 

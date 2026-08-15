@@ -9,7 +9,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -o geoproxy .
 
 # 下载 sing-box 二进制
-ARG SINGBOX_VERSION=1.13.5
+ARG SINGBOX_VERSION=1.13.16
 RUN ARCH=$(case "$(dpkg --print-architecture)" in amd64) echo "amd64";; arm64) echo "arm64";; *) echo "amd64";; esac) && \
     curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" \
     -o /tmp/sing-box.tar.gz && \
