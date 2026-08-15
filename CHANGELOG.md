@@ -40,6 +40,8 @@
 
 ### 修复
 
+- **CI `custom` 测试 Linux 兼容**：`TestNewSingBoxProcessRejectsFileDataDir` 不再把 Linux `ENOTDIR` 误判为旁路目录存在
+
 - **WebUI 筛选/手工输入 aria-label 双语**：延迟、关键字、手工链接/地域/备注输入框补 `data-i18n-aria` 与中/英文案，`applyLang` 切换语言时同步更新
 - **WebUI session 提示双语**：`session_hint` 去掉 `<code>` 子元素，避免 `applyLang` 因存在子节点而跳过，英文案可直接应用
 

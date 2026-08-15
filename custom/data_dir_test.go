@@ -95,8 +95,10 @@ func TestNewSingBoxProcessRejectsFileDataDir(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "数据目录") {
 		t.Fatalf("普通文件数据目录 Reload 错误 = %v，期望显式错误", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dataFile, "singbox")); !os.IsNotExist(statErr) {
-		t.Fatalf("普通文件路径下出现旁路目录，stat error = %v", statErr)
+	// 跨平台注意：中间组件是普通文件时，Linux stat 返回 ENOTDIR 而非
+	// ENOENT，os.IsNotExist 为 false；只有 stat 成功才代表旁路目录真的被创建。
+	if _, statErr := os.Stat(filepath.Join(dataFile, "singbox")); statErr == nil {
+		t.Fatalf("普通文件路径下出现旁路目录")
 	}
 }
 
