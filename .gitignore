@@ -55,3 +55,15 @@ docker-compose.dokploy.yml
 tmp/
 
 geoproxy.exe
+
+# 本地工具与调试产物：绝不入库
+# output/ 含 playwright 截图基线与临时下载的 sing-box 校验二进制（数十 MB）
+output/
+# 各类 agent/MCP 工作目录
+.codex/
+.playwright-mcp/
+.serena/
+# sing-box 二进制（任何平台命名）
+sing-box
+sing-box.exe
+libcronet.dll
