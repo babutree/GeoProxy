@@ -473,22 +473,52 @@ var aiRegionalRejectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(?:not\s+(?:supported|available)|unavailable|restricted)\s+(?:in|for)\s+(?:your\s+)?(?:country|region|territory)(?:\s+or\s+(?:your\s+)?(?:country|region|territory))?\b`),
 }
 
-// probeAIReachability 经传入的 *http.Client（即走该代理）逐个探测 4 个 AI 服务，
+// probeAIReachability 经传入的 *http.Client（即走该代理）探测 4 个 AI 服务，
 // 返回 JSON 对象字符串，如 {"openai":0,"claude":1,"grok":-1,"gemini":0}。
 //
 // 主信号 = 稳定 API（401/缺 key 等）；辅信号 = 产品层明确地区锁/放行指纹。
 // 合并规则见 mergeAIProbeResults：明确封禁优先；任一明确可达则可达。
 // 账号/密钥/配额不作为 IP 封禁依据。CF 拦截另由 probeCloudflareBlocked 单独记录。
 //
-// 每个探测复用 client 已有的 Timeout。4 个服务串行执行；任一探测异常均不 panic。
+// 每个探测复用 client 已有的 Timeout；任一探测异常均不 panic。
+// 本函数保持独立入口（供单测直接调用）：自建闸门与预算，语义与 assessRisk 内一致。
 func probeAIReachability(client *http.Client) string {
-	results := make(map[string]int, len(aiProbeTargets))
-	for name, target := range aiProbeTargets {
-		api := probeOneAIForService(client, name, target)
-		product := probeAIProductLayers(client, name)
-		results[name] = mergeAIProbeResults(api, product)
+	return probeAIReachabilityBounded(client, newProbeGate(riskProbeFanout), riskProbeDeadline(client))
+}
+
+// probeAIReachabilityBounded 是 probeAIReachability 的受控版本：并发闸门与总预算
+// 由调用方传入，从而与同一节点的 ipapi.is / Cloudflare 探测共享同一份资源约束。
+//
+// 4 个服务并发；每个服务内部 API 层与产品层仍顺序执行——产品层只是 API 层的辅助
+// 信号，串行两步的延迟已被服务间并发摊平，无需再细分。
+// 被闸门或预算截断的服务保持 -1（未探测），不退化成 1（封禁）。
+func probeAIReachabilityBounded(client *http.Client, gate probeGate, deadline time.Time) string {
+	names := make([]string, 0, len(aiProbeTargets))
+	for name := range aiProbeTargets {
+		names = append(names, name)
 	}
-	data, err := json.Marshal(results)
+	results := make([]int, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func(idx int, service, target string) {
+			defer wg.Done()
+			// 默认未探测；仅在真正跑完探测后才被覆盖。
+			results[idx] = -1
+			gate.run(client, deadline, func(c *http.Client) {
+				api := probeOneAIForService(c, service, target)
+				product := probeAIProductLayers(c, service)
+				results[idx] = mergeAIProbeResults(api, product)
+			})
+		}(i, name, aiProbeTargets[name])
+	}
+	wg.Wait()
+
+	merged := make(map[string]int, len(names))
+	for i, name := range names {
+		merged[name] = results[i]
+	}
+	data, err := json.Marshal(merged)
 	if err != nil {
 		// map[string]int 序列化不会失败；兜底返回空串（整体未探测），不 panic。
 		return ""
@@ -774,23 +804,146 @@ func containsAll(text string, signals []string) bool {
 	return true
 }
 
+// ===== 单节点风险评估的并发与总预算 =====
+//
+// assessRisk 需发起最多 9 次彼此完全独立的请求（ipapi.is 1 + Cloudflare 1 +
+// 4 个 AI 服务的 API 层 4 + 产品层 3）。它们域名不同、无数据依赖，结果只填
+// RiskInfo 的不同字段，没有任何理由串行。
+//
+// 串行的代价是超时会累加：每个请求各自受 client.Timeout（= ValidateTimeout，
+// 默认 10s）约束，9 次串行的最坏耗时是 90s，期间该节点独占一个 ValidateStream
+// 的并发槽位。
+//
+// 这里用两个约束同时解决延迟与资源：
+//   - riskProbeFanout 限制单节点的并发探测数。ValidateConcurrency 默认 300，
+//     不设上限地把 9 个探测全部并发会瞬时占用 300×9=2700 个 socket
+//     （newHTTPClient/newSOCKS5Client 都 DisableKeepAlives，每请求一条连接），
+//     在 nofile=1024 的环境直接耗尽 fd。取 3 时上限为 300×3=900。
+//   - riskProbeBudget 为整轮评估设总预算，由 clientWithProbeBudget 在每次探测
+//     启动时把 client.Timeout 收窄到"剩余预算"，预算耗尽则直接跳过该探测。
+//     这样无需 context 改造即可得到硬上限：任何探测都不会跨过 deadline 继续。
+//
+// 预算取 3×单请求超时：fanout=3 时 9 个探测最多 3 轮，恰好与 3×10s 对齐。
+// 被预算截断的探测保持"未探测"语义（-1 / 空串），绝不退化成"封禁"——
+// 存储层的 CASE WHEN 保护据此不覆盖已有有效值。
+const (
+	riskProbeFanout         = 3
+	riskProbeBudgetFactor   = 3
+	riskProbeFallbackBudget = 30 * time.Second
+)
+
+// riskProbeDeadline 计算本轮风险评估的截止时刻。
+func riskProbeDeadline(client *http.Client) time.Time {
+	budget := riskProbeFallbackBudget
+	if client != nil && client.Timeout > 0 {
+		budget = client.Timeout * riskProbeBudgetFactor
+	}
+	return time.Now().Add(budget)
+}
+
+// clientWithProbeBudget 返回一个共享同一 Transport、但 Timeout 不超过剩余预算的
+// 派生 client。预算已耗尽时返回 nil，调用方须跳过该次探测。
+//
+// 浅拷贝 http.Client 是安全的：Transport 本身按设计支持并发复用，
+// 这里只改 Timeout 这一个值语义字段。
+func clientWithProbeBudget(base *http.Client, deadline time.Time) *http.Client {
+	if base == nil {
+		return nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return nil
+	}
+	derived := *base
+	if derived.Timeout <= 0 || derived.Timeout > remaining {
+		derived.Timeout = remaining
+	}
+	return &derived
+}
+
+// probeGate 是单节点风险评估的并发闸门。
+type probeGate chan struct{}
+
+func newProbeGate(size int) probeGate {
+	if size < 1 {
+		size = 1
+	}
+	return make(probeGate, size)
+}
+
+// run 取得一个探测槽位后执行 fn，并把 fn 可用的 client 收窄到剩余预算。
+// 预算在排队期间耗尽时直接返回，不执行 fn（保持"未探测"）。
+func (g probeGate) run(base *http.Client, deadline time.Time, fn func(*http.Client)) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case g <- struct{}{}:
+		defer func() { <-g }()
+	case <-timer.C:
+		return
+	}
+	client := clientWithProbeBudget(base, deadline)
+	if client == nil {
+		return
+	}
+	fn(client)
+}
+
 // assessRisk 收集两源风险信号，分开返回（不聚合）：
 //   - 主出口源 ip-api 的 proxy/hosting/mobile 命中标记（来自已取得的 ipInfo）
 //   - ipapi.is 的 abuser_score（经同一 client 走节点代理请求；失败则记 IPAPIIsUnknown）
 //   - Cloudflare 拦截探测（经同一 client 走节点代理请求）
 //   - AI 服务可达性探测（经同一 client 走节点代理请求）
+//
+// 三组探测彼此独立，并发执行并共享同一 probeGate 与总预算（见上方常量注释）。
+// 各分支写入独立局部变量，wg.Wait() 之后才汇总进 RiskInfo，不共享可变状态。
 func assessRisk(client *http.Client, ipInfo ipAPIInfo) RiskInfo {
 	risk := RiskInfo{IPAPIIsScore: IPAPIIsUnknown, FlagsKnown: ipInfo.FlagsKnown}
 	if ipInfo.FlagsKnown {
 		risk.Flags = ipapiFlags(ipInfo.Proxy, ipInfo.Hosting, ipInfo.Mobile)
 	}
+
+	deadline := riskProbeDeadline(client)
+	gate := newProbeGate(riskProbeFanout)
+
+	// 未探测的保守初值：与 UnknownRisk 一致，绝不把"没测"说成"没问题"或"被封"。
+	abuserScore := IPAPIIsUnknown
+	cfBlocked := -1
+	aiReachability := ""
+
+	var wg sync.WaitGroup
 	if ipInfo.OK && ipInfo.IP != "" {
-		if is := queryIPAPIIs(client, ipInfo.IP); is.OK {
-			risk.IPAPIIsScore = is.AbuserScore
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gate.run(client, deadline, func(c *http.Client) {
+				if is := queryIPAPIIs(c, ipInfo.IP); is.OK {
+					abuserScore = is.AbuserScore
+				}
+			})
+		}()
 	}
-	risk.CFBlocked = probeCloudflareBlocked(client)
-	risk.AIReachability = probeAIReachability(client)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		gate.run(client, deadline, func(c *http.Client) {
+			cfBlocked = probeCloudflareBlocked(c)
+		})
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		aiReachability = probeAIReachabilityBounded(client, gate, deadline)
+	}()
+	wg.Wait()
+
+	risk.IPAPIIsScore = abuserScore
+	risk.CFBlocked = cfBlocked
+	risk.AIReachability = aiReachability
 	return risk
 }
 

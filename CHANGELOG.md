@@ -43,6 +43,9 @@
 
 ### 修复
 
+- **单节点风险评估并发化 + 总预算**：`assessRisk` 需发起 9 次彼此独立的请求（ipapi.is 1 + Cloudflare 1 + AI API 层 4 + AI 产品层 3），原为完全串行。每个请求各自受 `client.Timeout`（`ValidateTimeout`，默认 10s）约束，串行使最坏耗时累加到 9×10s=90s，期间该节点独占一个 `ValidateStream` 并发槽位。现按 `riskProbeFanout=3` 并发（不无限打开：`ValidateConcurrency` 默认 300，无上限并发会瞬时占 300×9=2700 个 socket，因 `DisableKeepAlives` 每请求一条连接，在 `nofile=1024` 环境直接耗尽 fd），并对整轮设 `3×Timeout` 总预算——`clientWithProbeBudget` 在每次探测启动时把超时收窄到剩余预算，预算耗尽即跳过。被截断的探测保持「未探测」（`-1` / 空串），绝不退化成「封禁」，存储层 `CASE WHEN` 据此不覆盖已有有效值。实测 9 次请求最大并发 3、耗时 482ms（串行下限 1.08s）
+- **负重试次数配置保护**：保存配置时拒绝负 `max_retry`，加载被直接编辑为负数的持久化配置时保留安全默认值，避免重试循环被配置损坏直接跳过
+- **HTTP CONNECT 能力拒绝健康计数统一**：HTTP 入口与 SOCKS5 入口一致处理目标端口 80 的 403/405/501 能力/策略拒绝，不再把明确的上游能力差异累计为节点故障；认证拒绝和其它端口仍正常计数
 - **出口写回空值保护**：`updateExitInfoWhereResult` 的 `exit_ip`/`exit_location`/`latency`/`quality_grade` 原为无条件覆写，与同函数内其它字段及 `ApplyProbeObservation`/`RecordProbeFailure` 的 `CASE WHEN` 保护不一致。部分探测结果（出口缺失或未测得延迟）会清空已有有效出口身份，且 `CalculateQualityGrade(0)=="S"` 会把未测得延迟伪装成最优品质。现按 `trustedExit`/`hasLatency` 条件更新。四个公开方法 `UpdateExitInfo`/`UpdateProxyExitInfo`/`UpdateSubscriptionProxyExitInfo`/`UpdateDisabledSubscriptionProxyExitInfo` 生产侧无调用方，属公开 API 防御缺口而非在跑的数据损坏
 - **删除遗留 `checker.Checker`**：全仓（含测试）零引用，`main.go` 只装配 `NewHealthChecker`。该类型的 `Start()` 无停止 channel（goroutine 永久泄漏），且 `HealthIntervalMinutes=0` 时 `time.Sleep(0)` 会变忙循环。整文件删除，不留待误用
 - **`sing-box check` 子进程超时**：`checkNodes` 与 `startLocked` 的配置校验原用无超时的 `exec.Command`；两处都在 `refreshMu` 内运行，一旦挂起会冻结全部订阅刷新。改用 `exec.CommandContext` + 30s 上限（check 仅做语法校验，正常毫秒级完成），并显式区分超时与校验失败
