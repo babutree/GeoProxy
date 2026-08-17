@@ -124,6 +124,48 @@ func TestHTTPConnectPort80Success(t *testing.T) {
 	}
 }
 
+func TestHTTPConnectCapabilityRejectionsDoNotPoisonHealth(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+		status int
+		want   int
+	}{
+		{name: "forbidden port 80", target: "target.test:80", status: http.StatusForbidden, want: 0},
+		{name: "method not allowed port 80", target: "target.test:80", status: http.StatusMethodNotAllowed, want: 0},
+		{name: "not implemented port 80", target: "target.test:80", status: http.StatusNotImplemented, want: 0},
+		{name: "proxy auth required port 80", target: "target.test:80", status: http.StatusProxyAuthRequired, want: 1},
+		{name: "forbidden port 443", target: "target.test:443", status: http.StatusForbidden, want: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodConnect {
+					t.Errorf("upstream method = %s, want CONNECT", r.Method)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(upstream.Close)
+
+			store := newProxyTestStore()
+			addProxy(t, store, upstreamAddr(t, upstream.URL), "http", 1)
+			server := newProxyTestServer(store, proxyTestConfig(0))
+			req := httptest.NewRequest(http.MethodConnect, "http://"+tc.target, nil)
+			req.Host = tc.target
+			server.handleTunnel(httptest.NewRecorder(), req, emptyRoute())
+
+			proxy, err := store.GetProxyByID(1)
+			if err != nil {
+				t.Fatalf("GetProxyByID() error = %v", err)
+			}
+			if proxy.FailCount != tc.want {
+				t.Fatalf("HTTP CONNECT %s status=%d fail_count = %d, want %d", tc.target, tc.status, proxy.FailCount, tc.want)
+			}
+		})
+	}
+}
+
 func TestSOCKS5RetriesAfterHTTPPort80CapabilityRejection(t *testing.T) {
 	rejector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {

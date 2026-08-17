@@ -477,7 +477,13 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 		conn, err := s.dialViaProxy(p, r.Host)
 		if err != nil {
 			log.Printf("[tunnel] 通过节点 %s 拨号 %s 失败: %v", p.Address, r.Host, err)
-			recordProxyFailure(s.storage, p)
+			if isHTTPConnectCapabilityRejection(err) {
+				// HTTP 上游明确拒绝目标端口的 CONNECT 能力，不等于节点故障；
+				// 与 SOCKS5 入口保持一致，仅放弃本次候选并重新选路。
+				log.Printf("[tunnel] HTTP 上游不具备目标 CONNECT 能力，跳过健康失败计数 target=%s proxy=%s", r.Host, p.Address)
+			} else {
+				recordProxyFailure(s.storage, p)
+			}
 			s.releaseFailedBinding(route, p)
 			continue
 		}
@@ -691,22 +697,16 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 		} else {
 			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host)
 		}
-		reader := bufio.NewReader(conn)
-		resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+		proxiedConn, err := readHTTPConnectResponseForTarget(conn, host)
 		if err != nil {
 			conn.Close()
 			return nil, err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			conn.Close()
-			return nil, fmt.Errorf("upstream proxy connect failed: %s", resp.Status)
 		}
 		if err := conn.SetDeadline(time.Time{}); err != nil {
 			conn.Close()
 			return nil, err
 		}
-		return &bufferedConn{Conn: conn, reader: reader}, nil
+		return proxiedConn, nil
 	case "socks5":
 		// 出站 SOCKS5 域名字段长度只有 1 字节（最大 255）。域名 >255 时
 		// byte(len(host)) 会截断，向上游发出长度字段错误的损坏帧。

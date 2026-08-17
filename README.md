@@ -26,7 +26,28 @@ There is no active public proxy pool or automatic public source collector in the
 
 ## Quick Start
 
+### Pre-built Image
+
+`ghcr.io/babutree/geoproxy:latest` is published from `main` and is a multi-arch
+image for `linux/amd64` and `linux/arm64`. Docker pulls the matching architecture
+automatically.
+
+```bash
+docker pull ghcr.io/babutree/geoproxy:latest
+docker run -d --name geoproxy \
+  -p 7800:7800 -p 7801:7801 -p 7802:7802 \
+  -v "$(pwd)/data:/app/data" \
+  -e DATA_DIR=/app/data \
+  ghcr.io/babutree/geoproxy:latest
+```
+
+Do not use the upstream `isboyjc/goproxy` image for this geo-gateway build.
+
 ### Docker Compose
+
+Compose builds the local `Dockerfile` by default. To use the published image
+instead, set `image: ghcr.io/babutree/geoproxy:latest` and remove the `build`
+block.
 
 ```bash
 cp .env.example .env
@@ -327,9 +348,12 @@ Existing legacy rows using old source values are migrated into the current `manu
 
 ## Deployment Notes
 
-This fork must be deployed from the local source tree. Do not deploy the upstream `isboyjc/goproxy` container image for this geo-gateway build. This repository may publish images via GitHub Actions to GHCR/Docker Hub when CI credentials are configured. Prefer building from this source tree; do not deploy the upstream isboyjc image for this geo-gateway fork.
+Published images live at `ghcr.io/babutree/geoproxy`. The `latest` tag tracks
+`main` and includes `linux/amd64` and `linux/arm64`. Semver tags (`v*`) are also
+published when a version tag is pushed. Do not deploy the upstream
+`isboyjc/goproxy` image for this geo-gateway build.
 
-Docker Compose builds the local `Dockerfile` by default:
+Docker Compose still builds the local `Dockerfile` by default:
 
 ```bash
 cp .env.example .env

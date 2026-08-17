@@ -398,6 +398,9 @@ func saveConfig(cfg *Config, replace func(string, string) error) error {
 }
 
 func saveConfigAt(cfg *Config, replace func(string, string) error, targetPath string) error {
+	if cfg.MaxRetry < 0 {
+		return fmt.Errorf("max_retry must be >= 0, got %d", cfg.MaxRetry)
+	}
 	if cfg.MaxSessionsPerProxy < 0 {
 		return fmt.Errorf("max_sessions_per_proxy must be >= 0, got %d", cfg.MaxSessionsPerProxy)
 	}
@@ -533,7 +536,9 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 		cfg.HealthIntervalMinutes = saved.HealthIntervalMinutes
 	}
 	if saved.MaxRetry != nil {
-		cfg.MaxRetry = *saved.MaxRetry
+		if *saved.MaxRetry >= 0 {
+			cfg.MaxRetry = *saved.MaxRetry
+		}
 	}
 	if saved.SingBoxPath != "" {
 		cfg.SingBoxPath = saved.SingBoxPath

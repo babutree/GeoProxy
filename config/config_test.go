@@ -436,6 +436,33 @@ func TestSaveLoadPersistsZeroMaxRetry(t *testing.T) {
 	}
 }
 
+func TestSaveRejectsNegativeMaxRetry(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+	cfg := Load()
+	cfg.MaxRetry = -1
+
+	if err := Save(cfg); err == nil {
+		t.Fatal("Save(-1) error = nil, want rejection")
+	}
+}
+
+func TestLoadUsesDefaultForNegativePersistedMaxRetry(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+	Load()
+
+	data := []byte(`{"webui_password_hash":"webui-hash","proxy_auth_username":"proxy","proxy_auth_password_hash":"proxy-hash","max_retry":-1}`)
+	if err := os.WriteFile(ConfigFile(), data, 0600); err != nil {
+		t.Fatalf("write persisted config: %v", err)
+	}
+
+	reloaded := Load()
+	if reloaded.MaxRetry != 3 {
+		t.Fatalf("MaxRetry after loading negative persisted value = %d, want default 3", reloaded.MaxRetry)
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{

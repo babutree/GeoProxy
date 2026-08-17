@@ -336,7 +336,7 @@ type Binding struct {
 - Docker 单容器 + docker-compose, 镜像内置 sing-box。
 - Docker 数据持久化: bind mount `${HOST_DATA_DIR:-./data}` 到 `/app/data`，并在容器内设置 `DATA_DIR=/app/data`；SQLite、`config.json` 和 sing-box 配置均位于该目录。
 - 原生运行未设置 `DATA_DIR` 时使用 `os.UserConfigDir()/GeoProxy`；若 CWD 存在旧运行时文件，启动会要求显式设置 `DATA_DIR` 或人工迁移，不会静默生成新身份。
-- 部署方式: 从本地源码树构建 (`docker compose up -d --build`), 不依赖已发布的远程镜像。
+- 部署方式: 可拉取 `ghcr.io/babutree/geoproxy:latest`（`linux/amd64` + `linux/arm64`），或从本地源码树构建 (`docker compose up -d --build`)。
 - 目标运行环境: 国外服务器 (AlmaLinux + Podman, 已验证)。
 
 ---
