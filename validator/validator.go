@@ -1065,11 +1065,11 @@ func (v *Validator) ValidateOneResult(p storage.Proxy) Result {
 
 	ipInfo := getExitIPInfo(client)
 	exitIP, exitLocation := ipInfo.IP, ipInfo.Location
-	if exitIP == "" || exitLocation == "" {
+	if exitIP == "" {
 		return Result{Proxy: p, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: UnknownRisk(), FailureReason: FailureExitMetadata}
 	}
-	if len(exitLocation) >= 2 && !v.passesGeoFilter(exitLocation[:2]) {
-		return Result{Proxy: p, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: UnknownRisk(), FailureReason: FailureGeoRejected}
+	if ok, reason := v.geoDecision(exitLocation); !ok {
+		return Result{Proxy: p, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: UnknownRisk(), FailureReason: reason}
 	}
 	if p.Protocol == "http" && !checkHTTPSConnect(p.Address, p.Username, p.Password, v.timeout) {
 		return Result{Proxy: p, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: UnknownRisk(), FailureReason: FailureHTTPConnectRejected}
@@ -1079,6 +1079,29 @@ func (v *Validator) ValidateOneResult(p storage.Proxy) Result {
 		Proxy: p, Valid: true, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation,
 		Risk: assessRisk(client, ipInfo), FailureReason: FailureNone,
 	}
+}
+
+// geoDecision 判定出口地点能否通过地理过滤，返回 (是否放行, 失败原因)。
+//
+// 地理过滤是策略控制，必须 fail-closed。原实现是
+// `if len(exitLocation) >= 2 && !passesGeoFilter(exitLocation[:2])`，有两个问题：
+//   - 取不出国家码时整个跳过过滤并放行节点（fail-open），与「不静默回退」冲突；
+//   - `[:2]` 直接截断，"CNX Somewhere" 会被误判成被屏蔽的 "CN"，
+//     " US Seattle" 又会取到 "  " 而漏过过滤。
+//
+// 改用 exitCountryCode：它按空白切分后走 config.NormalizeCountryCode，
+// 与 Allowed/BlockedCountries 的归一化同源，两端不会因大小写或格式漂移而失配。
+// 取不出合法 alpha-2 时归类为出口元数据缺失（FailureExitMetadata），
+// 由调用方按探测失败处理，而不是当作"通过地理过滤"。
+func (v *Validator) geoDecision(exitLocation string) (bool, FailureReason) {
+	countryCode := exitCountryCode(exitLocation)
+	if countryCode == "" {
+		return false, FailureExitMetadata
+	}
+	if !v.passesGeoFilter(countryCode) {
+		return false, FailureGeoRejected
+	}
+	return true, FailureNone
 }
 
 // passesGeoFilter 依据白/黑名单判断某国家代码是否通过地理过滤。

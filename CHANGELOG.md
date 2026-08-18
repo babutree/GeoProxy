@@ -43,6 +43,8 @@
 
 ### 修复
 
+- **地理过滤 fail-closed**：`ValidateOneResult` 原用 `len(exitLocation) >= 2 && !passesGeoFilter(exitLocation[:2])` 判定，两处问题：取不出国家码时整个跳过过滤并**放行**节点（fail-open，与「不静默回退」冲突）；`[:2]` 直接截断使 `"CNX Somewhere"` 被误判成被屏蔽的 `"CN"`、`"  US Seattle"` 取到 `"  "` 而漏过过滤。抽出 `geoDecision()` 改用既有 `exitCountryCode()`（按空白切分 + `config.NormalizeCountryCode`），与 `Allowed`/`BlockedCountries` 的归一化同源；取不出合法 alpha-2 归为 `FailureExitMetadata` 而非「通过」。生产路径下 `newExitIPInfo` 已保证 location 首段是规范 alpha-2，故此前未实际触发——属策略控制的 fail-closed 加固
+- **删除 5 个零调用的地址级写方法**：`IncrFail`/`ResetFail`/`UpdateLatency`/`UpdateLatencyByID`/`IncrementFailCount` 全仓生产侧零调用，已被路由身份 API（`RecordProbeFailure`/`ApplyProbeObservation`/`RecoverProxyFromProbe`）取代。保留它们是维护陷阱：`IncrFail` 与 `IncrementFailCount` 名字近似、SQL 几乎相同，只差是否写 `last_check`——而 `last_check` 决定前端「待验证 vs 不可用」显示与禁用回收时钟，选错一个即静默改变节点状态语义。地址级原子性契约仍由剩余 9 个方法在 `TestAddressOnlyMutations*` 中覆盖
 - **单节点风险评估并发化 + 总预算**：`assessRisk` 需发起 9 次彼此独立的请求（ipapi.is 1 + Cloudflare 1 + AI API 层 4 + AI 产品层 3），原为完全串行。每个请求各自受 `client.Timeout`（`ValidateTimeout`，默认 10s）约束，串行使最坏耗时累加到 9×10s=90s，期间该节点独占一个 `ValidateStream` 并发槽位。现按 `riskProbeFanout=3` 并发（不无限打开：`ValidateConcurrency` 默认 300，无上限并发会瞬时占 300×9=2700 个 socket，因 `DisableKeepAlives` 每请求一条连接，在 `nofile=1024` 环境直接耗尽 fd），并对整轮设 `3×Timeout` 总预算——`clientWithProbeBudget` 在每次探测启动时把超时收窄到剩余预算，预算耗尽即跳过。被截断的探测保持「未探测」（`-1` / 空串），绝不退化成「封禁」，存储层 `CASE WHEN` 据此不覆盖已有有效值。实测 9 次请求最大并发 3、耗时 482ms（串行下限 1.08s）
 - **负重试次数配置保护**：保存配置时拒绝负 `max_retry`，加载被直接编辑为负数的持久化配置时保留安全默认值，避免重试循环被配置损坏直接跳过
 - **HTTP CONNECT 能力拒绝健康计数统一**：HTTP 入口与 SOCKS5 入口一致处理目标端口 80 的 403/405/501 能力/策略拒绝，不再把明确的上游能力差异累计为节点故障；认证拒绝和其它端口仍正常计数

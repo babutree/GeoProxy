@@ -29,41 +29,6 @@ func (s *Storage) DeleteProxyByID(id int64) error {
 	return requireRowsAffected(res.RowsAffected())
 }
 
-// IncrFail 增加失败次数
-func (s *Storage) IncrFail(address string) error {
-	res, err := s.db.Exec(
-		`UPDATE proxies SET fail_count = fail_count + 1, last_check = CURRENT_TIMESTAMP WHERE `+uniqueAddressProxyIDWhere,
-		address,
-	)
-	return s.finishAddressOnlyMutation(address, res, err)
-}
-
-// ResetFail 重置失败次数（验证通过）
-func (s *Storage) ResetFail(address string) error {
-	res, err := s.db.Exec(
-		`UPDATE proxies SET fail_count = 0, last_check = CURRENT_TIMESTAMP WHERE `+uniqueAddressProxyIDWhere,
-		address,
-	)
-	return s.finishAddressOnlyMutation(address, res, err)
-}
-
-// UpdateLatency 更新代理的延迟信息（毫秒）
-func (s *Storage) UpdateLatency(address string, latencyMs int) error {
-	res, err := s.db.Exec(
-		`UPDATE proxies SET latency = ? WHERE `+uniqueAddressProxyIDWhere,
-		latencyMs, address,
-	)
-	return s.finishAddressOnlyMutation(address, res, err)
-}
-
-func (s *Storage) UpdateLatencyByID(id int64, latencyMs int) error {
-	res, err := s.db.Exec(`UPDATE proxies SET latency = ? WHERE id = ?`, latencyMs, id)
-	if err != nil {
-		return err
-	}
-	return requireRowsAffected(res.RowsAffected())
-}
-
 // UpdateExitInfo 更新出口信息；自动地域可由验证结果回写，手动地域受保护。
 func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string, ipapiFlagsKnown bool, cfBlocked int, aiReachability string) error {
 	res, err := s.updateExitInfoWhereResult(uniqueAddressProxyIDWhere, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags, ipapiFlagsKnown, cfBlocked, aiReachability, true)
@@ -356,15 +321,6 @@ func (s *Storage) DisableNotAllowedCountries(allowedCodes []string) (int64, erro
 		return 0, err
 	}
 	return res.RowsAffected()
-}
-
-// IncrementFailCount 增加失败次数
-func (s *Storage) IncrementFailCount(address string) error {
-	res, err := s.db.Exec(
-		`UPDATE proxies SET fail_count = fail_count + 1 WHERE `+uniqueAddressProxyIDWhere,
-		address,
-	)
-	return s.finishAddressOnlyMutation(address, res, err)
 }
 
 // DeleteBySubscriptionID 删除指定订阅的所有代理

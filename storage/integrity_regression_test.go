@@ -438,20 +438,8 @@ func addressOnlyMutationCases() []addressOnlyMutationCase {
 		{name: "Delete", run: func(store *Storage, address string) error {
 			return store.Delete(address)
 		}},
-		{name: "IncrFail", run: func(store *Storage, address string) error {
-			return store.IncrFail(address)
-		}},
-		{name: "ResetFail", run: func(store *Storage, address string) error {
-			return store.ResetFail(address)
-		}},
-		{name: "UpdateLatency", run: func(store *Storage, address string) error {
-			return store.UpdateLatency(address, 321)
-		}},
 		{name: "UpdateExitInfo", run: func(store *Storage, address string) error {
 			return store.UpdateExitInfo(address, "203.0.113.10", "US Test", 321, 10, "test", true, 0, "{}")
-		}},
-		{name: "IncrementFailCount", run: func(store *Storage, address string) error {
-			return store.IncrementFailCount(address)
 		}},
 		{name: "DisableProxy", run: func(store *Storage, address string) error {
 			return store.DisableProxy(address)
