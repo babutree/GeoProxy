@@ -459,6 +459,18 @@ var defaultAIProbeRule = aiProbeRule{
 
 const aiProbeBodyLimit = 64 << 10
 
+// discardBodyLimit 是"只需丢弃响应体以复用连接"路径的读取上限。
+// 恶意/故障上游可以返回无限长的响应体；不限长的 io.Copy 会让单次探测
+// 无限读下去（client.Timeout 只约束整个请求，但在持续有数据时不会触发），
+// 从而拖住一个 ValidateStream 并发槽位。与其它探测路径的 64KiB 上限一致。
+const discardBodyLimit = 64 << 10
+
+// discardResponseBody 读掉并丢弃至多 discardBodyLimit 字节的响应体。
+// 目的只是让底层连接可被复用/干净关闭，不需要读完整个响应。
+func discardResponseBody(body io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, discardBodyLimit))
+}
+
 var aiCFBlockSignals = []string{"cf-chl", "error code: 1020"}
 
 var aiRegionalBlockCodes = map[string]struct{}{
@@ -986,7 +998,7 @@ func checkHTTPSConnect(proxyAddr, username, password string, timeout time.Durati
 		if err != nil {
 			continue
 		}
-		io.Copy(io.Discard, resp.Body)
+		discardResponseBody(resp.Body)
 		resp.Body.Close()
 
 		// 2xx 或 3xx 都算成功（部分网站会重定向）
@@ -1137,7 +1149,7 @@ func (v *Validator) validateConnectivity(client *http.Client) (time.Duration, bo
 		if err != nil {
 			continue
 		}
-		io.Copy(io.Discard, resp.Body)
+		discardResponseBody(resp.Body)
 		resp.Body.Close()
 
 		// 验证状态码（200 或 204 都接受）

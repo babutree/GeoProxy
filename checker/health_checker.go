@@ -33,9 +33,14 @@ type healthValidator interface {
 }
 
 type healthCheckSummary struct {
-	valid    int
-	updated  int
-	disabled int
+	valid   int
+	updated int
+	// disabled 只统计因连续失败达到阈值而被系统禁用的节点（RecordProbeFailure
+	// 返回的权威状态）。策略禁用（地域拒绝）另计在 policyDisabled，两者语义不同：
+	// 前者是上游/传输故障并启动禁用回收时钟，后者是当前地理策略且不启动时钟。
+	// 混在一起会让「禁用N」既掩盖策略变更规模又虚增故障率。
+	disabled       int
+	policyDisabled int
 }
 
 // HealthChecker 健康检查器
@@ -166,8 +171,8 @@ func (hc *HealthChecker) RunOnce() {
 	summary := hc.checkBatchWithValidator(proxies, validate)
 
 	elapsed := time.Since(start)
-	log.Printf("[health] 完成: 验证%d 有效%d 更新%d 禁用%d 耗时%v",
-		len(proxies), summary.valid, summary.updated, summary.disabled, elapsed)
+	log.Printf("[health] 完成: 验证%d 有效%d 更新%d 禁用%d 策略禁用%d 耗时%v",
+		len(proxies), summary.valid, summary.updated, summary.disabled, summary.policyDisabled, elapsed)
 }
 
 // checkBatch 消费本批验证结果；禁用统计只采用存储写入返回的权威状态。
@@ -204,10 +209,14 @@ func (hc *HealthChecker) checkBatchWithValidator(proxies []storage.Proxy, valida
 		}
 		if result.FailureReason == validator.FailureGeoRejected {
 			// 地域拒绝属于当前策略，不是上游或传输故障；不得启动系统禁用保留期。
+			// DisableRouteForPolicy 成功即代表该节点已被策略禁用，必须计入
+			// policyDisabled——否则汇总里这批节点只会出现在 updated 中，
+			// 「禁用N」看起来是 0，掩盖了地理策略实际影响的节点规模。
 			if err := hc.storage.DisableRouteForPolicy(identity); err != nil {
 				log.Printf("[health] 策略禁用地域拒绝节点失败 id=%d: %v", result.Proxy.ID, err)
 				continue
 			}
+			summary.policyDisabled++
 			if err := hc.storage.ApplyProbeObservation(identity, observation); err != nil {
 				log.Printf("[health] 写回地域拒绝出口信息失败 id=%d: %v", result.Proxy.ID, err)
 			} else {

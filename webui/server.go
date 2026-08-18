@@ -237,11 +237,41 @@ func (s *Server) Start() {
 	})
 
 	log.Printf("[webui] 服务监听 %s", cfg.WebUIPort)
+	srv := webUIHTTPServer(cfg.WebUIPort, loggedMux)
 	go func() {
-		if err := http.ListenAndServe(cfg.WebUIPort, loggedMux); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("[webui] 服务启动失败: %v", err)
 		}
 	}()
+}
+
+// WebUI 响应超时。仪表盘全部端点都是短小 JSON 或内嵌静态资源（最大约 120KB），
+// 没有 SSE/流式/文件下载，也不 Hijack 连接，因此可以安全设置 WriteTimeout。
+//
+// 注意：不能照抄到 proxy 包的 CONNECT 服务——那里 Hijack 后连接会长期存活，
+// 虽然 net/http 在 Hijack 时会主动清除 deadline（server.go 的 hijackLocked 调用
+// rwc.SetDeadline(time.Time{})）使 WriteTimeout 实际失效，但普通 HTTP 转发路径
+// 不 Hijack，大响应会被 WriteTimeout 直接截断。
+const (
+	webUIReadHeaderTimeout = 10 * time.Second
+	webUIReadTimeout       = 30 * time.Second
+	webUIWriteTimeout      = 60 * time.Second
+	webUIIdleTimeout       = 120 * time.Second
+)
+
+// webUIHTTPServer 构造带完整超时的 WebUI HTTP 服务。
+// ReadHeaderTimeout 防止半请求头 Slowloris 无限占用连接；
+// WriteTimeout 防止慢速读取的客户端长期占用写缓冲；
+// IdleTimeout 回收 keep-alive 空闲连接。
+func webUIHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: webUIReadHeaderTimeout,
+		ReadTimeout:       webUIReadTimeout,
+		WriteTimeout:      webUIWriteTimeout,
+		IdleTimeout:       webUIIdleTimeout,
+	}
 }
 
 // isNoiseRequest 判断请求是否为不值得记录的噪音：
