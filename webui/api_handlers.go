@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"log"
@@ -336,7 +337,9 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("[webui] 正在刷新 %d 个节点的延迟...", len(proxies))
 		updated := 0
-		for r := range validate.ValidateStream(proxies) {
+		// 用户触发的一次性批量刷新，没有比进程更短的生命周期可挂靠；
+		// 消费者完整消费 channel，不会让发送方滞留。
+		for r := range validate.ValidateStream(context.Background(), proxies) {
 			if err := s.applyProbeResult(r); err != nil {
 				log.Printf("[webui] 批量刷新结果写回失败: %s: %v", r.Proxy.Address, err)
 				continue

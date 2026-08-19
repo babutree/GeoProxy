@@ -1,6 +1,7 @@
 package custom
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -22,7 +23,7 @@ func (v staticProbeResultValidator) ValidateOneResult(proxy storage.Proxy) valid
 	return result
 }
 
-func (v staticProbeResultValidator) ValidateStream(proxies []storage.Proxy) <-chan validator.Result {
+func (v staticProbeResultValidator) ValidateStream(_ context.Context, proxies []storage.Proxy) <-chan validator.Result {
 	results := make(chan validator.Result, len(proxies))
 	for _, proxy := range proxies {
 		result := v.result

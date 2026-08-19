@@ -74,7 +74,8 @@ var (
 
 type proxyValidator interface {
 	ValidateOne(storage.Proxy) (bool, time.Duration, string, string, validator.RiskInfo)
-	ValidateStream([]storage.Proxy) <-chan validator.Result
+	// ctx 用于优雅关闭：Stop 取消在途批次，使 refreshMu 不被整批验证长期占用。
+	ValidateStream(ctx context.Context, proxies []storage.Proxy) <-chan validator.Result
 }
 
 type detailedProxyValidator interface {
@@ -208,6 +209,23 @@ func (m *Manager) Stop() {
 	defer m.refreshMu.Unlock()
 	m.singbox.Stop()
 	log.Println("[custom] 订阅管理器已停止")
+}
+
+// stopContext 把 stopCh 桥接成 context：Stop 关闭 stopCh 后，返回的 ctx 立即取消。
+// 用于让在途 ValidateStream 停止派发新探测——验证跑在 refreshMu 内，而 Stop 要抢
+// 同一把锁，不取消的话关闭会被整批验证阻塞。
+//
+// 调用方必须 defer cancel()，否则桥接 goroutine 会滞留到 stopCh 关闭为止。
+func (m *Manager) stopContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-m.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 // initialRefresh 启动时刷新所有活跃订阅
@@ -1384,14 +1402,21 @@ func isUnsafeSubscriptionIP(ip net.IP) bool {
 // validateCustomProxies 验证订阅代理，返回可用数。
 // 契约：父订阅 paused 时节点必须保持/变为 disabled，且不得 Enable。
 // 父订阅 active 时：成功验证可 Enable；失败则 Disable。
+//
+// 验证在 refreshMu 内运行，Stop 需要抢同一把锁；因此把 stopCh 桥接为 ctx
+// 传给 ValidateStream，使关闭时不再派发新探测（否则一批 6000 节点的验证会把
+// 优雅关闭挂住数十秒）。已收到的结果仍照常写回，不丢已完成的工作。
 func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) int {
 	if len(proxies) == 0 {
 		return 0
 	}
 	log.Printf("[custom] 🔍 开始验证 %d 个订阅代理", len(proxies))
 
+	ctx, cancel := m.stopContext()
+	defer cancel()
+
 	valid, invalid := 0, 0
-	for result := range m.validator.ValidateStream(proxies) {
+	for result := range m.validator.ValidateStream(ctx, proxies) {
 		identity := storage.RouteIdentityFromProxy(result.Proxy)
 		observation := storage.ExitObservation{
 			ExitIP: result.ExitIP, ExitLocation: result.ExitLocation, LatencyMS: int(result.Latency.Milliseconds()),
@@ -1758,13 +1783,18 @@ func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResu
 
 // validateManualProxies 并发验证手工节点：写回出口/延迟/纯净度/CF/AI，通过则 Enable。
 // validator 为 nil 时仅保持 disabled，不静默标为可用。
+// 与 validateCustomProxies 同理，把 stopCh 桥接为 ctx 以支持优雅关闭。
 func (m *Manager) validateManualProxies(proxies []storage.Proxy) {
 	if m.validator == nil || len(proxies) == 0 {
 		return
 	}
 	log.Printf("[custom] 🔍 开始验证 %d 个手工节点", len(proxies))
+
+	ctx, cancel := m.stopContext()
+	defer cancel()
+
 	valid, invalid := 0, 0
-	for result := range m.validator.ValidateStream(proxies) {
+	for result := range m.validator.ValidateStream(ctx, proxies) {
 		identity := storage.RouteIdentityFromProxy(result.Proxy)
 		observation := storage.ExitObservation{
 			ExitIP: result.ExitIP, ExitLocation: result.ExitLocation, LatencyMS: int(result.Latency.Milliseconds()),

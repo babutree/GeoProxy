@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,7 +20,7 @@ type slowValidator struct {
 	calls   atomic.Int32
 }
 
-func (v *slowValidator) ValidateStream(proxies []storage.Proxy) <-chan validator.Result {
+func (v *slowValidator) ValidateStream(_ context.Context, proxies []storage.Proxy) <-chan validator.Result {
 	v.calls.Add(1)
 	ch := make(chan validator.Result, len(proxies))
 	go func() {
@@ -99,7 +100,7 @@ type resultValidator struct {
 	results []validator.Result
 }
 
-func (v resultValidator) ValidateStream([]storage.Proxy) <-chan validator.Result {
+func (v resultValidator) ValidateStream(context.Context, []storage.Proxy) <-chan validator.Result {
 	ch := make(chan validator.Result, len(v.results))
 	for _, result := range v.results {
 		ch <- result

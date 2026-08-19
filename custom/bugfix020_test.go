@@ -1,6 +1,7 @@
 package custom
 
 import (
+	"context"
 	"net"
 	"strconv"
 	"testing"
@@ -391,7 +392,7 @@ func (v *blockingSingleProbeValidator) ValidateOne(storage.Proxy) (bool, time.Du
 	return true, 45 * time.Millisecond, testValidationExitIP, testValidationExitLocation, validator.UnknownRisk()
 }
 
-func (v *blockingSingleProbeValidator) ValidateStream([]storage.Proxy) <-chan validator.Result {
+func (v *blockingSingleProbeValidator) ValidateStream(context.Context, []storage.Proxy) <-chan validator.Result {
 	results := make(chan validator.Result)
 	close(results)
 	return results

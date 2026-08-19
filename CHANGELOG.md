@@ -43,6 +43,7 @@
 
 ### 修复
 
+- **`ValidateStream` 支持取消，消除消费者放弃时的 goroutine 泄漏**：channel 缓冲是 `min(len(proxies), concurrency*10)`（默认上限 3000），节点数超过该上限时发送方会阻塞。消费者若中途放弃且无取消机制，这些 goroutine 会**永久**卡在 `ch <- result`，连同占用的 `sem` 槽位与连接一起滞留到进程退出——实测放弃消费后稳定滞留 3 个 goroutine 且永不回收。签名改为 `ValidateStream(ctx, proxies)`：取消后停止派发新探测、阻塞的发送立即释放。`HealthChecker.StopBackground` 与 `Manager.Stop` 各自把生命周期桥接为 ctx，优雅关闭不再被整批验证阻塞（6000 节点规模下可达数十秒）。注意 ctx 不中断"已在执行"的单节点探测——由 `client.Timeout` 与风险评估预算约束，最坏约 4×`ValidateTimeout` 自行返回
 - **健康检查汇总区分策略禁用与故障禁用**：地域拒绝节点原先只计入 `updated`，日志里「禁用N」恒为 0——既掩盖地理策略实际影响的节点规模，也让运维无法从日志判断这批节点为何消失。新增 `policyDisabled` 独立计数（仅在 `DisableRouteForPolicy` 写库成功后累加，失败不计），日志格式补「策略禁用N」。两者语义不同：故障禁用启动禁用回收时钟，策略禁用不启动
 - **探测响应体丢弃加上限**：`checkHTTPSConnect` 与 `validateConnectivity` 的 `io.Copy(io.Discard, resp.Body)` 无长度限制。恶意/故障上游可持续吐数据，而 `client.Timeout` 约束整个请求、在持续有数据到达时不会触发，于是单次探测可无限期占住一个 `ValidateStream` 并发槽位。抽出 `discardResponseBody()` 按 64KiB 上限读取（与其它探测路径一致）——只需排干连接以便复用，不需要读完整个响应
 - **WebUI HTTP 服务补全超时**：原为裸 `http.ListenAndServe`，除 Go 默认值外无任何超时，慢速读取客户端可长期占住写缓冲、空闲 keep-alive 连接不被回收。新增 `webUIHTTPServer()` 设置 `ReadHeaderTimeout`(10s) / `ReadTimeout`(30s) / `WriteTimeout`(60s) / `IdleTimeout`(120s)。该超时**不可照搬到 proxy 包**：WebUI 全部端点是短小 JSON 或内嵌静态资源（最大 118KB，16KB/s 慢客户端约 7.2s 读完，余量 8 倍）且不 Hijack；而 proxy 的普通 HTTP 转发不 Hijack，大响应会被 `WriteTimeout` 直接截断

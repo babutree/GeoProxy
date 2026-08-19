@@ -1010,29 +1010,60 @@ func checkHTTPSConnect(proxyAddr, username, password string, timeout time.Durati
 	return false
 }
 
-// ValidateAll 并发验证所有代理，返回验证结果
+// ValidateAll 并发验证所有代理，返回验证结果。
+// 不可取消；需要中断能力的调用方用 ValidateStream 并传入可取消的 ctx。
 func (v *Validator) ValidateAll(proxies []storage.Proxy) []Result {
 	var results []Result
-	for r := range v.ValidateStream(proxies) {
+	for r := range v.ValidateStream(context.Background(), proxies) {
 		results = append(results, r)
 	}
 	return results
 }
 
-// ValidateStream 并发验证，边验证边通过 channel 返回结果
-func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
+// ValidateStream 并发验证，边验证边通过 channel 返回结果。
+//
+// ctx 取消后：
+//   - 不再派发新的探测（已排队等待 sem 的 goroutine 直接退出）；
+//   - 阻塞在发送上的 goroutine 立即释放，channel 随即关闭。
+//
+// 这是消费者提前放弃时不泄漏 goroutine 的关键：channel 缓冲是
+// min(len(proxies), concurrency*10)，当节点数超过该上限（默认 300×10=3000）
+// 时发送方会阻塞；若消费者中途 break/return 且无取消机制，这些 goroutine
+// 会永久卡在 `ch <- ...`，连同它们占用的 sem 槽位与连接一起泄漏到进程退出。
+//
+// 注意：ctx 不会中断"已经在执行"的单节点探测——ValidateOneResult 内部由
+// client.Timeout 与风险评估预算约束（见 riskProbeBudgetFactor），
+// 最坏约 4×ValidateTimeout 后自行返回。取消保证的是不再新增工作、
+// 且不会有 goroutine 永久滞留，而不是立刻停止所有网络 IO。
+func (v *Validator) ValidateStream(ctx context.Context, proxies []storage.Proxy) <-chan Result {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ch := make(chan Result, concurrencyBuffer(len(proxies), v.concurrency))
 	sem := make(chan struct{}, v.concurrency)
 	var wg sync.WaitGroup
 
 	go func() {
 		for _, p := range proxies {
+			// 取消后停止派发剩余节点；已在途的探测仍会跑完并尝试发送。
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				close(ch)
+				return
+			case sem <- struct{}{}:
+			}
 			wg.Add(1)
-			sem <- struct{}{}
 			go func(px storage.Proxy) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				ch <- v.ValidateOneResult(px)
+				result := v.ValidateOneResult(px)
+				// 消费者已放弃时不得阻塞在发送上，否则 goroutine 与其
+				// 占用的 sem 槽位、连接会滞留到进程退出。
+				select {
+				case ch <- result:
+				case <-ctx.Done():
+				}
 			}(p)
 		}
 		wg.Wait()

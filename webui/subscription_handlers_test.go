@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -415,7 +416,7 @@ func (v *subscriptionRefreshFakeValidator) ValidateOne(storage.Proxy) (bool, tim
 	return false, 0, "", "", validator.RiskInfo{}
 }
 
-func (v *subscriptionRefreshFakeValidator) ValidateStream(proxies []storage.Proxy) <-chan validator.Result {
+func (v *subscriptionRefreshFakeValidator) ValidateStream(_ context.Context, proxies []storage.Proxy) <-chan validator.Result {
 	v.mu.Lock()
 	v.streams++
 	v.mu.Unlock()

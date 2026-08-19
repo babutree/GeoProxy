@@ -1,6 +1,7 @@
 package custom
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -553,7 +554,7 @@ func (v *blockingProxyValidator) ValidateOne(proxy storage.Proxy) (bool, time.Du
 	return true, 45 * time.Millisecond, testValidationExitIP, testValidationExitLocation, validator.UnknownRisk()
 }
 
-func (v *blockingProxyValidator) ValidateStream(proxies []storage.Proxy) <-chan validator.Result {
+func (v *blockingProxyValidator) ValidateStream(_ context.Context, proxies []storage.Proxy) <-chan validator.Result {
 	results := make(chan validator.Result, len(proxies))
 	snapshot := append([]storage.Proxy(nil), proxies...)
 	go func() {

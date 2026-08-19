@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"context"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -28,8 +29,9 @@ type healthStore interface {
 }
 
 // healthValidator 健康检查对验证器的最小依赖。
+// ctx 用于优雅关闭：StopBackground 取消在途批次，使消费者不必等完整批跑完。
 type healthValidator interface {
-	ValidateStream(proxies []storage.Proxy) <-chan validator.Result
+	ValidateStream(ctx context.Context, proxies []storage.Proxy) <-chan validator.Result
 }
 
 type healthCheckSummary struct {
@@ -62,6 +64,9 @@ type HealthChecker struct {
 	bgStop       chan struct{}
 	bgDone       chan struct{}
 	bgWake       chan struct{}
+	// bgCancel 取消在途批次的 ValidateStream。StopBackground 必须先取消再等
+	// bgDone：否则一批 6000 节点的验证会让优雅关闭挂住数十秒。
+	bgCancel context.CancelFunc
 }
 
 func NewHealthChecker(s *storage.Storage, v *validator.Validator, cfg *config.Config) *HealthChecker {
@@ -131,6 +136,12 @@ func (hc *HealthChecker) backgroundStartCount() int {
 
 // RunOnce 执行一次健康检查；若已有检查在进行则跳过。
 func (hc *HealthChecker) RunOnce() {
+	hc.runOnceWithContext(context.Background())
+}
+
+// runOnceWithContext 执行一轮检查；ctx 取消时在途批次立即停止派发新探测，
+// 已在途的单节点探测由其自身超时收敛（见 validator.ValidateStream 的说明）。
+func (hc *HealthChecker) runOnceWithContext(ctx context.Context) {
 	if !hc.running.CompareAndSwap(false, true) {
 		log.Println("[health] 上一次检查仍在进行，跳过本次")
 		return
@@ -168,9 +179,14 @@ func (hc *HealthChecker) RunOnce() {
 
 	log.Printf("[health] 检查 %d 个代理", len(proxies))
 
-	summary := hc.checkBatchWithValidator(proxies, validate)
+	summary := hc.checkBatchWithValidator(ctx, proxies, validate)
 
 	elapsed := time.Since(start)
+	if ctx.Err() != nil {
+		log.Printf("[health] 已取消: 验证%d 有效%d 更新%d 禁用%d 策略禁用%d 耗时%v",
+			len(proxies), summary.valid, summary.updated, summary.disabled, summary.policyDisabled, elapsed)
+		return
+	}
 	log.Printf("[health] 完成: 验证%d 有效%d 更新%d 禁用%d 策略禁用%d 耗时%v",
 		len(proxies), summary.valid, summary.updated, summary.disabled, summary.policyDisabled, elapsed)
 }
@@ -178,15 +194,15 @@ func (hc *HealthChecker) RunOnce() {
 // checkBatch 消费本批验证结果；禁用统计只采用存储写入返回的权威状态。
 func (hc *HealthChecker) checkBatch(proxies []storage.Proxy) healthCheckSummary {
 	_, validate := hc.snapshots()
-	return hc.checkBatchWithValidator(proxies, validate)
+	return hc.checkBatchWithValidator(context.Background(), proxies, validate)
 }
 
-func (hc *HealthChecker) checkBatchWithValidator(proxies []storage.Proxy, validate healthValidator) healthCheckSummary {
+func (hc *HealthChecker) checkBatchWithValidator(ctx context.Context, proxies []storage.Proxy, validate healthValidator) healthCheckSummary {
 	var summary healthCheckSummary
 	if validate == nil {
 		return summary
 	}
-	for result := range validate.ValidateStream(proxies) {
+	for result := range validate.ValidateStream(ctx, proxies) {
 		identity := storage.RouteIdentityFromProxy(result.Proxy)
 		observation := storage.ExitObservation{
 			ExitIP:          result.ExitIP,
@@ -247,9 +263,13 @@ func (hc *HealthChecker) StartBackground() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	wake := make(chan struct{}, 1)
+	// 后台批次共享一个可取消 ctx：StopBackground 取消它，让在途 ValidateStream
+	// 立即停止派发新探测，优雅关闭不必等整批（最多 6000 节点）跑完。
+	ctx, cancel := context.WithCancel(context.Background())
 	hc.bgStop = stop
 	hc.bgDone = done
 	hc.bgWake = wake
+	hc.bgCancel = cancel
 	hc.bgMu.Unlock()
 
 	go func() {
@@ -259,7 +279,7 @@ func (hc *HealthChecker) StartBackground() {
 			timer := time.NewTimer(interval)
 			select {
 			case <-timer.C:
-				hc.RunOnce()
+				hc.runOnceWithContext(ctx)
 			case <-wake:
 				if !timer.Stop() {
 					<-timer.C
@@ -284,6 +304,8 @@ func (hc *HealthChecker) backgroundInterval() time.Duration {
 }
 
 // StopBackground 停止后台定时器（测试与优雅关闭用）；未启动时直接返回。
+// 先取消在途批次再等循环退出：若只 close(stop)，正在跑的 RunOnce 会把关闭
+// 阻塞到整批验证结束（6000 节点规模下可达数十秒）。
 func (hc *HealthChecker) StopBackground() {
 	hc.bgMu.Lock()
 	if !hc.bgStarted {
@@ -292,12 +314,17 @@ func (hc *HealthChecker) StopBackground() {
 	}
 	stop := hc.bgStop
 	done := hc.bgDone
+	cancel := hc.bgCancel
 	hc.bgStarted = false
 	hc.bgStop = nil
 	hc.bgDone = nil
 	hc.bgWake = nil
+	hc.bgCancel = nil
 	hc.bgMu.Unlock()
 
+	if cancel != nil {
+		cancel()
+	}
 	close(stop)
 	<-done
 }
