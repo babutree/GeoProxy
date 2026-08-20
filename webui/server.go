@@ -522,29 +522,54 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	password := r.FormValue("password")
-	if !webUIPasswordMatches(password, s.configSnapshot().WebUIPasswordHash) {
+	matched, needsUpgrade := webUIPasswordMatches(password, s.configSnapshot().WebUIPasswordHash)
+	if !matched {
 		recordLoginFailure(r, now)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, loginHTMLWithError)
 		return
 	}
 	recordLoginSuccess(r)
+	// 存量无盐 SHA-256 哈希在此刻透明升级为加盐 PBKDF2：登录成功是唯一能同时
+	// 拿到明文与既有哈希的时机。升级失败只记日志，不影响本次登录——
+	// 用户凭据是对的，不该因为一次落盘失败被挡在门外。
+	if needsUpgrade {
+		s.upgradeWebUIPasswordHash(password)
+	}
 	token := newSession()
 	http.SetCookie(w, sessionCookie(r, token))
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func webUIPasswordMatches(password, encodedHash string) bool {
-	if len(encodedHash) != sha256.Size*2 {
-		return false
+// webUIPasswordMatches 校验 WebUI 登录密码，返回 (匹配, 需要升级哈希)。
+// 具体的常量时间比较与 PBKDF2/存量 SHA-256 分派在 config.VerifyWebUIPassword。
+func webUIPasswordMatches(password, encodedHash string) (matched, needsUpgrade bool) {
+	return config.VerifyWebUIPassword(password, encodedHash)
+}
+
+// upgradeWebUIPasswordHash 把存量无盐 SHA-256 登录哈希重写为加盐 PBKDF2。
+// 只在密码已校验通过后调用。任何一步失败都只记日志：升级是尽力而为的加固，
+// 不能让它影响已经合法的登录。
+func (s *Server) upgradeWebUIPasswordHash(plain string) {
+	hashed, err := config.HashWebUIPassword(plain)
+	if err != nil {
+		log.Printf("[webui] 登录密码哈希升级失败（继续使用存量哈希）: %v", err)
+		return
 	}
-	expected := make([]byte, sha256.Size)
-	n, err := hex.Decode(expected, []byte(encodedHash))
-	if err != nil || n != sha256.Size {
-		return false
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	// 并发登录可能已经升级过；此时不再重复写盘。
+	if !strings.HasPrefix(s.cfg.WebUIPasswordHash, config.WebUIPasswordHashScheme+"$") {
+		newCfg := *s.cfg
+		newCfg.WebUIPasswordHash = hashed
+		if err := configSave(&newCfg); err != nil {
+			log.Printf("[webui] 登录密码哈希升级落盘失败（继续使用存量哈希）: %v", err)
+			return
+		}
+		s.cfg = &newCfg
+		log.Println("[webui] 登录密码哈希已升级为加盐 PBKDF2")
 	}
-	actual := sha256.Sum256([]byte(password))
-	return subtle.ConstantTimeCompare(actual[:], expected) == 1
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

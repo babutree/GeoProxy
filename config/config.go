@@ -207,6 +207,11 @@ var (
 	cfgMu     sync.RWMutex
 )
 
+// passwordHash 是代理认证密码的哈希。
+//
+// 这里刻意保留无盐 SHA-256，不跟随 WebUI 登录密码升级为 PBKDF2，理由见
+// password.go 顶部说明：代理认证在每个请求/连接上校验（PBKDF2 会瘫痪网关），
+// 且代理密码明文按设计与哈希同存于 config.json（强化哈希保护不了任何东西）。
 func passwordHash(plain string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(plain)))
 }
@@ -322,7 +327,13 @@ func bootstrapCredentials(cfg *Config) {
 	info := &FirstBootInfo{}
 	if cfg.WebUIPasswordHash == "" {
 		info.WebUIPassword = generateCredential()
-		cfg.WebUIPasswordHash = passwordHash(info.WebUIPassword)
+		// WebUI 登录密码只存哈希，用加盐 PBKDF2（见 password.go 的作用域说明）。
+		hashed, err := HashWebUIPassword(info.WebUIPassword)
+		if err != nil {
+			// 首启无法生成凭据必须显式失败：静默降级会让用户被永久锁在外面。
+			panic(fmt.Sprintf("hash bootstrap webui password: %v", err))
+		}
+		cfg.WebUIPasswordHash = hashed
 	}
 	if cfg.ProxyAuthPasswordHash == "" {
 		if cfg.ProxyAuthUsername == "" {
@@ -566,13 +577,6 @@ func envOrDefault(key string, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-func hashIfSet(value string) string {
-	if value == "" {
-		return ""
-	}
-	return passwordHash(value)
 }
 
 func envPort(key string, defaultValue string) string {

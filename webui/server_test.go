@@ -407,43 +407,53 @@ func TestLoginRateLimitLocksRepeatedFailures(t *testing.T) {
 // TestWebUIPasswordComparisonUsesConstantTimePrimitive 锁定登录密码比较的
 // 安全原语：行为测试无法可靠区分恒定时间与普通比较，因此检查生产函数
 // 明确调用 crypto/subtle.ConstantTimeCompare。
+//
+// 比较逻辑随 PBKDF2 升级迁到 config/password.go（PBKDF2 与存量 SHA-256
+// 两条分支都必须恒定时间），本守卫跟随它到新位置。
 func TestWebUIPasswordComparisonUsesConstantTimePrimitive(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller() failed")
 	}
+	passwordFile := filepath.Join(filepath.Dir(filepath.Dir(testFile)), "config", "password.go")
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(testFile), "server.go"), nil, 0)
+	file, err := parser.ParseFile(fset, passwordFile, nil, 0)
 	if err != nil {
-		t.Fatalf("parse server.go: %v", err)
+		t.Fatalf("parse config/password.go: %v", err)
 	}
-	var matcher *ast.FuncDecl
+
+	// PBKDF2 与存量 SHA-256 两条校验路径都必须用恒定时间比较：
+	// 任何一条退化成 == 或 bytes.Equal 都会重新引入时序侧信道。
+	wantConstantTime := map[string]bool{
+		"verifyPBKDF2":       false,
+		"verifyLegacySHA256": false,
+	}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == "webUIPasswordMatches" {
-			matcher = fn
-			break
-		}
-	}
-	if matcher == nil {
-		t.Fatal("webUIPasswordMatches helper is missing")
-	}
-	constantTimeCall := false
-	ast.Inspect(matcher.Body, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
 		if !ok {
-			return true
+			continue
 		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && selector.Sel.Name == "ConstantTimeCompare" {
-			if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "subtle" {
-				constantTimeCall = true
+		if _, tracked := wantConstantTime[fn.Name.Name]; !tracked {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if ok && selector.Sel.Name == "ConstantTimeCompare" {
+				if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "subtle" {
+					wantConstantTime[fn.Name.Name] = true
+				}
+			}
+			return true
+		})
+	}
+	for name, found := range wantConstantTime {
+		if !found {
+			t.Fatalf("%s must call subtle.ConstantTimeCompare", name)
 		}
-		return true
-	})
-	if !constantTimeCall {
-		t.Fatal("webUIPasswordMatches must call subtle.ConstantTimeCompare")
 	}
 }
 
@@ -464,8 +474,14 @@ func TestWebUIPasswordMatchesRejectsMalformedOrWrongLengthHash(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := webUIPasswordMatches(tt.password, tt.hash); got != tt.want {
+			got, needsUpgrade := webUIPasswordMatches(tt.password, tt.hash)
+			if got != tt.want {
 				t.Fatalf("webUIPasswordMatches() = %v, want %v", got, tt.want)
+			}
+			// 存量无盐 SHA-256 校验通过时必须请求升级；失败时绝不能请求升级
+			// （否则一次错误尝试就会改写已存储的凭据）。
+			if needsUpgrade != tt.want {
+				t.Fatalf("webUIPasswordMatches() needsUpgrade = %v, want %v for a legacy SHA-256 hash", needsUpgrade, tt.want)
 			}
 		})
 	}
